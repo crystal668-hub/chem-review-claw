@@ -4,7 +4,14 @@ ARG PYTHON_VERSION=3.11
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl tini \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        tini \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
@@ -30,4 +37,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=5 \
   CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["conda", "run", "--no-capture-output", "-n", "mineru", "mineru-api", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["mineru-api", "--host", "0.0.0.0", "--port", "8000"]
