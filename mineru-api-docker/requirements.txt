@@ -6,3 +6,4 @@ torch==2.11.0
 torchvision==0.26.0
 transformers==4.57.6
 shapely==2.1.2
+albumentations==2.0.8
