@@ -12,6 +12,23 @@ The active service is a standalone Docker container, not a Compose stack:
 - Published port: `0.0.0.0:8070 -> 8070/tcp`
 - OpenClaw gateway env: `GROBID_URL=http://localhost:8070`
 
+## Service management
+
+A user-level systemd unit is installed at:
+
+- `~/.config/systemd/user/grobid-docker.service`
+
+Useful commands:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now grobid-docker.service
+systemctl --user restart grobid-docker.service
+systemctl --user status grobid-docker.service
+```
+
+The OpenClaw gateway now has a user-level drop-in ordering it after `grobid-docker.service`.
+
 ## Quick checks
 
 Health:
@@ -78,4 +95,4 @@ curl -fsS http://127.0.0.1:8070/api/version
 - The current container publishes on `0.0.0.0:8070`, not loopback-only. If you want it local-only, recreate it with `-p 127.0.0.1:8070:8070`.
 - The service has already been verified with real API calls against both `/api/processHeaderDocument` and `/api/processFulltextDocument`.
 - The current shell may still need `sg docker -c ...` until group membership refreshes in a new login session.
-- If you later want parity with the MinerU setup, the next step would be to wrap this container in a dedicated user-level systemd unit or move it into a small Compose stack.
+- This deployment is now wrapped by a dedicated user-level systemd unit so it can be managed with the same workflow as the MinerU Docker service.
