@@ -9,13 +9,27 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     environment:
-      NO_PROXY: 127.0.0.1,localhost,::1
-      no_proxy: 127.0.0.1,localhost,::1
+      NO_PROXY: 127.0.0.1,localhost,::1,host.docker.internal
+      no_proxy: 127.0.0.1,localhost,::1,host.docker.internal
+      HTTP_PROXY: http://host.docker.internal:10090
+      HTTPS_PROXY: http://host.docker.internal:10090
+      http_proxy: http://host.docker.internal:10090
+      https_proxy: http://host.docker.internal:10090
       HF_HOME: /models/huggingface
+      HUGGINGFACE_HUB_CACHE: /models/huggingface/hub
       TRANSFORMERS_CACHE: /models/huggingface
+      MODELSCOPE_CACHE: /models/modelscope
       XDG_CACHE_HOME: /models/xdg-cache
     volumes:
-      - mineru-model-cache:/models
+      - type: bind
+        source: /home/dministrator/.cache/huggingface
+        target: /models/huggingface
+      - type: bind
+        source: /home/dministrator/.cache/modelscope
+        target: /models/modelscope
+      - type: volume
+        source: mineru-xdg-cache
+        target: /models/xdg-cache
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 30s
@@ -25,4 +39,4 @@ services:
     gpus: all
 
 volumes:
-  mineru-model-cache:
+  mineru-xdg-cache:
