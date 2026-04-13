@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -10,8 +11,10 @@ import random
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -22,10 +25,27 @@ DEFAULT_BENCHMARK_ROOT = Path("/home/dministrator/.openclaw/benchmarks")
 DEFAULT_CHEMQA_ROOT = Path("/home/dministrator/.openclaw/skills/chemqa-review")
 DEFAULT_OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 DEFAULT_OUTPUT_DIR = DEFAULT_WORKSPACE / "state" / "benchmark-runs"
-DEFAULT_SINGLE_AGENT = "debate-1"
-DEFAULT_JUDGE_AGENT = "debate-coordinator"
+DEFAULT_SINGLE_AGENT = "benchmark-single-web-off"
+DEFAULT_JUDGE_AGENT = "benchmark-judge"
 DEFAULT_CHEMQA_PRESET = "chemqa-review@1"
 DEFAULT_CHEMQA_MODEL_PROFILE = "chemqa-review-su8-coord-packy-reviewers"
+CHEMQA_SLOT_SETS = {
+    "chemqa_web_on": "A",
+    "chemqa_web_off": "B",
+}
+BASELINE_AGENT_IDS = {
+    "single_llm_web_on": "benchmark-single-web-on",
+    "single_llm_web_off": "benchmark-single-web-off",
+}
+JUDGE_AGENT_ID = "benchmark-judge"
+CHEMQA_WORKSPACE_ROOTS = {
+    "A": Path.home() / ".openclaw" / "debateclaw" / "workspacesA",
+    "B": Path.home() / ".openclaw" / "debateclaw" / "workspacesB",
+}
+BASELINE_WORKSPACE_ROOT = Path.home() / ".openclaw" / "benchmark" / "workspaces"
+SLOT_SENTINEL_FILENAME = ".debateclaw-slot.json"
+SLOT_SENTINEL_KIND = "debateclaw-slot-workspace"
+SLOT_SENTINEL_VERSION = 1
 SUBSET_ORDER = (
     "chembench",
     "frontierscience_Olympiad",
@@ -113,6 +133,7 @@ class GroupRecordResult:
     runner: str
     websearch: bool
     record_id: str
+    subset: str
     dataset: str
     source_file: str
     eval_kind: str
@@ -192,6 +213,134 @@ def slugify(value: str, *, limit: int = 64) -> str:
     return f"{cleaned[: limit - 9]}-{digest}".strip("-")
 
 
+def logical_slot_ids() -> tuple[str, ...]:
+    return ("debate-coordinator", "debate-1", "debate-2", "debate-3", "debate-4", "debate-5")
+
+
+def actual_slot_ids(slot_set: str) -> dict[str, str]:
+    normalized = str(slot_set).strip()
+    prefix = f"debate{normalized}"
+    return {
+        "debate-coordinator": f"{prefix}-coordinator",
+        "debate-1": f"{prefix}-1",
+        "debate-2": f"{prefix}-2",
+        "debate-3": f"{prefix}-3",
+        "debate-4": f"{prefix}-4",
+        "debate-5": f"{prefix}-5",
+    }
+
+
+def slot_role_map(slot_set: str) -> dict[str, str]:
+    slots = actual_slot_ids(slot_set)
+    return {
+        "debate-coordinator": slots["debate-coordinator"],
+        "proposer-1": slots["debate-1"],
+        "proposer-2": slots["debate-2"],
+        "proposer-3": slots["debate-3"],
+        "proposer-4": slots["debate-4"],
+        "proposer-5": slots["debate-5"],
+    }
+
+
+def slot_agents_template_path() -> Path:
+    return Path("/home/dministrator/.openclaw/skills/debateclaw-v1/scripts/templates/debate-slot-AGENTS.md")
+
+
+def load_slot_agents_template() -> str:
+    path = slot_agents_template_path()
+    return path.read_text(encoding="utf-8").rstrip() + "\n"
+
+
+def write_slot_sentinel(workspace: Path, *, slot_id: str, workspace_root: Path, last_session_id: str = "") -> None:
+    payload = {
+        "kind": SLOT_SENTINEL_KIND,
+        "version": SLOT_SENTINEL_VERSION,
+        "slot": slot_id,
+        "workspace": str(workspace.resolve()),
+        "workspace_root": str(workspace_root.resolve()),
+        "last_session_id": last_session_id,
+        "managed_by": "debateclaw",
+    }
+    (workspace / SLOT_SENTINEL_FILENAME).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def ensure_slot_workspace(workspace: Path, *, slot_id: str, workspace_root: Path) -> None:
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "AGENTS.md").write_text(load_slot_agents_template(), encoding="utf-8")
+    write_slot_sentinel(workspace, slot_id=slot_id, workspace_root=workspace_root)
+
+
+def ensure_basic_agent_dirs(*paths: Path) -> None:
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def upsert_agent_entry(payload: dict[str, Any], *, agent_id: str, workspace: Path, agent_dir: Path, model: str) -> None:
+    agents = payload.setdefault("agents", {})
+    entries = agents.setdefault("list", [])
+    if not isinstance(entries, list):
+        raise BenchmarkError("OpenClaw config agents.list is not a list")
+    normalized_workspace = str(workspace.resolve())
+    normalized_agent_dir = str(agent_dir.resolve())
+    for entry in entries:
+        if isinstance(entry, dict) and str(entry.get("id", "")) == agent_id:
+            entry["name"] = agent_id
+            entry["workspace"] = normalized_workspace
+            entry["agentDir"] = normalized_agent_dir
+            entry["model"] = model
+            return
+    entries.append(
+        {
+            "id": agent_id,
+            "name": agent_id,
+            "workspace": normalized_workspace,
+            "agentDir": normalized_agent_dir,
+            "model": model,
+        }
+    )
+
+
+def build_run_scoped_config_payload(
+    base_payload: dict[str, Any],
+    *,
+    group: ExperimentGroup,
+    single_agent_model: str,
+    judge_model: str,
+) -> dict[str, Any]:
+    payload = build_temp_openclaw_config_payload(base_payload, enable_websearch=group.websearch)
+    judge_workspace = BASELINE_WORKSPACE_ROOT / JUDGE_AGENT_ID
+    judge_agent_dir = Path.home() / ".openclaw" / "agents" / JUDGE_AGENT_ID / "agent"
+    ensure_basic_agent_dirs(judge_workspace, judge_agent_dir)
+    upsert_agent_entry(
+        payload,
+        agent_id=JUDGE_AGENT_ID,
+        workspace=judge_workspace,
+        agent_dir=judge_agent_dir,
+        model=judge_model,
+    )
+
+    if group.runner == "single_llm":
+        agent_id = BASELINE_AGENT_IDS.get(group.id, JUDGE_AGENT_ID)
+        workspace = BASELINE_WORKSPACE_ROOT / agent_id
+        agent_dir = Path.home() / ".openclaw" / "agents" / agent_id / "agent"
+        ensure_basic_agent_dirs(workspace, agent_dir)
+        upsert_agent_entry(payload, agent_id=agent_id, workspace=workspace, agent_dir=agent_dir, model=single_agent_model)
+        return payload
+
+    slot_set = CHEMQA_SLOT_SETS[group.id]
+    workspace_root = CHEMQA_WORKSPACE_ROOTS[slot_set]
+    slot_map = actual_slot_ids(slot_set)
+    for logical_slot_id, actual_slot_id in slot_map.items():
+        workspace = workspace_root / actual_slot_id
+        agent_dir = Path.home() / ".openclaw" / "agents" / actual_slot_id / "agent"
+        ensure_basic_agent_dirs(agent_dir)
+        ensure_slot_workspace(workspace, slot_id=actual_slot_id, workspace_root=workspace_root)
+        default_model = judge_model if logical_slot_id == "debate-coordinator" else single_agent_model
+        upsert_agent_entry(payload, agent_id=actual_slot_id, workspace=workspace, agent_dir=agent_dir, model=default_model)
+    return payload
+
+
 def run_subprocess(
     command: list[str],
     *,
@@ -223,18 +372,21 @@ def ensure_success(result: subprocess.CompletedProcess[str], command: list[str])
 
 def parse_json_stdout(result: subprocess.CompletedProcess[str], command: list[str]) -> Any:
     ensure_success(result, command)
-    stdout = result.stdout.strip()
-    if not stdout:
-        raise BenchmarkError(f"Empty stdout from command: {' '.join(command)}")
+    output = result.stdout.strip() or result.stderr.strip()
+    if not output:
+        raise BenchmarkError(f"Empty stdout/stderr from command: {' '.join(command)}")
     try:
-        return json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise BenchmarkError(
-            "JSON decode failed\n"
-            f"command: {' '.join(command)}\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
-        ) from exc
+        return json.loads(output)
+    except json.JSONDecodeError:
+        try:
+            return safe_json_extract(output)
+        except Exception as exc:
+            raise BenchmarkError(
+                "JSON decode failed\n"
+                f"command: {' '.join(command)}\n"
+                f"stdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}"
+            ) from exc
 
 
 def deep_copy_jsonish(value: Any) -> Any:
@@ -257,32 +409,63 @@ def build_temp_openclaw_config_payload(base_payload: dict[str, Any], *, enable_w
 
 
 class ConfigPool:
-    def __init__(self, *, base_config_path: Path, keep: bool) -> None:
+    def __init__(self, *, base_config_path: Path, output_root: Path) -> None:
         self.base_config_path = base_config_path
-        self.keep = keep
+        self.output_root = output_root
         self._payload = json.loads(base_config_path.read_text(encoding="utf-8"))
-        self._paths: dict[bool, Path] = {}
+        self._config_dir = output_root / "runtime-config"
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        self._group_paths: dict[str, Path] = {}
+        self._judge_path: Path | None = None
+        self._single_agent_model = self._discover_agent_model("debate-1") or "su8/gpt-5.4"
+        self._judge_model = self._discover_agent_model("debate-coordinator") or "su8/gpt-5.4"
 
-    def config_for_websearch(self, enabled: bool) -> Path:
-        if enabled in self._paths:
-            return self._paths[enabled]
-        payload = build_temp_openclaw_config_payload(self._payload, enable_websearch=enabled)
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f"openclaw-benchmark-{'web' if enabled else 'no-web'}-",
-            suffix=".json",
+    def _discover_agent_model(self, agent_id: str) -> str | None:
+        agents = ((self._payload.get("agents") or {}).get("list") or [])
+        for entry in agents:
+            if isinstance(entry, dict) and str(entry.get("id", "")) == agent_id:
+                model = str(entry.get("model") or "").strip()
+                if model:
+                    return model
+        return None
+
+    def config_for_group(self, group: ExperimentGroup) -> Path:
+        existing = self._group_paths.get(group.id)
+        if existing is not None:
+            return existing
+        payload = build_run_scoped_config_payload(
+            self._payload,
+            group=group,
+            single_agent_model=self._single_agent_model,
+            judge_model=self._judge_model,
         )
-        path = Path(temp_name)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-        self._paths[enabled] = path
+        path = self._config_dir / f"{group.id}-openclaw.json"
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        self._group_paths[group.id] = path
+        return path
+
+    def judge_config_path(self) -> Path:
+        if self._judge_path is not None:
+            return self._judge_path
+        judge_group = ExperimentGroup(
+            id="benchmark-judge-runtime",
+            label="benchmark judge runtime",
+            runner="single_llm",
+            websearch=False,
+        )
+        payload = build_run_scoped_config_payload(
+            self._payload,
+            group=judge_group,
+            single_agent_model=self._single_agent_model,
+            judge_model=self._judge_model,
+        )
+        path = self._config_dir / "benchmark-judge-openclaw.json"
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        self._judge_path = path
         return path
 
     def cleanup(self) -> None:
-        if self.keep:
-            return
-        for path in self._paths.values():
-            path.unlink(missing_ok=True)
+        return
 
 
 def discover_dataset_files(root: Path) -> list[Path]:
@@ -437,8 +620,21 @@ def safe_json_extract(text: str) -> Any:
     match = JSON_BLOCK_RE.search(stripped)
     if match:
         return json.loads(match.group(1))
-    start = min((idx for idx in [stripped.find("{"), stripped.find("[")] if idx != -1), default=-1)
-    if start != -1:
+
+    lines = stripped.splitlines()
+    for index, line in enumerate(lines):
+        candidate = line.lstrip()
+        if candidate.startswith("{") or candidate.startswith("["):
+            fragment = "\n".join(lines[index:]).strip()
+            for end in range(len(fragment), 0, -1):
+                try:
+                    return json.loads(fragment[:end])
+                except json.JSONDecodeError:
+                    continue
+            break
+
+    brace_positions = [idx for idx in (stripped.find("{"), stripped.rfind("{")) if idx != -1]
+    for start in brace_positions:
         fragment = stripped[start:]
         for end in range(len(fragment), 0, -1):
             try:
@@ -498,12 +694,14 @@ class JudgeClient:
         self.judge_agent = judge_agent
         self.timeout_seconds = timeout_seconds
         self.config_path = config_path
+        self._lock = threading.Lock()
 
     def evaluate_json(self, prompt: str) -> dict[str, Any]:
         session_id = f"benchmark-judge-{uuid.uuid4().hex[:12]}"
         command = [
             "openclaw",
             "agent",
+            "--local",
             "--agent",
             self.judge_agent,
             "--session-id",
@@ -518,8 +716,9 @@ class JudgeClient:
         ]
         env = os.environ.copy()
         env["OPENCLAW_CONFIG_PATH"] = str(self.config_path)
-        result = run_subprocess(command, env=env, timeout=self.timeout_seconds + 30)
-        payload = parse_json_stdout(result, command)
+        with self._lock:
+            result = run_subprocess(command, env=env, timeout=self.timeout_seconds + 30)
+            payload = parse_json_stdout(result, command)
         reply = summarize_payloads(list(((payload.get("result") or {}).get("payloads") or [])))
         parsed = safe_json_extract(reply)
         if not isinstance(parsed, dict):
@@ -533,11 +732,11 @@ class SingleLLMRunner:
         *,
         agent_id: str,
         timeout_seconds: int,
-        config_pool: ConfigPool,
+        config_path: Path,
     ) -> None:
         self.agent_id = agent_id
         self.timeout_seconds = timeout_seconds
-        self.config_pool = config_pool
+        self.config_path = config_path
 
     def run(self, record: BenchmarkRecord, group: ExperimentGroup) -> RunOutput:
         prompt = build_single_llm_prompt(record, websearch_enabled=group.websearch)
@@ -545,6 +744,7 @@ class SingleLLMRunner:
         command = [
             "openclaw",
             "agent",
+            "--local",
             "--agent",
             self.agent_id,
             "--session-id",
@@ -558,7 +758,7 @@ class SingleLLMRunner:
             "--json",
         ]
         env = os.environ.copy()
-        env["OPENCLAW_CONFIG_PATH"] = str(self.config_pool.config_for_websearch(group.websearch))
+        env["OPENCLAW_CONFIG_PATH"] = str(self.config_path)
         result = run_subprocess(command, env=env, timeout=self.timeout_seconds + 30)
         payload = parse_json_stdout(result, command)
         payloads = list(((payload.get("result") or {}).get("payloads") or []))
@@ -573,19 +773,22 @@ class ChemQARunner:
         *,
         chemqa_root: Path,
         timeout_seconds: int,
-        config_pool: ConfigPool,
+        config_path: Path,
+        slot_set: str,
         review_rounds: int | None,
         rebuttal_rounds: int | None,
         model_profile: str,
     ) -> None:
         self.chemqa_root = chemqa_root
         self.timeout_seconds = timeout_seconds
-        self.config_pool = config_pool
+        self.config_path = config_path
+        self.slot_set = slot_set
         self.review_rounds = review_rounds
         self.rebuttal_rounds = rebuttal_rounds
         self.model_profile = model_profile
         self.launch_script = chemqa_root / "scripts" / "launch_from_preset.py"
         self.collect_script = chemqa_root / "scripts" / "collect_artifacts.py"
+        self.runtime_dir = chemqa_root.parent / "debateclaw-v1" / "scripts"
 
     def _wait_for_terminal_status(self, run_id: str, *, timeout_seconds: int) -> dict[str, Any]:
         status_path = self.chemqa_root / "control" / "run-status" / f"{run_id}.json"
@@ -608,7 +811,7 @@ class ChemQARunner:
         if qa_result_path.is_file():
             return qa_result_path
 
-        protocol_dir = self.chemqa_root / "generated" / "clawteam-data" / "teams" / run_id
+        protocol_dir = self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id
         protocol_path = protocol_dir / "chemqa_review_protocol.yaml"
         if not protocol_path.is_file():
             raise BenchmarkError(
@@ -647,6 +850,12 @@ class ChemQARunner:
             run_id,
             "--model-profile",
             self.model_profile,
+            "--slot-set",
+            self.slot_set,
+            "--openclaw-config",
+            str(self.config_path),
+            "--runtime-dir",
+            str(self.runtime_dir),
             "--launch-mode",
             "run",
         ]
@@ -656,7 +865,7 @@ class ChemQARunner:
             command.extend(["--rebuttal-rounds", str(self.rebuttal_rounds)])
 
         env = os.environ.copy()
-        env["OPENCLAW_CONFIG_PATH"] = str(self.config_pool.config_for_websearch(group.websearch))
+        env["OPENCLAW_CONFIG_PATH"] = str(self.config_path)
         env["OPENCLAW_DEBATE_TRUSTED_PLUGINS"] = "duckduckgo" if group.websearch else "__none__"
         result = run_subprocess(command, env=env, cwd=self.chemqa_root, timeout=self.timeout_seconds)
         payload = parse_json_stdout(result, command)
@@ -1010,40 +1219,209 @@ def evaluate_answer(record: BenchmarkRecord, answer_text: str, *, judge: JudgeCl
     return evaluate_generic_semantic(record, answer_text, judge=judge)
 
 
+def aggregate_bucket(items: list[GroupRecordResult]) -> dict[str, Any]:
+    return {
+        "count": len(items),
+        "pass_count": sum(1 for item in items if item.evaluation["passed"]),
+        "avg_score": sum(float(item.evaluation["score"]) for item in items) / len(items),
+        "avg_normalized_score": sum(float(item.evaluation["normalized_score"]) for item in items) / len(items),
+        "avg_elapsed_seconds": sum(float(item.elapsed_seconds) for item in items) / len(items),
+    }
+
+
+
 def aggregate_results(results: list[GroupRecordResult]) -> dict[str, Any]:
     grouped: dict[str, list[GroupRecordResult]] = {}
     for item in results:
         grouped.setdefault(item.group_id, []).append(item)
 
     summary_groups: dict[str, Any] = {}
+    summary_group_subset: dict[str, dict[str, Any]] = {}
     for group_id, items in grouped.items():
         by_eval_kind: dict[str, list[GroupRecordResult]] = {}
+        by_subset: dict[str, list[GroupRecordResult]] = {}
         for item in items:
             by_eval_kind.setdefault(item.eval_kind, []).append(item)
+            by_subset.setdefault(item.subset, []).append(item)
+        bucket = aggregate_bucket(items)
         summary_groups[group_id] = {
             "group_label": items[0].group_label,
             "runner": items[0].runner,
             "websearch": items[0].websearch,
-            "count": len(items),
-            "pass_count": sum(1 for item in items if item.evaluation["passed"]),
-            "avg_score": sum(float(item.evaluation["score"]) for item in items) / len(items),
-            "avg_normalized_score": sum(float(item.evaluation["normalized_score"]) for item in items) / len(items),
-            "avg_elapsed_seconds": sum(float(item.elapsed_seconds) for item in items) / len(items),
+            **bucket,
             "by_eval_kind": {
                 eval_kind: {
-                    "count": len(eval_items),
-                    "pass_count": sum(1 for item in eval_items if item.evaluation["passed"]),
-                    "avg_score": sum(float(item.evaluation["score"]) for item in eval_items) / len(eval_items),
-                    "avg_normalized_score": sum(float(item.evaluation["normalized_score"]) for item in eval_items) / len(eval_items),
+                    key: value
+                    for key, value in aggregate_bucket(eval_items).items()
                 }
                 for eval_kind, eval_items in by_eval_kind.items()
             },
+            "by_subset": {
+                subset: {
+                    key: value
+                    for key, value in aggregate_bucket(subset_items).items()
+                }
+                for subset, subset_items in by_subset.items()
+            },
         }
+        for subset, subset_items in by_subset.items():
+            summary_group_subset[f"{group_id}::{subset}"] = {
+                "group_id": group_id,
+                "group_label": items[0].group_label,
+                "runner": items[0].runner,
+                "websearch": items[0].websearch,
+                "subset": subset,
+                **aggregate_bucket(subset_items),
+            }
 
     return {
         "group_order": list(grouped.keys()),
         "groups": summary_groups,
+        "group_subset": summary_group_subset,
     }
+
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({name: row.get(name, "") for name in fieldnames})
+
+
+
+def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summary: dict[str, Any], group_ids: list[str]) -> None:
+    summary_rows = []
+    for group_id in group_ids:
+        group_summary = summary["groups"].get(group_id)
+        if not group_summary:
+            continue
+        summary_rows.append(
+            {
+                "group_id": group_id,
+                "group_label": group_summary["group_label"],
+                "runner": group_summary["runner"],
+                "websearch": group_summary["websearch"],
+                "count": group_summary["count"],
+                "pass_count": group_summary["pass_count"],
+                "avg_score": group_summary["avg_score"],
+                "avg_normalized_score": group_summary["avg_normalized_score"],
+                "avg_elapsed_seconds": group_summary["avg_elapsed_seconds"],
+            }
+        )
+    write_csv(
+        output_root / "summary_by_group.csv",
+        summary_rows,
+        [
+            "group_id",
+            "group_label",
+            "runner",
+            "websearch",
+            "count",
+            "pass_count",
+            "avg_score",
+            "avg_normalized_score",
+            "avg_elapsed_seconds",
+        ],
+    )
+
+    subset_rows = [summary["group_subset"][key] for key in sorted(summary.get("group_subset", {}))]
+    write_csv(
+        output_root / "summary_by_group_and_subset.csv",
+        subset_rows,
+        [
+            "group_id",
+            "group_label",
+            "runner",
+            "websearch",
+            "subset",
+            "count",
+            "pass_count",
+            "avg_score",
+            "avg_normalized_score",
+            "avg_elapsed_seconds",
+        ],
+    )
+
+    per_record_long_rows = []
+    for item in results:
+        per_record_long_rows.append(
+            {
+                "record_id": item.record_id,
+                "subset": item.subset,
+                "dataset": item.dataset,
+                "eval_kind": item.eval_kind,
+                "source_file": item.source_file,
+                "group_id": item.group_id,
+                "group_label": item.group_label,
+                "runner": item.runner,
+                "websearch": item.websearch,
+                "score": item.evaluation["score"],
+                "max_score": item.evaluation["max_score"],
+                "normalized_score": item.evaluation["normalized_score"],
+                "passed": item.evaluation["passed"],
+                "primary_metric": item.evaluation["primary_metric"],
+                "elapsed_seconds": item.elapsed_seconds,
+            }
+        )
+    write_csv(
+        output_root / "per_record_long.csv",
+        per_record_long_rows,
+        [
+            "record_id",
+            "subset",
+            "dataset",
+            "eval_kind",
+            "source_file",
+            "group_id",
+            "group_label",
+            "runner",
+            "websearch",
+            "score",
+            "max_score",
+            "normalized_score",
+            "passed",
+            "primary_metric",
+            "elapsed_seconds",
+        ],
+    )
+
+    grouped_by_record: dict[str, dict[str, GroupRecordResult]] = {}
+    record_meta: dict[str, GroupRecordResult] = {}
+    for item in results:
+        grouped_by_record.setdefault(item.record_id, {})[item.group_id] = item
+        record_meta[item.record_id] = item
+    wide_rows = []
+    for record_id in sorted(grouped_by_record):
+        meta = record_meta[record_id]
+        row: dict[str, Any] = {
+            "record_id": record_id,
+            "subset": meta.subset,
+            "dataset": meta.dataset,
+            "eval_kind": meta.eval_kind,
+            "source_file": meta.source_file,
+        }
+        by_group = grouped_by_record[record_id]
+        for group_id in group_ids:
+            result = by_group.get(group_id)
+            row[f"{group_id}_score"] = "" if result is None else result.evaluation["score"]
+            row[f"{group_id}_normalized_score"] = "" if result is None else result.evaluation["normalized_score"]
+            row[f"{group_id}_passed"] = "" if result is None else result.evaluation["passed"]
+            row[f"{group_id}_elapsed_seconds"] = "" if result is None else result.elapsed_seconds
+        wide_rows.append(row)
+    wide_fieldnames = ["record_id", "subset", "dataset", "eval_kind", "source_file"]
+    for group_id in group_ids:
+        wide_fieldnames.extend(
+            [
+                f"{group_id}_score",
+                f"{group_id}_normalized_score",
+                f"{group_id}_passed",
+                f"{group_id}_elapsed_seconds",
+            ]
+        )
+    write_csv(output_root / "per_record_wide.csv", wide_rows, wide_fieldnames)
 
 
 def select_group_ids(raw: str) -> list[str]:
@@ -1109,6 +1487,69 @@ def save_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+
+def run_group(
+    *,
+    group: ExperimentGroup,
+    records: list[BenchmarkRecord],
+    output_root: Path,
+    single_timeout: int,
+    chemqa_timeout: int,
+    judge: JudgeClient,
+    config_path: Path,
+    single_agent: str,
+    chemqa_root: Path,
+    chemqa_model_profile: str,
+    review_rounds: int | None,
+    rebuttal_rounds: int | None,
+) -> list[GroupRecordResult]:
+    if group.runner == "chemqa":
+        runner = ChemQARunner(
+            chemqa_root=chemqa_root,
+            timeout_seconds=chemqa_timeout,
+            config_path=config_path,
+            slot_set=CHEMQA_SLOT_SETS[group.id],
+            review_rounds=review_rounds,
+            rebuttal_rounds=rebuttal_rounds,
+            model_profile=chemqa_model_profile,
+        )
+    else:
+        runner = SingleLLMRunner(
+            agent_id=single_agent,
+            timeout_seconds=single_timeout,
+            config_path=config_path,
+        )
+
+    group_results: list[GroupRecordResult] = []
+    for record in records:
+        started = time.time()
+        run_output = runner.run(record, group)
+        evaluation = evaluate_answer(record, run_output.text, judge=judge)
+        elapsed = time.time() - started
+        entry = GroupRecordResult(
+            group_id=group.id,
+            group_label=group.label,
+            runner=group.runner,
+            websearch=group.websearch,
+            record_id=record.record_id,
+            subset=classify_subset(record),
+            dataset=record.dataset,
+            source_file=record.source_file,
+            eval_kind=record.eval_kind,
+            prompt=record.prompt,
+            reference_answer=record.reference_answer,
+            answer_text=run_output.text,
+            evaluation=asdict(evaluation),
+            runner_meta=run_output.runner_meta,
+            raw=run_output.raw,
+            elapsed_seconds=elapsed,
+        )
+        group_results.append(entry)
+        save_json(output_root / "per-record" / group.id / f"{slugify(record.record_id)}.json", asdict(entry))
+    return group_results
+
+
+
 def main() -> int:
     args = parse_args()
     group_ids = select_group_ids(args.groups)
@@ -1139,59 +1580,44 @@ def main() -> int:
     output_root = Path(args.output_dir).expanduser().resolve() / f"benchmark-{now_stamp()}"
     ensure_dir(output_root)
 
-    config_pool = ConfigPool(base_config_path=Path(args.openclaw_config).expanduser().resolve(), keep=args.keep_temp_configs)
+    config_pool = ConfigPool(base_config_path=Path(args.openclaw_config).expanduser().resolve(), output_root=output_root)
     judge = JudgeClient(
         judge_agent=args.judge_agent,
         timeout_seconds=args.judge_timeout,
-        config_path=config_pool.config_for_websearch(False),
-    )
-    single_runner = SingleLLMRunner(
-        agent_id=args.single_agent,
-        timeout_seconds=args.single_timeout,
-        config_pool=config_pool,
-    )
-    chemqa_runner = ChemQARunner(
-        chemqa_root=Path(args.chemqa_root).expanduser().resolve(),
-        timeout_seconds=args.chemqa_timeout,
-        config_pool=config_pool,
-        review_rounds=args.review_rounds,
-        rebuttal_rounds=args.rebuttal_rounds,
-        model_profile=args.chemqa_model_profile,
+        config_path=config_pool.judge_config_path(),
     )
 
-    results: list[GroupRecordResult] = []
-    try:
+    group_results: dict[str, list[GroupRecordResult]] = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(group_ids))) as executor:
+        future_map = {}
         for group_id in group_ids:
             group = EXPERIMENT_GROUPS[group_id]
-            for record in records:
-                started = time.time()
-                if group.runner == "chemqa":
-                    run_output = chemqa_runner.run(record, group)
-                else:
-                    run_output = single_runner.run(record, group)
-                evaluation = evaluate_answer(record, run_output.text, judge=judge)
-                elapsed = time.time() - started
-                entry = GroupRecordResult(
-                    group_id=group.id,
-                    group_label=group.label,
-                    runner=group.runner,
-                    websearch=group.websearch,
-                    record_id=record.record_id,
-                    dataset=record.dataset,
-                    source_file=record.source_file,
-                    eval_kind=record.eval_kind,
-                    prompt=record.prompt,
-                    reference_answer=record.reference_answer,
-                    answer_text=run_output.text,
-                    evaluation=asdict(evaluation),
-                    runner_meta=run_output.runner_meta,
-                    raw=run_output.raw,
-                    elapsed_seconds=elapsed,
-                )
-                results.append(entry)
-                save_json(output_root / "per-record" / group.id / f"{slugify(record.record_id)}.json", asdict(entry))
-    finally:
-        config_pool.cleanup()
+            config_path = config_pool.config_for_group(group)
+            single_agent = BASELINE_AGENT_IDS.get(group.id, args.single_agent)
+            future = executor.submit(
+                run_group,
+                group=group,
+                records=records,
+                output_root=output_root,
+                single_timeout=args.single_timeout,
+                chemqa_timeout=args.chemqa_timeout,
+                judge=judge,
+                config_path=config_path,
+                single_agent=single_agent,
+                chemqa_root=Path(args.chemqa_root).expanduser().resolve(),
+                chemqa_model_profile=args.chemqa_model_profile,
+                review_rounds=args.review_rounds,
+                rebuttal_rounds=args.rebuttal_rounds,
+            )
+            future_map[future] = group_id
+
+        for future in as_completed(future_map):
+            group_id = future_map[future]
+            group_results[group_id] = future.result()
+
+    results: list[GroupRecordResult] = []
+    for group_id in group_ids:
+        results.extend(group_results.get(group_id, []))
 
     summary = aggregate_results(results)
     payload = {
@@ -1209,6 +1635,25 @@ def main() -> int:
         "summary": summary,
     }
     save_json(output_root / "results.json", payload)
+    export_csv_reports(output_root, results, summary, group_ids)
+    save_json(
+        output_root / "runtime-manifest.json",
+        {
+            "groups": {
+                group_id: {
+                    "group": asdict(EXPERIMENT_GROUPS[group_id]),
+                    "config_path": str(config_pool.config_for_group(EXPERIMENT_GROUPS[group_id])),
+                    "slot_set": CHEMQA_SLOT_SETS.get(group_id),
+                    "single_agent": BASELINE_AGENT_IDS.get(group_id),
+                }
+                for group_id in group_ids
+            },
+            "judge": {
+                "agent": args.judge_agent,
+                "config_path": str(config_pool.judge_config_path()),
+            },
+        },
+    )
     print(json.dumps({"output_dir": str(output_root), "summary": summary}, indent=2, ensure_ascii=False))
     return 0
 
