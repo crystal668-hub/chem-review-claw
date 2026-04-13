@@ -393,6 +393,13 @@ def deep_copy_jsonish(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False))
 
 
+def unwrap_agent_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if isinstance(result, dict):
+        return result
+    return payload if isinstance(payload, dict) else {}
+
+
 def build_temp_openclaw_config_payload(base_payload: dict[str, Any], *, enable_websearch: bool) -> dict[str, Any]:
     payload = deep_copy_jsonish(base_payload)
     tools = payload.setdefault("tools", {})
@@ -719,7 +726,8 @@ class JudgeClient:
         with self._lock:
             result = run_subprocess(command, env=env, timeout=self.timeout_seconds + 30)
             payload = parse_json_stdout(result, command)
-        reply = summarize_payloads(list(((payload.get("result") or {}).get("payloads") or [])))
+        result_payload = unwrap_agent_payload(payload)
+        reply = summarize_payloads(list((result_payload.get("payloads") or [])))
         parsed = safe_json_extract(reply)
         if not isinstance(parsed, dict):
             raise BenchmarkError(f"Judge must return a JSON object, got: {reply}")
@@ -761,9 +769,10 @@ class SingleLLMRunner:
         env["OPENCLAW_CONFIG_PATH"] = str(self.config_path)
         result = run_subprocess(command, env=env, timeout=self.timeout_seconds + 30)
         payload = parse_json_stdout(result, command)
-        payloads = list(((payload.get("result") or {}).get("payloads") or []))
+        result_payload = unwrap_agent_payload(payload)
+        payloads = list((result_payload.get("payloads") or []))
         text = summarize_payloads(payloads)
-        runner_meta = deep_copy_jsonish((payload.get("result") or {}).get("meta") or {})
+        runner_meta = deep_copy_jsonish(result_payload.get("meta") or {})
         return RunOutput(text=text, raw=payload, runner_meta=runner_meta)
 
 
@@ -812,10 +821,20 @@ class ChemQARunner:
             return qa_result_path
 
         protocol_dir = self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id
-        protocol_path = protocol_dir / "chemqa_review_protocol.yaml"
-        if not protocol_path.is_file():
+        candidate_sources = [protocol_dir]
+        coordinator_slot = actual_slot_ids(self.slot_set)["debate-coordinator"]
+        coordinator_workspace = CHEMQA_WORKSPACE_ROOTS[self.slot_set] / coordinator_slot
+        if coordinator_workspace.is_dir():
+            candidate_sources.append(coordinator_workspace)
+
+        source_dir = None
+        for candidate in candidate_sources:
+            if (candidate / "chemqa_review_protocol.yaml").is_file() or (candidate / "chemqa_review_protocol.yml").is_file():
+                source_dir = candidate
+                break
+        if source_dir is None:
             raise BenchmarkError(
-                f"ChemQA run `{run_id}` finished without qa_result.json and protocol file was not found at {protocol_path}"
+                f"ChemQA run `{run_id}` finished without qa_result.json and no protocol file was found under {candidate_sources}"
             )
         artifact_dir.mkdir(parents=True, exist_ok=True)
         command = [
@@ -824,7 +843,7 @@ class ChemQARunner:
             "--skill-root",
             str(self.chemqa_root),
             "--source-dir",
-            str(protocol_dir),
+            str(source_dir),
             "--output-dir",
             str(artifact_dir),
         ]
