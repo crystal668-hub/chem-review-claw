@@ -171,6 +171,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rebuttal-rounds", type=int, help="ChemQA rebuttal rounds 覆盖值")
     parser.add_argument("--keep-temp-configs", action="store_true", help="保留临时 OpenClaw 配置文件")
     parser.add_argument("--list-datasets", action="store_true", help="列出可发现的数据集文件后退出")
+    parser.add_argument(
+        "--print-selected-records",
+        action="store_true",
+        help="打印本次实际选中的题目清单后退出",
+    )
     return parser.parse_args()
 
 
@@ -1078,6 +1083,23 @@ def print_dataset_listing(paths: list[Path]) -> None:
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+
+def print_selected_records(records: list[BenchmarkRecord]) -> None:
+    payload = [
+        {
+            "record_id": record.record_id,
+            "subset": classify_subset(record),
+            "dataset": record.dataset,
+            "eval_kind": record.eval_kind,
+            "source_file": record.source_file,
+            "prompt_preview": normalize_space(record.prompt)[:200],
+        }
+        for record in records
+    ]
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -1110,6 +1132,9 @@ def main() -> int:
     records = apply_offset_limit(selected_pool, offset=args.offset, limit=args.limit)
     if not records:
         raise BenchmarkError("No benchmark records selected.")
+    if args.print_selected_records:
+        print_selected_records(records)
+        return 0
 
     output_root = Path(args.output_dir).expanduser().resolve() / f"benchmark-{now_stamp()}"
     ensure_dir(output_root)

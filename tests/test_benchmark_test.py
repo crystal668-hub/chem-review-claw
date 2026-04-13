@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 
@@ -137,6 +140,26 @@ Points: 0.5, Item: Second criterion
         self.assertEqual(2, counts["chembench"])
         self.assertEqual(2, counts["frontierscience_Olympiad"])
         self.assertEqual(2, counts["frontierscience_Research"])
+
+    def test_print_selected_records_outputs_json(self) -> None:
+        records = [
+            benchmark_test.BenchmarkRecord(
+                record_id="chem-1",
+                dataset="chembench",
+                source_file="/tmp/chembench.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="What is the answer?",
+                reference_answer="5",
+                payload={},
+            )
+        ]
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            benchmark_test.print_selected_records(records)
+        payload = json.loads(stream.getvalue())
+        self.assertEqual("chem-1", payload[0]["record_id"])
+        self.assertEqual("chembench", payload[0]["subset"])
+        self.assertEqual("chembench_open_ended", payload[0]["eval_kind"])
 
     def test_apply_offset_limit_preserves_existing_behavior(self) -> None:
         records = [
