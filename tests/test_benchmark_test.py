@@ -61,6 +61,99 @@ Points: 0.5, Item: Second criterion
         self.assertEqual(1.0, result.normalized_score)
         self.assertEqual(0.0, result.details["mae"])
 
+    def test_classify_subset(self) -> None:
+        chembench_record = benchmark_test.BenchmarkRecord(
+            record_id="c1",
+            dataset="chembench",
+            source_file="/tmp/chembench.jsonl",
+            eval_kind="chembench_open_ended",
+            prompt="Q",
+            reference_answer="A",
+            payload={},
+        )
+        olympiad_record = benchmark_test.BenchmarkRecord(
+            record_id="f1",
+            dataset="frontierscience",
+            source_file="/tmp/frontierscience.jsonl",
+            eval_kind="frontierscience_olympiad",
+            prompt="Q",
+            reference_answer="A",
+            payload={"track": "olympiad"},
+        )
+        research_record = benchmark_test.BenchmarkRecord(
+            record_id="f2",
+            dataset="frontierscience",
+            source_file="/tmp/frontierscience.jsonl",
+            eval_kind="frontierscience_research",
+            prompt="Q",
+            reference_answer="A",
+            payload={"track": "research"},
+        )
+        self.assertEqual("chembench", benchmark_test.classify_subset(chembench_record))
+        self.assertEqual("frontierscience_Olympiad", benchmark_test.classify_subset(olympiad_record))
+        self.assertEqual("frontierscience_Research", benchmark_test.classify_subset(research_record))
+
+    def test_sample_records_per_subset_draws_requested_count(self) -> None:
+        records = []
+        for idx in range(3):
+            records.append(
+                benchmark_test.BenchmarkRecord(
+                    record_id=f"chem-{idx}",
+                    dataset="chembench",
+                    source_file="/tmp/chembench.jsonl",
+                    eval_kind="chembench_open_ended",
+                    prompt="Q",
+                    reference_answer="A",
+                    payload={},
+                )
+            )
+            records.append(
+                benchmark_test.BenchmarkRecord(
+                    record_id=f"oly-{idx}",
+                    dataset="frontierscience",
+                    source_file="/tmp/frontierscience.jsonl",
+                    eval_kind="frontierscience_olympiad",
+                    prompt="Q",
+                    reference_answer="A",
+                    payload={"track": "olympiad"},
+                )
+            )
+            records.append(
+                benchmark_test.BenchmarkRecord(
+                    record_id=f"res-{idx}",
+                    dataset="frontierscience",
+                    source_file="/tmp/frontierscience.jsonl",
+                    eval_kind="frontierscience_research",
+                    prompt="Q",
+                    reference_answer="A",
+                    payload={"track": "research"},
+                )
+            )
+        sampled = benchmark_test.sample_records_per_subset(records, per_subset_count=2, seed=7)
+        self.assertEqual(6, len(sampled))
+        counts = {subset: 0 for subset in benchmark_test.SUBSET_ORDER}
+        for record in sampled:
+            counts[benchmark_test.classify_subset(record)] += 1
+        self.assertEqual(2, counts["chembench"])
+        self.assertEqual(2, counts["frontierscience_Olympiad"])
+        self.assertEqual(2, counts["frontierscience_Research"])
+
+    def test_apply_offset_limit_preserves_existing_behavior(self) -> None:
+        records = [
+            benchmark_test.BenchmarkRecord(
+                record_id=f"r{idx}",
+                dataset="chembench",
+                source_file="/tmp/demo.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="Q",
+                reference_answer="A",
+                payload={},
+            )
+            for idx in range(10)
+        ]
+        sliced = benchmark_test.apply_offset_limit(records, offset=3, limit=4)
+        self.assertEqual(["r3", "r4", "r5", "r6"], [record.record_id for record in sliced])
+
     def test_aggregate_results_groups_by_experiment(self) -> None:
         sample = [
             benchmark_test.GroupRecordResult(

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -25,6 +26,11 @@ DEFAULT_SINGLE_AGENT = "debate-1"
 DEFAULT_JUDGE_AGENT = "debate-coordinator"
 DEFAULT_CHEMQA_PRESET = "chemqa-review@1"
 DEFAULT_CHEMQA_MODEL_PROFILE = "chemqa-review-su8-coord-packy-reviewers"
+SUBSET_ORDER = (
+    "chembench",
+    "frontierscience_Olympiad",
+    "frontierscience_Research",
+)
 FINAL_ANSWER_RE = re.compile(r"^\s*FINAL\s+ANSWER\s*[:：-]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 NUMBER_RE = re.compile(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?")
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*\}|\[.*\])\s*```", re.DOTALL | re.IGNORECASE)
@@ -133,6 +139,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--datasets",
         help="仅运行指定数据集，逗号分隔；默认扫描 benchmarks/*/data/*.jsonl",
+    )
+    parser.add_argument(
+        "--random-count-per-subset",
+        type=int,
+        help="按子集随机抽样时，每个子集抽取多少题；当前支持 chembench / frontierscience_Olympiad / frontierscience_Research",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=0,
+        help="随机抽样的 seed，默认 0，便于复现",
     )
     parser.add_argument(
         "--files",
@@ -271,9 +288,8 @@ def dataset_name_from_file(path: Path) -> str:
     return path.parent.parent.name
 
 
-def load_records(paths: Iterable[Path], *, offset: int = 0, limit: int | None = None) -> list[BenchmarkRecord]:
+def load_records(paths: Iterable[Path]) -> list[BenchmarkRecord]:
     records: list[BenchmarkRecord] = []
-    seen = 0
     for path in paths:
         dataset = dataset_name_from_file(path)
         with path.open("r", encoding="utf-8") as handle:
@@ -282,9 +298,6 @@ def load_records(paths: Iterable[Path], *, offset: int = 0, limit: int | None = 
                 if not line:
                     continue
                 payload = json.loads(line)
-                if seen < offset:
-                    seen += 1
-                    continue
                 record_id = str(payload.get("id") or f"{dataset}-{len(records)}")
                 prompt = str(payload.get("prompt") or payload.get("problem") or payload.get("input") or payload.get("question") or "").strip()
                 if not prompt:
@@ -304,10 +317,56 @@ def load_records(paths: Iterable[Path], *, offset: int = 0, limit: int | None = 
                         payload=payload,
                     )
                 )
-                seen += 1
-                if limit is not None and len(records) >= limit:
-                    return records
     return records
+
+
+def classify_subset(record: BenchmarkRecord) -> str:
+    if record.dataset == "chembench":
+        return "chembench"
+    if record.dataset == "frontierscience":
+        track = str(record.payload.get("track") or "").strip().lower()
+        if track == "olympiad" or record.eval_kind == "frontierscience_olympiad":
+            return "frontierscience_Olympiad"
+        if track == "research" or record.eval_kind == "frontierscience_research":
+            return "frontierscience_Research"
+    return f"{record.dataset}:{record.eval_kind}"
+
+
+
+def sample_records_per_subset(records: list[BenchmarkRecord], *, per_subset_count: int, seed: int) -> list[BenchmarkRecord]:
+    if per_subset_count <= 0:
+        raise BenchmarkError("--random-count-per-subset 必须是正整数")
+
+    grouped: dict[str, list[BenchmarkRecord]] = {}
+    for record in records:
+        grouped.setdefault(classify_subset(record), []).append(record)
+
+    available_supported = [subset for subset in SUBSET_ORDER if grouped.get(subset)]
+    if not available_supported:
+        raise BenchmarkError("当前选定的数据范围内没有可用于按子集抽样的记录。")
+
+    rng = random.Random(seed)
+    sampled: list[BenchmarkRecord] = []
+    for subset in available_supported:
+        subset_records = grouped[subset]
+        if len(subset_records) < per_subset_count:
+            raise BenchmarkError(
+                f"子集 `{subset}` 仅有 {len(subset_records)} 题，无法随机抽取 {per_subset_count} 题。"
+            )
+        sampled.extend(rng.sample(subset_records, per_subset_count))
+    return sampled
+
+
+
+def apply_offset_limit(records: list[BenchmarkRecord], *, offset: int = 0, limit: int | None = None) -> list[BenchmarkRecord]:
+    if offset < 0:
+        raise BenchmarkError("--offset 不能为负数")
+    sliced = records[offset:]
+    if limit is not None:
+        if limit < 0:
+            raise BenchmarkError("--limit 不能为负数")
+        sliced = sliced[:limit]
+    return sliced
 
 
 def normalize_space(text: str) -> str:
@@ -1038,7 +1097,17 @@ def main() -> int:
     if not dataset_files:
         raise BenchmarkError("No benchmark files discovered.")
 
-    records = load_records(dataset_files, offset=args.offset, limit=args.limit)
+    all_records = load_records(dataset_files)
+    if args.random_count_per_subset is not None:
+        selected_pool = sample_records_per_subset(
+            all_records,
+            per_subset_count=args.random_count_per_subset,
+            seed=args.random_seed,
+        )
+    else:
+        selected_pool = all_records
+
+    records = apply_offset_limit(selected_pool, offset=args.offset, limit=args.limit)
     if not records:
         raise BenchmarkError("No benchmark records selected.")
 
@@ -1105,6 +1174,11 @@ def main() -> int:
         "benchmark_root": str(Path(args.benchmark_root).expanduser().resolve()),
         "dataset_files": [str(path) for path in dataset_files],
         "groups": [asdict(EXPERIMENT_GROUPS[group_id]) for group_id in group_ids],
+        "random_sampling": {
+            "enabled": args.random_count_per_subset is not None,
+            "count_per_subset": args.random_count_per_subset,
+            "seed": args.random_seed,
+        },
         "records": len(records),
         "results": [asdict(item) for item in results],
         "summary": summary,
