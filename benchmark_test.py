@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import hashlib
 import json
 import math
@@ -238,6 +239,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--single-timeout", type=int, default=900, help="单一 LLM 每题超时秒数")
     parser.add_argument("--chemqa-timeout", type=int, default=3600, help="ChemQAWorkflow 每题超时秒数")
     parser.add_argument("--judge-timeout", type=int, default=300, help="Judge 每次评测超时秒数")
+    parser.add_argument(
+        "--max-concurrent-groups",
+        type=int,
+        default=2,
+        help="最多同时运行多少个实验组；默认 2，以降低 WSL 峰值资源占用",
+    )
+    parser.add_argument(
+        "--inter-wave-delay-seconds",
+        type=int,
+        default=10,
+        help="相邻波次之间的等待秒数，默认 10，用于给系统释放资源的窗口",
+    )
     parser.add_argument("--review-rounds", type=int, help="ChemQA review rounds 覆盖值")
     parser.add_argument("--rebuttal-rounds", type=int, help="ChemQA rebuttal rounds 覆盖值")
     parser.add_argument("--keep-temp-configs", action="store_true", help="保留临时 OpenClaw 配置文件")
@@ -2151,6 +2164,56 @@ def print_selected_records(records: list[BenchmarkRecord]) -> None:
 
 
 
+def build_group_waves(group_ids: list[str], *, max_concurrent_groups: int) -> list[list[str]]:
+    if max_concurrent_groups <= 0:
+        raise BenchmarkError("--max-concurrent-groups 必须是正整数")
+    web_on_groups = [group_id for group_id in group_ids if EXPERIMENT_GROUPS[group_id].websearch]
+    web_off_groups = [group_id for group_id in group_ids if not EXPERIMENT_GROUPS[group_id].websearch]
+    waves: list[list[str]] = []
+    for bucket in (web_on_groups, web_off_groups):
+        for index in range(0, len(bucket), max_concurrent_groups):
+            waves.append(bucket[index : index + max_concurrent_groups])
+    return waves
+
+
+
+def count_per_record_outputs(output_root: Path, *, group_ids: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    per_record_root = output_root / "per-record"
+    for group_id in group_ids:
+        group_dir = per_record_root / group_id
+        counts[group_id] = len(list(group_dir.glob("*.json"))) if group_dir.is_dir() else 0
+    return counts
+
+
+
+def write_wave_status(
+    output_root: Path,
+    *,
+    wave_index: int,
+    wave_group_ids: list[str],
+    status: str,
+    started_at: str,
+    completed_at: str | None = None,
+    per_record_counts: dict[str, int] | None = None,
+    inter_wave_delay_seconds: int | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "wave_index": wave_index,
+        "groups": wave_group_ids,
+        "status": status,
+        "started_at": started_at,
+    }
+    if completed_at is not None:
+        payload["completed_at"] = completed_at
+    if per_record_counts is not None:
+        payload["per_record_counts"] = per_record_counts
+    if inter_wave_delay_seconds is not None:
+        payload["inter_wave_delay_seconds"] = inter_wave_delay_seconds
+    save_json(output_root / "waves" / f"wave-{wave_index:02d}.json", payload)
+
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -2358,44 +2421,69 @@ def main() -> int:
         timeout_seconds=args.judge_timeout,
         config_path=config_pool.judge_config_path(),
     )
+    group_waves = build_group_waves(group_ids, max_concurrent_groups=args.max_concurrent_groups)
 
     group_results: dict[str, list[GroupRecordResult]] = {}
-    with ThreadPoolExecutor(max_workers=max(1, len(group_ids))) as executor:
-        future_map = {}
-        for group_id in group_ids:
-            group = EXPERIMENT_GROUPS[group_id]
-            config_path = config_pool.config_for_group(group)
-            single_agent = BASELINE_AGENT_IDS.get(group.id, args.single_agent)
-            future = executor.submit(
-                run_group,
-                group=group,
-                records=records,
-                output_root=output_root,
-                single_timeout=args.single_timeout,
-                chemqa_timeout=args.chemqa_timeout,
-                judge=judge,
-                config_path=config_path,
-                single_agent=single_agent,
-                chemqa_root=Path(args.chemqa_root).expanduser().resolve(),
-                chemqa_model_profile=args.chemqa_model_profile,
-                review_rounds=args.review_rounds,
-                rebuttal_rounds=args.rebuttal_rounds,
-            )
-            future_map[future] = group_id
-
-        for future in as_completed(future_map):
-            group_id = future_map[future]
-            try:
-                group_results[group_id] = future.result()
-            except Exception as exc:
+    for wave_index, wave_group_ids in enumerate(group_waves, start=1):
+        started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        write_wave_status(
+            output_root,
+            wave_index=wave_index,
+            wave_group_ids=wave_group_ids,
+            status="running",
+            started_at=started_at,
+            inter_wave_delay_seconds=args.inter_wave_delay_seconds,
+        )
+        with ThreadPoolExecutor(max_workers=max(1, len(wave_group_ids))) as executor:
+            future_map = {}
+            for group_id in wave_group_ids:
                 group = EXPERIMENT_GROUPS[group_id]
-                error_message = f"Group `{group_id}` failed before returning results: {exc}"
-                group_results[group_id] = materialize_group_failure_results(
+                config_path = config_pool.config_for_group(group)
+                single_agent = BASELINE_AGENT_IDS.get(group.id, args.single_agent)
+                future = executor.submit(
+                    run_group,
                     group=group,
                     records=records,
                     output_root=output_root,
-                    error_message=error_message,
+                    single_timeout=args.single_timeout,
+                    chemqa_timeout=args.chemqa_timeout,
+                    judge=judge,
+                    config_path=config_path,
+                    single_agent=single_agent,
+                    chemqa_root=Path(args.chemqa_root).expanduser().resolve(),
+                    chemqa_model_profile=args.chemqa_model_profile,
+                    review_rounds=args.review_rounds,
+                    rebuttal_rounds=args.rebuttal_rounds,
                 )
+                future_map[future] = group_id
+
+            for future in as_completed(future_map):
+                group_id = future_map[future]
+                try:
+                    group_results[group_id] = future.result()
+                except Exception as exc:
+                    group = EXPERIMENT_GROUPS[group_id]
+                    error_message = f"Group `{group_id}` failed before returning results: {exc}"
+                    group_results[group_id] = materialize_group_failure_results(
+                        group=group,
+                        records=records,
+                        output_root=output_root,
+                        error_message=error_message,
+                    )
+        gc.collect()
+        completed_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        write_wave_status(
+            output_root,
+            wave_index=wave_index,
+            wave_group_ids=wave_group_ids,
+            status="completed",
+            started_at=started_at,
+            completed_at=completed_at,
+            per_record_counts=count_per_record_outputs(output_root, group_ids=wave_group_ids),
+            inter_wave_delay_seconds=args.inter_wave_delay_seconds,
+        )
+        if wave_index < len(group_waves) and args.inter_wave_delay_seconds > 0:
+            time.sleep(args.inter_wave_delay_seconds)
 
     results: list[GroupRecordResult] = []
     for group_id in group_ids:
@@ -2413,6 +2501,12 @@ def main() -> int:
             "seed": args.random_seed,
         },
         "records": len(records),
+        "execution_plan": {
+            "mode": "wave-batched",
+            "max_concurrent_groups": args.max_concurrent_groups,
+            "inter_wave_delay_seconds": args.inter_wave_delay_seconds,
+            "waves": group_waves,
+        },
         "results": [asdict(item) for item in results],
         "summary": summary,
         "errors": [
@@ -2430,6 +2524,12 @@ def main() -> int:
     save_json(
         output_root / "runtime-manifest.json",
         {
+            "execution_plan": {
+                "mode": "wave-batched",
+                "max_concurrent_groups": args.max_concurrent_groups,
+                "inter_wave_delay_seconds": args.inter_wave_delay_seconds,
+                "waves": group_waves,
+            },
             "groups": {
                 group_id: {
                     "group": asdict(EXPERIMENT_GROUPS[group_id]),

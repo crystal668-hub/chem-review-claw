@@ -59,6 +59,26 @@ Points: 0.5, Item: Second criterion
         self.assertIs(False, disabled["tools"]["web"]["search"]["enabled"])
         self.assertIs(False, disabled["plugins"]["entries"]["duckduckgo"]["enabled"])
 
+    def test_build_group_waves_batches_web_on_then_web_off(self) -> None:
+        waves = benchmark_test.build_group_waves(
+            ["chemqa_web_on", "chemqa_web_off", "single_llm_web_on", "single_llm_web_off"],
+            max_concurrent_groups=2,
+        )
+        self.assertEqual(
+            [["chemqa_web_on", "single_llm_web_on"], ["chemqa_web_off", "single_llm_web_off"]],
+            waves,
+        )
+
+    def test_build_group_waves_respects_max_concurrent_groups(self) -> None:
+        waves = benchmark_test.build_group_waves(
+            ["chemqa_web_on", "chemqa_web_off", "single_llm_web_on", "single_llm_web_off"],
+            max_concurrent_groups=1,
+        )
+        self.assertEqual(
+            [["chemqa_web_on"], ["single_llm_web_on"], ["chemqa_web_off"], ["single_llm_web_off"]],
+            waves,
+        )
+
     def test_build_run_scoped_config_payload_uses_explicit_single_and_judge_models(self) -> None:
         base = {
             "agents": {"list": []},
