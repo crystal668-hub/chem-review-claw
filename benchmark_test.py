@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -175,6 +176,7 @@ class GroupRecordResult:
     runner_meta: dict[str, Any]
     raw: dict[str, Any]
     elapsed_seconds: float
+    error: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -1738,6 +1740,23 @@ def aggregate_bucket(items: list[GroupRecordResult]) -> dict[str, Any]:
 
 
 
+def materialize_group_failure_results(
+    *,
+    group: ExperimentGroup,
+    records: list[BenchmarkRecord],
+    output_root: Path,
+    error_message: str,
+) -> list[GroupRecordResult]:
+    group_results = [
+        build_error_group_record_result(group=group, record=record, error_message=error_message)
+        for record in records
+    ]
+    for entry in group_results:
+        save_json(output_root / "per-record" / group.id / f"{slugify(entry.record_id)}.json", asdict(entry))
+    return group_results
+
+
+
 def aggregate_results(results: list[GroupRecordResult]) -> dict[str, Any]:
     grouped: dict[str, list[GroupRecordResult]] = {}
     for item in results:
@@ -1880,6 +1899,7 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
                 "elapsed_seconds": item.elapsed_seconds,
                 "answer_accuracy": (item.evaluation.get("details") or {}).get("answer_accuracy"),
                 "rpf": (item.evaluation.get("details") or {}).get("rpf"),
+                "error": item.error or (item.evaluation.get("details") or {}).get("error"),
             }
         )
     write_csv(
@@ -1903,6 +1923,7 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
             "elapsed_seconds",
             "answer_accuracy",
             "rpf",
+            "error",
         ],
     )
 
@@ -1930,6 +1951,7 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
             row[f"{group_id}_elapsed_seconds"] = "" if result is None else result.elapsed_seconds
             row[f"{group_id}_answer_accuracy"] = "" if result is None else (result.evaluation.get("details") or {}).get("answer_accuracy")
             row[f"{group_id}_rpf"] = "" if result is None else (result.evaluation.get("details") or {}).get("rpf")
+            row[f"{group_id}_error"] = "" if result is None else (result.error or (result.evaluation.get("details") or {}).get("error"))
         wide_rows.append(row)
     wide_fieldnames = ["record_id", "subset", "dataset", "eval_kind", "source_file"]
     for group_id in group_ids:
@@ -1941,6 +1963,7 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
                 f"{group_id}_elapsed_seconds",
                 f"{group_id}_answer_accuracy",
                 f"{group_id}_rpf",
+                f"{group_id}_error",
             ]
         )
     write_csv(output_root / "per_record_wide.csv", wide_rows, wide_fieldnames)
@@ -2010,6 +2033,59 @@ def save_json(path: Path, payload: Any) -> None:
 
 
 
+def build_execution_error_evaluation(record: BenchmarkRecord, *, error_message: str) -> EvaluationResult:
+    return EvaluationResult(
+        eval_kind=record.eval_kind,
+        score=0.0,
+        max_score=1.0,
+        normalized_score=0.0,
+        passed=False,
+        primary_metric="execution_error",
+        primary_metric_direction="higher_is_better",
+        details={
+            "method": "execution_error",
+            "error": error_message,
+        },
+    )
+
+
+
+def build_error_group_record_result(
+    *,
+    group: ExperimentGroup,
+    record: BenchmarkRecord,
+    error_message: str,
+    elapsed_seconds: float = 0.0,
+    answer_text: str = "",
+    runner_meta: dict[str, Any] | None = None,
+    raw: dict[str, Any] | None = None,
+) -> GroupRecordResult:
+    evaluation = build_execution_error_evaluation(record, error_message=error_message)
+    meta = deep_copy_jsonish(runner_meta or {})
+    meta.setdefault("error", error_message)
+    payload = deep_copy_jsonish(raw or {"error": error_message})
+    return GroupRecordResult(
+        group_id=group.id,
+        group_label=group.label,
+        runner=group.runner,
+        websearch=group.websearch,
+        record_id=record.record_id,
+        subset=classify_subset(record),
+        dataset=record.dataset,
+        source_file=record.source_file,
+        eval_kind=record.eval_kind,
+        prompt=record.prompt,
+        reference_answer=record.reference_answer,
+        answer_text=answer_text,
+        evaluation=asdict(evaluation),
+        runner_meta=meta,
+        raw=payload,
+        elapsed_seconds=elapsed_seconds,
+        error=error_message,
+    )
+
+
+
 def run_group(
     *,
     group: ExperimentGroup,
@@ -2026,49 +2102,73 @@ def run_group(
     rebuttal_rounds: int | None,
 ) -> list[GroupRecordResult]:
     runtime_bundle_root = output_root / "input-bundles"
-    if group.runner == "chemqa":
-        runner = ChemQARunner(
-            chemqa_root=chemqa_root,
-            timeout_seconds=chemqa_timeout,
-            config_path=config_path,
-            slot_set=CHEMQA_SLOT_SETS[group.id],
-            review_rounds=review_rounds,
-            rebuttal_rounds=rebuttal_rounds,
-            model_profile=chemqa_model_profile,
-            runtime_bundle_root=runtime_bundle_root,
-        )
-    else:
-        runner = SingleLLMRunner(
-            agent_id=single_agent,
-            timeout_seconds=single_timeout,
-            config_path=config_path,
-            runtime_bundle_root=runtime_bundle_root,
-        )
+    try:
+        if group.runner == "chemqa":
+            runner = ChemQARunner(
+                chemqa_root=chemqa_root,
+                timeout_seconds=chemqa_timeout,
+                config_path=config_path,
+                slot_set=CHEMQA_SLOT_SETS[group.id],
+                review_rounds=review_rounds,
+                rebuttal_rounds=rebuttal_rounds,
+                model_profile=chemqa_model_profile,
+                runtime_bundle_root=runtime_bundle_root,
+            )
+        else:
+            runner = SingleLLMRunner(
+                agent_id=single_agent,
+                timeout_seconds=single_timeout,
+                config_path=config_path,
+                runtime_bundle_root=runtime_bundle_root,
+            )
+    except Exception as exc:
+        error_message = f"Failed to initialize runner for group `{group.id}`: {exc}"
+        group_results = [
+            build_error_group_record_result(group=group, record=record, error_message=error_message)
+            for record in records
+        ]
+        for entry in group_results:
+            save_json(output_root / "per-record" / group.id / f"{slugify(entry.record_id)}.json", asdict(entry))
+        return group_results
 
     group_results: list[GroupRecordResult] = []
     for record in records:
         started = time.time()
-        run_output = runner.run(record, group)
-        evaluation = evaluate_answer(record, run_output.text, judge=judge)
-        elapsed = time.time() - started
-        entry = GroupRecordResult(
-            group_id=group.id,
-            group_label=group.label,
-            runner=group.runner,
-            websearch=group.websearch,
-            record_id=record.record_id,
-            subset=classify_subset(record),
-            dataset=record.dataset,
-            source_file=record.source_file,
-            eval_kind=record.eval_kind,
-            prompt=record.prompt,
-            reference_answer=record.reference_answer,
-            answer_text=run_output.text,
-            evaluation=asdict(evaluation),
-            runner_meta=run_output.runner_meta,
-            raw=run_output.raw,
-            elapsed_seconds=elapsed,
-        )
+        try:
+            run_output = runner.run(record, group)
+            evaluation = evaluate_answer(record, run_output.text, judge=judge)
+            elapsed = time.time() - started
+            entry = GroupRecordResult(
+                group_id=group.id,
+                group_label=group.label,
+                runner=group.runner,
+                websearch=group.websearch,
+                record_id=record.record_id,
+                subset=classify_subset(record),
+                dataset=record.dataset,
+                source_file=record.source_file,
+                eval_kind=record.eval_kind,
+                prompt=record.prompt,
+                reference_answer=record.reference_answer,
+                answer_text=run_output.text,
+                evaluation=asdict(evaluation),
+                runner_meta=run_output.runner_meta,
+                raw=run_output.raw,
+                elapsed_seconds=elapsed,
+                error=None,
+            )
+        except Exception as exc:
+            elapsed = time.time() - started
+            error_message = f"Record `{record.record_id}` failed in group `{group.id}`: {exc}"
+            entry = build_error_group_record_result(
+                group=group,
+                record=record,
+                error_message=error_message,
+                elapsed_seconds=elapsed,
+                runner_meta={
+                    "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                },
+            )
         group_results.append(entry)
         save_json(output_root / "per-record" / group.id / f"{slugify(record.record_id)}.json", asdict(entry))
     return group_results
@@ -2143,7 +2243,17 @@ def main() -> int:
 
         for future in as_completed(future_map):
             group_id = future_map[future]
-            group_results[group_id] = future.result()
+            try:
+                group_results[group_id] = future.result()
+            except Exception as exc:
+                group = EXPERIMENT_GROUPS[group_id]
+                error_message = f"Group `{group_id}` failed before returning results: {exc}"
+                group_results[group_id] = materialize_group_failure_results(
+                    group=group,
+                    records=records,
+                    output_root=output_root,
+                    error_message=error_message,
+                )
 
     results: list[GroupRecordResult] = []
     for group_id in group_ids:
@@ -2163,6 +2273,15 @@ def main() -> int:
         "records": len(records),
         "results": [asdict(item) for item in results],
         "summary": summary,
+        "errors": [
+            {
+                "group_id": item.group_id,
+                "record_id": item.record_id,
+                "error": item.error,
+            }
+            for item in results
+            if item.error
+        ],
     }
     save_json(output_root / "results.json", payload)
     export_csv_reports(output_root, results, summary, group_ids)

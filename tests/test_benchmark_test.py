@@ -466,6 +466,98 @@ Points: 0.5, Item: Second criterion
         self.assertEqual(1.0, summary["groups"]["g1"]["avg_answer_accuracy"])
         self.assertEqual(0.75, summary["groups"]["g1"]["avg_rpf"])
 
+    def test_run_group_continues_after_record_failure(self) -> None:
+        records = [
+            benchmark_test.BenchmarkRecord(
+                record_id="r1",
+                dataset="chembench",
+                source_file="/tmp/demo.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="What is 2+2?",
+                reference_answer="4",
+                payload={"target": "4"},
+            ),
+            benchmark_test.BenchmarkRecord(
+                record_id="r2",
+                dataset="chembench",
+                source_file="/tmp/demo.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="What is 2+3?",
+                reference_answer="5",
+                payload={"target": "5"},
+            ),
+        ]
+
+        class StubSingleRunner:
+            def __init__(self, **_: object) -> None:
+                pass
+
+            def run(self, record: object, group: object) -> object:
+                _ = group
+                if getattr(record, "record_id") == "r1":
+                    raise RuntimeError("boom")
+                return benchmark_test.RunOutput(text="FINAL ANSWER: 5", raw={}, runner_meta={})
+
+        original_runner = benchmark_test.SingleLLMRunner
+        benchmark_test.SingleLLMRunner = StubSingleRunner
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                results = benchmark_test.run_group(
+                    group=benchmark_test.EXPERIMENT_GROUPS["single_llm_web_off"],
+                    records=records,
+                    output_root=Path(tmpdir),
+                    single_timeout=10,
+                    chemqa_timeout=10,
+                    judge=JudgeStub({}),
+                    config_path=Path(tmpdir) / "cfg.json",
+                    single_agent="benchmark-single-web-off",
+                    chemqa_root=Path(tmpdir),
+                    chemqa_model_profile="unused",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                )
+                self.assertEqual(2, len(results))
+                self.assertIsNotNone(results[0].error)
+                self.assertFalse(results[0].evaluation["passed"])
+                self.assertTrue(results[1].evaluation["passed"])
+                self.assertTrue((Path(tmpdir) / "per-record" / "single_llm_web_off" / "r1.json").exists())
+                self.assertTrue((Path(tmpdir) / "per-record" / "single_llm_web_off" / "r2.json").exists())
+        finally:
+            benchmark_test.SingleLLMRunner = original_runner
+
+    def test_materialize_group_failure_results_writes_error_entries(self) -> None:
+        records = [
+            benchmark_test.BenchmarkRecord(
+                record_id="r1",
+                dataset="chembench",
+                source_file="/tmp/demo.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="Q1",
+                reference_answer="A",
+                payload={},
+            ),
+            benchmark_test.BenchmarkRecord(
+                record_id="r2",
+                dataset="chembench",
+                source_file="/tmp/demo.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="Q2",
+                reference_answer="B",
+                payload={},
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results = benchmark_test.materialize_group_failure_results(
+                group=benchmark_test.EXPERIMENT_GROUPS["chemqa_web_off"],
+                records=records,
+                output_root=Path(tmpdir),
+                error_message="group crashed",
+            )
+            self.assertEqual(2, len(results))
+            self.assertTrue(all(item.error == "group crashed" for item in results))
+            self.assertTrue((Path(tmpdir) / "per-record" / "chemqa_web_off" / "r1.json").exists())
+            self.assertTrue((Path(tmpdir) / "per-record" / "chemqa_web_off" / "r2.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
