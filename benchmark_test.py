@@ -1131,7 +1131,7 @@ class ChemQARunner:
         while time.time() < deadline:
             last_status = self._read_run_status(run_id)
             status = str(last_status.get("status") or "")
-            if status in {"completed", "completed_with_artifact_errors", "failed", "abandoned", "cancelled"}:
+            if status in {"completed", "completed_with_artifact_errors", "failed", "abandoned", "cancelled", "stalled"}:
                 return last_status
             time.sleep(5)
         raise BenchmarkError(
@@ -1267,7 +1267,17 @@ class ChemQARunner:
         run_status = self._wait_for_terminal_status(run_id, timeout_seconds=self.timeout_seconds)
         terminal_status = str(run_status.get("status") or "")
         if terminal_status not in {"completed", "completed_with_artifact_errors"}:
-            raise BenchmarkError(f"ChemQA run `{run_id}` ended with non-success status: {run_status}")
+            runner_meta = {
+                "run_id": run_id,
+                "launch": payload,
+                "acceptance_status": None,
+                "terminal_state": terminal_status or "unknown",
+                "run_status": run_status,
+                "error": f"ChemQA run ended with non-success status: {terminal_status or 'unknown'}",
+            }
+            if input_bundle is not None:
+                runner_meta["runtime_bundle"] = input_bundle.to_meta()
+            return RunOutput(text="", raw={"run_status": run_status}, runner_meta=runner_meta)
         qa_result_path = self._ensure_artifacts(run_id, env=env, run_status=run_status)
         qa_result = json.loads(qa_result_path.read_text(encoding="utf-8"))
         text = str(qa_result.get("final_answer") or "").strip()

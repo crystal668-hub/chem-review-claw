@@ -94,6 +94,12 @@ Points: 0.5, Item: Second criterion
         for slot in ["debateB-1", "debateB-2", "debateB-3", "debateB-4", "debateB-5"]:
             self.assertEqual("qwen3.5-plus", agents[slot]["model"])
 
+    def test_chemqa_wait_for_terminal_status_accepts_stalled(self) -> None:
+        runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
+        runner._read_run_status = lambda _run_id: {"status": "stalled", "phase": "review"}
+        payload = benchmark_test.ChemQARunner._wait_for_terminal_status(runner, "demo-run", timeout_seconds=1)
+        self.assertEqual("stalled", payload["status"])
+
     def test_evaluate_chembench_open_ended_numeric_match(self) -> None:
         record = benchmark_test.BenchmarkRecord(
             record_id="demo",
