@@ -95,8 +95,8 @@ Points: 0.5, Item: Second criterion
         agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
         self.assertEqual("qwen3.5-plus", agents["benchmark-single-web-on"]["model"])
         self.assertEqual("su8/gpt-5.4", agents["benchmark-judge"]["model"])
-        self.assertEqual("high", agents["benchmark-single-web-on"]["thinking"])
-        self.assertEqual("high", agents["benchmark-judge"]["thinking"])
+        self.assertNotIn("thinking", agents["benchmark-single-web-on"])
+        self.assertNotIn("thinking", agents["benchmark-judge"])
 
     def test_build_run_scoped_config_payload_benchmark_judge_runtime_uses_judge_model(self) -> None:
         base = {
@@ -118,7 +118,7 @@ Points: 0.5, Item: Second criterion
         )
         agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
         self.assertEqual("su8/gpt-5.4", agents["benchmark-judge"]["model"])
-        self.assertEqual("high", agents["benchmark-judge"]["thinking"])
+        self.assertNotIn("thinking", agents["benchmark-judge"])
 
     def test_build_run_scoped_config_payload_chemqa_uses_judge_for_coordinator_only(self) -> None:
         base = {
@@ -135,10 +135,10 @@ Points: 0.5, Item: Second criterion
         )
         agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
         self.assertEqual("su8/gpt-5.4", agents["debateB-coordinator"]["model"])
-        self.assertEqual("high", agents["debateB-coordinator"]["thinking"])
+        self.assertNotIn("thinking", agents["debateB-coordinator"])
         for slot in ["debateB-1", "debateB-2", "debateB-3", "debateB-4", "debateB-5"]:
             self.assertEqual("qwen3.5-plus", agents[slot]["model"])
-            self.assertEqual("high", agents[slot]["thinking"])
+            self.assertNotIn("thinking", agents[slot])
 
     def test_chemqa_wait_for_terminal_status_accepts_stalled(self) -> None:
         runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)

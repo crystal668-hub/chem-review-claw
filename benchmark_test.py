@@ -347,7 +347,6 @@ def upsert_agent_entry(
     workspace: Path,
     agent_dir: Path,
     model: str,
-    thinking: str | None = None,
 ) -> None:
     agents = payload.setdefault("agents", {})
     entries = agents.setdefault("list", [])
@@ -361,8 +360,7 @@ def upsert_agent_entry(
             entry["workspace"] = normalized_workspace
             entry["agentDir"] = normalized_agent_dir
             entry["model"] = model
-            if thinking is not None:
-                entry["thinking"] = thinking
+            entry.pop("thinking", None)
             return
     row = {
         "id": agent_id,
@@ -371,8 +369,6 @@ def upsert_agent_entry(
         "agentDir": normalized_agent_dir,
         "model": model,
     }
-    if thinking is not None:
-        row["thinking"] = thinking
     entries.append(row)
 
 
@@ -393,7 +389,6 @@ def build_run_scoped_config_payload(
         workspace=judge_workspace,
         agent_dir=judge_agent_dir,
         model=judge_model,
-        thinking=BENCHMARK_AGENT_THINKING,
     )
 
     if group.id == "benchmark-judge-runtime":
@@ -410,7 +405,6 @@ def build_run_scoped_config_payload(
             workspace=workspace,
             agent_dir=agent_dir,
             model=single_agent_model,
-            thinking=BENCHMARK_AGENT_THINKING,
         )
         return payload
 
@@ -429,7 +423,6 @@ def build_run_scoped_config_payload(
             workspace=workspace,
             agent_dir=agent_dir,
             model=default_model,
-            thinking=BENCHMARK_AGENT_THINKING,
         )
     return payload
 
