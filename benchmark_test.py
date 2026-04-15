@@ -9,6 +9,7 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -26,9 +27,11 @@ DEFAULT_CHEMQA_ROOT = Path("/home/dministrator/.openclaw/skills/chemqa-review")
 DEFAULT_OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 DEFAULT_OUTPUT_DIR = DEFAULT_WORKSPACE / "state" / "benchmark-runs"
 DEFAULT_SINGLE_AGENT = "benchmark-single-web-off"
+DEFAULT_SINGLE_AGENT_MODEL = "qwen3.5-plus"
 DEFAULT_JUDGE_AGENT = "benchmark-judge"
+DEFAULT_JUDGE_MODEL = "su8/gpt-5.4"
 DEFAULT_CHEMQA_PRESET = "chemqa-review@1"
-DEFAULT_CHEMQA_MODEL_PROFILE = "chemqa-review-su8-coord-packy-reviewers"
+DEFAULT_CHEMQA_MODEL_PROFILE = "chemqa-review-su8-coord-qwen-ds-kimi-glm-minimax"
 CHEMQA_SLOT_SETS = {
     "chemqa_web_on": "A",
     "chemqa_web_off": "B",
@@ -50,10 +53,24 @@ SUBSET_ORDER = (
     "chembench",
     "frontierscience_Olympiad",
     "frontierscience_Research",
+    "superchem_text_only",
+    "superchem_multimodal",
 )
+SUPERCHEM_SUBSETS = ("superchem_text_only", "superchem_multimodal")
 FINAL_ANSWER_RE = re.compile(r"^\s*FINAL\s+ANSWER\s*[:：-]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 NUMBER_RE = re.compile(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?")
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*\}|\[.*\])\s*```", re.DOTALL | re.IGNORECASE)
+SUPERCHM_XML_CHECKPOINT_RE = re.compile(
+    r"<\s*checkpoint\b(?P<attrs>[^>]*)>(?P<body>.*?)</\s*checkpoint\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+SUPERCHM_INLINE_CHECKPOINT_RE = re.compile(
+    r"Checkpoint\s*(?P<index>\d+)\s*[:：-]\s*(?P<body>.*?)(?=(?:\n\s*Checkpoint\s*\d+\s*[:：-])|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+SUPERCHM_ATTR_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*["\']([^"\']+)["\']')
+SINGLE_LETTER_TOKEN_RE = re.compile(r"\b([A-Z])\b")
+RUNTIME_BUNDLE_LOCK = threading.Lock()
 
 
 class BenchmarkError(RuntimeError):
@@ -115,6 +132,20 @@ class RunOutput:
 
 
 @dataclass
+class RuntimeBundle:
+    bundle_dir: Path
+    question_markdown: Path
+    image_files: list[Path]
+
+    def to_meta(self) -> dict[str, Any]:
+        return {
+            "bundle_dir": str(self.bundle_dir),
+            "question_markdown": str(self.question_markdown),
+            "image_files": [str(path) for path in self.image_files],
+        }
+
+
+@dataclass
 class EvaluationResult:
     eval_kind: str
     score: float
@@ -164,7 +195,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--random-count-per-subset",
         type=int,
-        help="按子集随机抽样时，每个子集抽取多少题；当前支持 chembench / frontierscience_Olympiad / frontierscience_Research",
+        help=(
+            "按子集随机抽样时，每个子集抽取多少题；当前支持 chembench / "
+            "frontierscience_Olympiad / frontierscience_Research / "
+            "superchem_text_only / superchem_multimodal"
+        ),
     )
     parser.add_argument(
         "--random-seed",
@@ -180,11 +215,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offset", type=int, default=0, help="跳过前多少条题目")
     parser.add_argument("--single-agent", default=DEFAULT_SINGLE_AGENT, help="单一 LLM 基线所用 agent id")
     parser.add_argument(
+        "--single-agent-model",
+        default=DEFAULT_SINGLE_AGENT_MODEL,
+        help="单一 LLM baseline runtime model，默认锁定为 qwen3.5-plus",
+    )
+    parser.add_argument(
         "--chemqa-model-profile",
         default=DEFAULT_CHEMQA_MODEL_PROFILE,
-        help="ChemQAWorkflow 所用 model profile，默认使用当前已验证可运行的 profile",
+        help="ChemQAWorkflow 所用 model profile，默认使用当前 benchmark 固定 profile",
     )
     parser.add_argument("--judge-agent", default=DEFAULT_JUDGE_AGENT, help="rubric / 语义评测所用 judge agent id")
+    parser.add_argument(
+        "--judge-model",
+        default=DEFAULT_JUDGE_MODEL,
+        help="judge runtime model，默认锁定为 su8/gpt-5.4",
+    )
     parser.add_argument("--single-timeout", type=int, default=900, help="单一 LLM 每题超时秒数")
     parser.add_argument("--chemqa-timeout", type=int, default=3600, help="ChemQAWorkflow 每题超时秒数")
     parser.add_argument("--judge-timeout", type=int, default=300, help="Judge 每次评测超时秒数")
@@ -416,7 +461,14 @@ def build_temp_openclaw_config_payload(base_payload: dict[str, Any], *, enable_w
 
 
 class ConfigPool:
-    def __init__(self, *, base_config_path: Path, output_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        base_config_path: Path,
+        output_root: Path,
+        single_agent_model: str | None = None,
+        judge_model: str | None = None,
+    ) -> None:
         self.base_config_path = base_config_path
         self.output_root = output_root
         self._payload = json.loads(base_config_path.read_text(encoding="utf-8"))
@@ -424,8 +476,10 @@ class ConfigPool:
         self._config_dir.mkdir(parents=True, exist_ok=True)
         self._group_paths: dict[str, Path] = {}
         self._judge_path: Path | None = None
-        self._single_agent_model = self._discover_agent_model("debate-1") or "su8/gpt-5.4"
-        self._judge_model = self._discover_agent_model("debate-coordinator") or "su8/gpt-5.4"
+        discovered_single = self._discover_agent_model("debate-1") or "su8/gpt-5.4"
+        discovered_judge = self._discover_agent_model("debate-coordinator") or "su8/gpt-5.4"
+        self._single_agent_model = str(single_agent_model or discovered_single).strip() or discovered_single
+        self._judge_model = str(judge_model or discovered_judge).strip() or discovered_judge
 
     def _discover_agent_model(self, agent_id: str) -> str | None:
         agents = ((self._payload.get("agents") or {}).get("list") or [])
@@ -524,7 +578,45 @@ def classify_subset(record: BenchmarkRecord) -> str:
             return "frontierscience_Olympiad"
         if track == "research" or record.eval_kind == "frontierscience_research":
             return "frontierscience_Research"
+    if record.dataset == "superchem":
+        modality = str(record.payload.get("modality") or "").strip().lower()
+        if modality == "multimodal":
+            return "superchem_multimodal"
+        return "superchem_text_only"
     return f"{record.dataset}:{record.eval_kind}"
+
+
+def source_pair_key(record: BenchmarkRecord) -> str:
+    return str(record.payload.get("source_uuid") or record.record_id).strip() or record.record_id
+
+
+def sample_superchem_pairs(
+    grouped: dict[str, list[BenchmarkRecord]],
+    *,
+    per_subset_count: int,
+    seed: int,
+) -> list[BenchmarkRecord]:
+    if not all(grouped.get(subset) for subset in SUPERCHEM_SUBSETS):
+        return []
+
+    by_uuid: dict[str, dict[str, BenchmarkRecord]] = {}
+    for subset in SUPERCHEM_SUBSETS:
+        for record in grouped.get(subset, []):
+            by_uuid.setdefault(source_pair_key(record), {})[subset] = record
+
+    paired = [pair for pair in by_uuid.values() if all(subset in pair for subset in SUPERCHEM_SUBSETS)]
+    if not paired:
+        return []
+    if len(paired) < per_subset_count:
+        raise BenchmarkError(f"SUPERChem 成对题目仅有 {len(paired)} 题，无法随机抽取 {per_subset_count} 题。")
+
+    rng = random.Random(seed)
+    sampled_pairs = rng.sample(paired, per_subset_count)
+    sampled: list[BenchmarkRecord] = []
+    for pair in sampled_pairs:
+        for subset in SUPERCHEM_SUBSETS:
+            sampled.append(pair[subset])
+    return sampled
 
 
 
@@ -542,7 +634,14 @@ def sample_records_per_subset(records: list[BenchmarkRecord], *, per_subset_coun
 
     rng = random.Random(seed)
     sampled: list[BenchmarkRecord] = []
+    handled_subsets: set[str] = set()
+    superchem_sampled = sample_superchem_pairs(grouped, per_subset_count=per_subset_count, seed=seed)
+    if superchem_sampled:
+        sampled.extend(superchem_sampled)
+        handled_subsets.update(SUPERCHEM_SUBSETS)
     for subset in available_supported:
+        if subset in handled_subsets:
+            continue
         subset_records = grouped[subset]
         if len(subset_records) < per_subset_count:
             raise BenchmarkError(
@@ -651,7 +750,197 @@ def safe_json_extract(text: str) -> Any:
     raise BenchmarkError(f"Judge response did not contain parseable JSON:\n{text}")
 
 
-def build_single_llm_prompt(record: BenchmarkRecord, *, websearch_enabled: bool) -> str:
+def maybe_json_loads(text: str) -> Any | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+
+
+def superchem_valid_options(record: BenchmarkRecord) -> tuple[str, ...]:
+    options = record.payload.get("options") or {}
+    if isinstance(options, dict):
+        letters = [str(key).strip().upper() for key in options.keys() if str(key).strip()]
+        if letters:
+            return tuple(sorted(set(letters)))
+    return tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+def parse_superchem_option_answer(text: str, *, valid_options: Iterable[str]) -> str:
+    valid = tuple(dict.fromkeys(str(item).strip().upper() for item in valid_options if str(item).strip()))
+    valid_set = set(valid)
+    if not valid_set:
+        raise BenchmarkError("SUPERChem valid option set is empty.")
+
+    def extract_letters(candidate: Any) -> list[str]:
+        if candidate is None:
+            return []
+        if isinstance(candidate, dict):
+            for key in ("answer", "final_answer", "finalAnswer", "choice", "choices"):
+                if key in candidate:
+                    return extract_letters(candidate[key])
+            letters = [str(key).strip().upper() for key in candidate.keys()]
+            return [letter for letter in letters if letter in valid_set]
+        if isinstance(candidate, list):
+            letters: list[str] = []
+            for item in candidate:
+                letters.extend(extract_letters(item))
+            return letters
+
+        raw = str(candidate).strip().upper()
+        if not raw:
+            return []
+        token_matches = [match for match in SINGLE_LETTER_TOKEN_RE.findall(raw) if match in valid_set]
+        if token_matches:
+            return token_matches
+        compact = re.sub(r"[^A-Z]", "", raw)
+        if compact and all(letter in valid_set for letter in compact):
+            return list(compact)
+        return []
+
+    candidates = [
+        extract_final_answer_line(text),
+        last_nonempty_line(text),
+        text,
+    ]
+    json_payload = maybe_json_loads(text)
+    if json_payload is not None:
+        candidates.insert(0, json_payload)
+    for candidate in candidates:
+        letters = extract_letters(candidate)
+        if letters:
+            return "|".join(letter for letter in valid if letter in set(letters))
+    return ""
+
+
+def parse_superchem_checkpoint_weight(attrs: str) -> float:
+    weight = 1.0
+    for key, value in SUPERCHM_ATTR_RE.findall(attrs):
+        if key.lower() in {"weight", "points", "score"}:
+            try:
+                weight = float(value)
+            except ValueError:
+                weight = 1.0
+    return max(weight, 0.0)
+
+
+def parse_superchem_checkpoints(text: str) -> list[dict[str, Any]]:
+    checkpoints: list[dict[str, Any]] = []
+    for index, match in enumerate(SUPERCHM_XML_CHECKPOINT_RE.finditer(text or ""), start=1):
+        body = normalize_space(match.group("body"))
+        if not body:
+            continue
+        checkpoints.append(
+            {
+                "index": index,
+                "weight": parse_superchem_checkpoint_weight(match.group("attrs") or ""),
+                "text": body,
+            }
+        )
+    if checkpoints:
+        return checkpoints
+
+    for match in SUPERCHM_INLINE_CHECKPOINT_RE.finditer(text or ""):
+        body = normalize_space(match.group("body"))
+        if not body:
+            continue
+        checkpoints.append(
+            {
+                "index": int(match.group("index")),
+                "weight": 1.0,
+                "text": body,
+            }
+        )
+    return checkpoints
+
+
+def superchem_image_paths(record: BenchmarkRecord) -> list[Path]:
+    payload = record.payload
+    paths: list[Path] = []
+    for item in payload.get("question_image_paths") or []:
+        text = str(item or "").strip()
+        if text:
+            paths.append(Path(text).expanduser().resolve())
+    option_paths = payload.get("option_image_paths") or {}
+    if isinstance(option_paths, dict):
+        for items in option_paths.values():
+            for item in items or []:
+                text = str(item or "").strip()
+                if text:
+                    paths.append(Path(text).expanduser().resolve())
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
+
+
+def build_superchem_question_markdown(record: BenchmarkRecord, *, image_relpaths: list[str]) -> str:
+    payload = record.payload
+    options = payload.get("options") or {}
+    lines = [
+        "# SUPERChem Benchmark Record",
+        f"Record ID: {record.record_id}",
+        f"Source UUID: {source_pair_key(record)}",
+        f"Modality: {payload.get('modality') or 'text_only'}",
+        "",
+        "Question:",
+        str(payload.get("question") or record.prompt).strip(),
+        "",
+        "Options:",
+    ]
+    if isinstance(options, dict):
+        for key in sorted(options):
+            value = str(options.get(key) or "").strip() or "[see image]"
+            lines.append(f"- {key}. {value}")
+    if image_relpaths:
+        lines.extend(["", "Local images to inspect:"])
+        for item in image_relpaths:
+            lines.append(f"- {item}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def ensure_runtime_bundle(record: BenchmarkRecord, *, bundle_root: Path) -> RuntimeBundle | None:
+    if record.dataset != "superchem":
+        return None
+    bundle_dir = bundle_root / slugify(record.record_id, limit=80)
+    question_markdown = bundle_dir / "question.md"
+    image_dir = bundle_dir / "images"
+    image_files: list[Path] = []
+
+    with RUNTIME_BUNDLE_LOCK:
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        image_dir.mkdir(parents=True, exist_ok=True)
+        image_relpaths: list[str] = []
+        for index, source_path in enumerate(superchem_image_paths(record), start=1):
+            extension = source_path.suffix or ".bin"
+            target_path = image_dir / f"img{index:02d}{extension}"
+            if source_path.is_file():
+                shutil.copy2(source_path, target_path)
+                image_files.append(target_path)
+                image_relpaths.append(str(target_path.relative_to(bundle_dir)))
+            else:
+                image_relpaths.append(str(source_path))
+        question_markdown.write_text(
+            build_superchem_question_markdown(record, image_relpaths=image_relpaths),
+            encoding="utf-8",
+        )
+    return RuntimeBundle(bundle_dir=bundle_dir, question_markdown=question_markdown, image_files=image_files)
+
+
+def build_single_llm_prompt(
+    record: BenchmarkRecord,
+    *,
+    websearch_enabled: bool,
+    input_bundle: RuntimeBundle | None = None,
+) -> str:
     instructions = [
         "You are answering a chemistry benchmark question.",
         "Be careful, concise, and do not fabricate missing facts.",
@@ -661,7 +950,16 @@ def build_single_llm_prompt(record: BenchmarkRecord, *, websearch_enabled: bool)
     else:
         instructions.append("Do not use web search or external browsing.")
 
-    if record.eval_kind == "chembench_open_ended":
+    if record.eval_kind == "superchem_multiple_choice_rpf":
+        instructions.append("This is a chemistry multiple-choice question.")
+        instructions.append("Show concise reasoning, then end with exactly one line formatted as: FINAL ANSWER: <option letters>.")
+        instructions.append("If multiple options are correct, separate the letters with `|`.")
+        if input_bundle is not None:
+            instructions.append(f"Local file bundle: {input_bundle.bundle_dir}")
+            instructions.append(f"Read the question bundle file first: {input_bundle.question_markdown}")
+            if input_bundle.image_files:
+                instructions.append("Inspect the local image files referenced in the bundle before answering.")
+    elif record.eval_kind == "chembench_open_ended":
         instructions.append("Show brief reasoning if needed, then end with exactly one line formatted as: FINAL ANSWER: <answer>.")
     elif record.eval_kind == "frontierscience_olympiad":
         instructions.append("End with exactly one line formatted as: FINAL ANSWER: <answer>.")
@@ -671,7 +969,12 @@ def build_single_llm_prompt(record: BenchmarkRecord, *, websearch_enabled: bool)
     return "\n".join(instructions) + "\n\nQUESTION:\n" + record.prompt.strip()
 
 
-def build_chemqa_goal(record: BenchmarkRecord, *, websearch_enabled: bool) -> str:
+def build_chemqa_goal(
+    record: BenchmarkRecord,
+    *,
+    websearch_enabled: bool,
+    input_bundle: RuntimeBundle | None = None,
+) -> str:
     instructions = [
         "Solve the following chemistry benchmark question.",
         "Return a final answer that is faithful to the prompt.",
@@ -680,7 +983,14 @@ def build_chemqa_goal(record: BenchmarkRecord, *, websearch_enabled: bool) -> st
         instructions.append("Web search may be used if helpful.")
     else:
         instructions.append("Do not use web search or external browsing.")
-    if record.eval_kind in {"chembench_open_ended", "frontierscience_olympiad"}:
+    if record.eval_kind == "superchem_multiple_choice_rpf":
+        instructions.append("This is a multiple-choice chemistry question.")
+        instructions.append("End with a line `FINAL ANSWER: <option letters>`.")
+        instructions.append("If multiple options are correct, separate the letters with `|`.")
+        if input_bundle is not None:
+            instructions.append(f"Use the local file bundle at `{input_bundle.bundle_dir}`.")
+            instructions.append(f"Open `{input_bundle.question_markdown}` first and inspect any referenced images.")
+    elif record.eval_kind in {"chembench_open_ended", "frontierscience_olympiad"}:
         instructions.append("If appropriate, end with a line `FINAL ANSWER: <answer>`.")
     return "\n".join(instructions) + "\n\nQUESTION:\n" + record.prompt.strip()
 
@@ -741,13 +1051,16 @@ class SingleLLMRunner:
         agent_id: str,
         timeout_seconds: int,
         config_path: Path,
+        runtime_bundle_root: Path,
     ) -> None:
         self.agent_id = agent_id
         self.timeout_seconds = timeout_seconds
         self.config_path = config_path
+        self.runtime_bundle_root = runtime_bundle_root
 
     def run(self, record: BenchmarkRecord, group: ExperimentGroup) -> RunOutput:
-        prompt = build_single_llm_prompt(record, websearch_enabled=group.websearch)
+        input_bundle = ensure_runtime_bundle(record, bundle_root=self.runtime_bundle_root)
+        prompt = build_single_llm_prompt(record, websearch_enabled=group.websearch, input_bundle=input_bundle)
         session_id = f"benchmark-{group.id}-{slugify(record.record_id, limit=40)}-{uuid.uuid4().hex[:8]}"
         command = [
             "openclaw",
@@ -773,6 +1086,8 @@ class SingleLLMRunner:
         payloads = list((result_payload.get("payloads") or []))
         text = summarize_payloads(payloads)
         runner_meta = deep_copy_jsonish(result_payload.get("meta") or {})
+        if input_bundle is not None:
+            runner_meta["runtime_bundle"] = input_bundle.to_meta()
         return RunOutput(text=text, raw=payload, runner_meta=runner_meta)
 
 
@@ -787,6 +1102,7 @@ class ChemQARunner:
         review_rounds: int | None,
         rebuttal_rounds: int | None,
         model_profile: str,
+        runtime_bundle_root: Path,
     ) -> None:
         self.chemqa_root = chemqa_root
         self.timeout_seconds = timeout_seconds
@@ -798,45 +1114,68 @@ class ChemQARunner:
         self.launch_script = chemqa_root / "scripts" / "launch_from_preset.py"
         self.collect_script = chemqa_root / "scripts" / "collect_artifacts.py"
         self.runtime_dir = chemqa_root.parent / "debateclaw-v1" / "scripts"
+        self.runtime_bundle_root = runtime_bundle_root
+
+    def _status_path(self, run_id: str) -> Path:
+        return self.chemqa_root / "control" / "run-status" / f"{run_id}.json"
+
+    def _read_run_status(self, run_id: str) -> dict[str, Any]:
+        status_path = self._status_path(run_id)
+        if not status_path.is_file():
+            return {}
+        return json.loads(status_path.read_text(encoding="utf-8"))
 
     def _wait_for_terminal_status(self, run_id: str, *, timeout_seconds: int) -> dict[str, Any]:
-        status_path = self.chemqa_root / "control" / "run-status" / f"{run_id}.json"
         deadline = time.time() + timeout_seconds
         last_status: dict[str, Any] = {}
         while time.time() < deadline:
-            if status_path.is_file():
-                last_status = json.loads(status_path.read_text(encoding="utf-8"))
-                status = str(last_status.get("status") or "")
-                if status in {"completed", "failed", "abandoned", "cancelled"}:
-                    return last_status
+            last_status = self._read_run_status(run_id)
+            status = str(last_status.get("status") or "")
+            if status in {"completed", "completed_with_artifact_errors", "failed", "abandoned", "cancelled"}:
+                return last_status
             time.sleep(5)
         raise BenchmarkError(
             f"ChemQA run `{run_id}` did not reach a terminal state within {timeout_seconds}s. Last status: {last_status}"
         )
 
-    def _ensure_artifacts(self, run_id: str, *, env: dict[str, str]) -> Path:
-        artifact_dir = self.chemqa_root / "generated" / "artifacts" / run_id
-        qa_result_path = artifact_dir / "qa_result.json"
-        if qa_result_path.is_file():
-            return qa_result_path
+    def _candidate_protocol_dirs(self, run_id: str, run_status: dict[str, Any]) -> list[Path]:
+        candidates: list[Path] = []
+        explicit_protocol = str(run_status.get("protocol_path") or "").strip()
+        explicit_workspace_protocol = str(run_status.get("workspace_protocol_path") or "").strip()
+        if explicit_protocol:
+            candidates.append(Path(explicit_protocol).expanduser().resolve().parent)
+        if explicit_workspace_protocol:
+            candidates.append(Path(explicit_workspace_protocol).expanduser().resolve().parent)
 
         protocol_dir = self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id
-        candidate_sources = [protocol_dir]
+        candidates.append(protocol_dir)
         coordinator_slot = actual_slot_ids(self.slot_set)["debate-coordinator"]
         coordinator_workspace = CHEMQA_WORKSPACE_ROOTS[self.slot_set] / coordinator_slot
-        if coordinator_workspace.is_dir():
-            candidate_sources.append(coordinator_workspace)
+        candidates.append(coordinator_workspace)
 
-        source_dir = None
-        for candidate in candidate_sources:
-            if (candidate / "chemqa_review_protocol.yaml").is_file() or (candidate / "chemqa_review_protocol.yml").is_file():
-                source_dir = candidate
-                break
-        if source_dir is None:
-            raise BenchmarkError(
-                f"ChemQA run `{run_id}` finished without qa_result.json and no protocol file was found under {candidate_sources}"
-            )
-        artifact_dir.mkdir(parents=True, exist_ok=True)
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+        return deduped
+
+    def _resolve_existing_qa_result(self, run_id: str, run_status: dict[str, Any]) -> Path | None:
+        explicit_output_dir = str(run_status.get("artifacts_output_dir") or "").strip()
+        candidate_dirs = []
+        if explicit_output_dir:
+            candidate_dirs.append(Path(explicit_output_dir).expanduser().resolve())
+        candidate_dirs.append(self.chemqa_root / "generated" / "artifacts" / run_id)
+        for directory in candidate_dirs:
+            path = directory / "qa_result.json"
+            if path.is_file():
+                return path
+        return None
+
+    def _collect_artifacts_from_source(self, *, source_dir: Path, output_dir: Path, env: dict[str, str]) -> None:
         command = [
             "python3",
             str(self.collect_script),
@@ -845,17 +1184,52 @@ class ChemQARunner:
             "--source-dir",
             str(source_dir),
             "--output-dir",
-            str(artifact_dir),
+            str(output_dir),
         ]
         result = run_subprocess(command, env=env, cwd=self.chemqa_root, timeout=120)
         parse_json_stdout(result, command)
-        if not qa_result_path.is_file():
-            raise BenchmarkError(f"Failed to rebuild ChemQA artifacts for run `{run_id}`")
-        return qa_result_path
+
+    def _ensure_artifacts(
+        self,
+        run_id: str,
+        *,
+        env: dict[str, str],
+        run_status: dict[str, Any],
+        wait_seconds: int = 120,
+        poll_seconds: int = 5,
+    ) -> Path:
+        deadline = time.time() + wait_seconds
+        last_seen_status = run_status
+        checked_sources: list[str] = []
+        while time.time() < deadline:
+            last_seen_status = self._read_run_status(run_id) or last_seen_status
+            qa_result_path = self._resolve_existing_qa_result(run_id, last_seen_status)
+            if qa_result_path is not None:
+                return qa_result_path
+
+            output_dir = Path(
+                str(last_seen_status.get("artifacts_output_dir") or (self.chemqa_root / "generated" / "artifacts" / run_id))
+            ).expanduser().resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            for source_dir in self._candidate_protocol_dirs(run_id, last_seen_status):
+                checked_sources.append(str(source_dir))
+                if (source_dir / "chemqa_review_protocol.yaml").is_file() or (source_dir / "chemqa_review_protocol.yml").is_file():
+                    self._collect_artifacts_from_source(source_dir=source_dir, output_dir=output_dir, env=env)
+                    qa_result_path = output_dir / "qa_result.json"
+                    if qa_result_path.is_file():
+                        return qa_result_path
+            time.sleep(poll_seconds)
+
+        raise BenchmarkError(
+            f"ChemQA run `{run_id}` reached terminal state but artifacts were not resolved within {wait_seconds}s. "
+            f"Last run status: {last_seen_status}. Checked sources: {checked_sources}"
+        )
 
     def run(self, record: BenchmarkRecord, group: ExperimentGroup) -> RunOutput:
         run_id = f"benchmark-{group.id}-{slugify(record.record_id, limit=40)}-{now_stamp()}"
-        goal = build_chemqa_goal(record, websearch_enabled=group.websearch)
+        input_bundle = ensure_runtime_bundle(record, bundle_root=self.runtime_bundle_root)
+        goal = build_chemqa_goal(record, websearch_enabled=group.websearch, input_bundle=input_bundle)
         command = [
             "python3",
             str(self.launch_script),
@@ -878,6 +1252,8 @@ class ChemQARunner:
             "--launch-mode",
             "run",
         ]
+        if input_bundle is not None:
+            command.extend(["--additional-file-workspace", str(input_bundle.bundle_dir)])
         if self.review_rounds is not None:
             command.extend(["--review-rounds", str(self.review_rounds)])
         if self.rebuttal_rounds is not None:
@@ -890,9 +1266,9 @@ class ChemQARunner:
         payload = parse_json_stdout(result, command)
         run_status = self._wait_for_terminal_status(run_id, timeout_seconds=self.timeout_seconds)
         terminal_status = str(run_status.get("status") or "")
-        if terminal_status != "completed":
+        if terminal_status not in {"completed", "completed_with_artifact_errors"}:
             raise BenchmarkError(f"ChemQA run `{run_id}` ended with non-success status: {run_status}")
-        qa_result_path = self._ensure_artifacts(run_id, env=env)
+        qa_result_path = self._ensure_artifacts(run_id, env=env, run_status=run_status)
         qa_result = json.loads(qa_result_path.read_text(encoding="utf-8"))
         text = str(qa_result.get("final_answer") or "").strip()
         if not text:
@@ -905,6 +1281,8 @@ class ChemQARunner:
             "terminal_state": qa_result.get("terminal_state"),
             "run_status": run_status,
         }
+        if input_bundle is not None:
+            runner_meta["runtime_bundle"] = input_bundle.to_meta()
         return RunOutput(text=text, raw=qa_result, runner_meta=runner_meta)
 
 
@@ -1171,6 +1549,91 @@ CANDIDATE ANSWER:
     )
 
 
+def evaluate_superchem_multiple_choice_rpf(
+    record: BenchmarkRecord,
+    answer_text: str,
+    *,
+    judge: JudgeClient,
+) -> EvaluationResult:
+    valid_options = superchem_valid_options(record)
+    expected = parse_superchem_option_answer(record.reference_answer, valid_options=valid_options) or record.reference_answer
+    predicted = parse_superchem_option_answer(answer_text, valid_options=valid_options)
+    answer_accuracy = 1.0 if predicted and predicted == expected else 0.0
+
+    checkpoints = parse_superchem_checkpoints(str(record.payload.get("reference_reasoning") or ""))
+    if not checkpoints:
+        raise BenchmarkError(f"No SUPERChem checkpoints parsed for record: {record.record_id}")
+
+    rendered_checkpoints = [
+        f"{item['index']}. [weight={item['weight']}] {item['text']}"
+        for item in checkpoints
+    ]
+    prompt = f"""
+You are scoring a chemistry candidate response against expert reasoning checkpoints from SUPERChem.
+For each checkpoint, mark it matched only if the candidate response clearly covers the same reasoning step or conclusion.
+Do not award partial matches.
+Return strict JSON only.
+
+Required JSON schema:
+{{
+  "items": [
+    {{"index": 1, "matched": true, "rationale": "brief"}}
+  ],
+  "summary": "brief overall summary"
+}}
+
+QUESTION:
+{record.prompt}
+
+REFERENCE CHECKPOINTS:
+{os.linesep.join(rendered_checkpoints)}
+
+CANDIDATE RESPONSE:
+{answer_text}
+""".strip()
+    judged = judge.evaluate_json(prompt)
+    judged_items = judged.get("items")
+    if not isinstance(judged_items, list):
+        raise BenchmarkError(f"Judge response missing checkpoint items list: {judged}")
+
+    total_weight = float(sum(float(item["weight"]) for item in checkpoints))
+    matched_weight = 0.0
+    checkpoint_matches: list[dict[str, Any]] = []
+    for checkpoint in checkpoints:
+        judged_item = next((item for item in judged_items if int(item.get("index", -1)) == checkpoint["index"]), None)
+        matched = bool(judged_item.get("matched")) if isinstance(judged_item, dict) else False
+        rationale = "" if not isinstance(judged_item, dict) else str(judged_item.get("rationale") or "")
+        if matched:
+            matched_weight += float(checkpoint["weight"])
+        checkpoint_matches.append(
+            {
+                "index": checkpoint["index"],
+                "weight": float(checkpoint["weight"]),
+                "matched": matched,
+                "text": checkpoint["text"],
+                "rationale": rationale,
+            }
+        )
+    rpf = 0.0 if total_weight <= 0 else matched_weight / total_weight
+    return EvaluationResult(
+        eval_kind=record.eval_kind,
+        score=answer_accuracy,
+        max_score=1.0,
+        normalized_score=answer_accuracy,
+        passed=bool(answer_accuracy),
+        primary_metric="answer_accuracy",
+        primary_metric_direction="higher_is_better",
+        details={
+            "parsed_reference": expected,
+            "parsed_prediction": predicted,
+            "answer_accuracy": answer_accuracy,
+            "rpf": rpf,
+            "checkpoint_matches": checkpoint_matches,
+            "judge": judged,
+        },
+    )
+
+
 def evaluate_generic_semantic(
     record: BenchmarkRecord,
     answer_text: str,
@@ -1235,7 +1698,21 @@ def evaluate_answer(record: BenchmarkRecord, answer_text: str, *, judge: JudgeCl
         return evaluate_frontierscience_olympiad(record, answer_text, judge=judge)
     if record.eval_kind == "frontierscience_research":
         return evaluate_frontierscience_research(record, answer_text, judge=judge)
+    if record.eval_kind == "superchem_multiple_choice_rpf":
+        return evaluate_superchem_multiple_choice_rpf(record, answer_text, judge=judge)
     return evaluate_generic_semantic(record, answer_text, judge=judge)
+
+
+def average_optional_metric(items: list[GroupRecordResult], key: str) -> float | None:
+    values: list[float] = []
+    for item in items:
+        details = item.evaluation.get("details") or {}
+        value = details.get(key)
+        if isinstance(value, (int, float)):
+            values.append(float(value))
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def aggregate_bucket(items: list[GroupRecordResult]) -> dict[str, Any]:
@@ -1245,6 +1722,8 @@ def aggregate_bucket(items: list[GroupRecordResult]) -> dict[str, Any]:
         "avg_score": sum(float(item.evaluation["score"]) for item in items) / len(items),
         "avg_normalized_score": sum(float(item.evaluation["normalized_score"]) for item in items) / len(items),
         "avg_elapsed_seconds": sum(float(item.elapsed_seconds) for item in items) / len(items),
+        "avg_answer_accuracy": average_optional_metric(items, "answer_accuracy"),
+        "avg_rpf": average_optional_metric(items, "rpf"),
     }
 
 
@@ -1328,6 +1807,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
                 "avg_score": group_summary["avg_score"],
                 "avg_normalized_score": group_summary["avg_normalized_score"],
                 "avg_elapsed_seconds": group_summary["avg_elapsed_seconds"],
+                "avg_answer_accuracy": group_summary.get("avg_answer_accuracy"),
+                "avg_rpf": group_summary.get("avg_rpf"),
             }
         )
     write_csv(
@@ -1343,6 +1824,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
             "avg_score",
             "avg_normalized_score",
             "avg_elapsed_seconds",
+            "avg_answer_accuracy",
+            "avg_rpf",
         ],
     )
 
@@ -1361,6 +1844,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
             "avg_score",
             "avg_normalized_score",
             "avg_elapsed_seconds",
+            "avg_answer_accuracy",
+            "avg_rpf",
         ],
     )
 
@@ -1383,6 +1868,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
                 "passed": item.evaluation["passed"],
                 "primary_metric": item.evaluation["primary_metric"],
                 "elapsed_seconds": item.elapsed_seconds,
+                "answer_accuracy": (item.evaluation.get("details") or {}).get("answer_accuracy"),
+                "rpf": (item.evaluation.get("details") or {}).get("rpf"),
             }
         )
     write_csv(
@@ -1404,6 +1891,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
             "passed",
             "primary_metric",
             "elapsed_seconds",
+            "answer_accuracy",
+            "rpf",
         ],
     )
 
@@ -1429,6 +1918,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
             row[f"{group_id}_normalized_score"] = "" if result is None else result.evaluation["normalized_score"]
             row[f"{group_id}_passed"] = "" if result is None else result.evaluation["passed"]
             row[f"{group_id}_elapsed_seconds"] = "" if result is None else result.elapsed_seconds
+            row[f"{group_id}_answer_accuracy"] = "" if result is None else (result.evaluation.get("details") or {}).get("answer_accuracy")
+            row[f"{group_id}_rpf"] = "" if result is None else (result.evaluation.get("details") or {}).get("rpf")
         wide_rows.append(row)
     wide_fieldnames = ["record_id", "subset", "dataset", "eval_kind", "source_file"]
     for group_id in group_ids:
@@ -1438,6 +1929,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
                 f"{group_id}_normalized_score",
                 f"{group_id}_passed",
                 f"{group_id}_elapsed_seconds",
+                f"{group_id}_answer_accuracy",
+                f"{group_id}_rpf",
             ]
         )
     write_csv(output_root / "per_record_wide.csv", wide_rows, wide_fieldnames)
@@ -1522,6 +2015,7 @@ def run_group(
     review_rounds: int | None,
     rebuttal_rounds: int | None,
 ) -> list[GroupRecordResult]:
+    runtime_bundle_root = output_root / "input-bundles"
     if group.runner == "chemqa":
         runner = ChemQARunner(
             chemqa_root=chemqa_root,
@@ -1531,12 +2025,14 @@ def run_group(
             review_rounds=review_rounds,
             rebuttal_rounds=rebuttal_rounds,
             model_profile=chemqa_model_profile,
+            runtime_bundle_root=runtime_bundle_root,
         )
     else:
         runner = SingleLLMRunner(
             agent_id=single_agent,
             timeout_seconds=single_timeout,
             config_path=config_path,
+            runtime_bundle_root=runtime_bundle_root,
         )
 
     group_results: list[GroupRecordResult] = []
@@ -1599,7 +2095,12 @@ def main() -> int:
     output_root = Path(args.output_dir).expanduser().resolve() / f"benchmark-{now_stamp()}"
     ensure_dir(output_root)
 
-    config_pool = ConfigPool(base_config_path=Path(args.openclaw_config).expanduser().resolve(), output_root=output_root)
+    config_pool = ConfigPool(
+        base_config_path=Path(args.openclaw_config).expanduser().resolve(),
+        output_root=output_root,
+        single_agent_model=args.single_agent_model,
+        judge_model=args.judge_model,
+    )
     judge = JudgeClient(
         judge_agent=args.judge_agent,
         timeout_seconds=args.judge_timeout,
@@ -1664,11 +2165,14 @@ def main() -> int:
                     "config_path": str(config_pool.config_for_group(EXPERIMENT_GROUPS[group_id])),
                     "slot_set": CHEMQA_SLOT_SETS.get(group_id),
                     "single_agent": BASELINE_AGENT_IDS.get(group_id),
+                    "single_agent_model": args.single_agent_model,
+                    "chemqa_model_profile": args.chemqa_model_profile if EXPERIMENT_GROUPS[group_id].runner == "chemqa" else None,
                 }
                 for group_id in group_ids
             },
             "judge": {
                 "agent": args.judge_agent,
+                "model": args.judge_model,
                 "config_path": str(config_pool.judge_config_path()),
             },
         },
