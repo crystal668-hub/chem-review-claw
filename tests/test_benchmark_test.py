@@ -110,7 +110,11 @@ Points: 0.5, Item: Second criterion
             reference_answer="4",
             payload={"target": "4", "preferred_score": "mae"},
         )
-        result = benchmark_test.evaluate_chembench_open_ended(record, "FINAL ANSWER: 4")
+        result = benchmark_test.evaluate_chembench_open_ended(
+            record,
+            short_answer_text="4",
+            full_response_text="Reasoning\nFINAL ANSWER: 4",
+        )
         self.assertTrue(result.passed)
         self.assertEqual(0.0, result.score)
         self.assertEqual(1.0, result.normalized_score)
@@ -336,6 +340,33 @@ Points: 0.5, Item: Second criterion
             self.assertTrue(bundle.image_files[0].is_file())
             self.assertEqual(b"image-bytes", bundle.image_files[0].read_bytes())
 
+    def test_build_chemqa_full_response_uses_final_submission_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            final_submission = {
+                "direct_answer": "F",
+                "summary": "Probe A needs esterase cleavage; probe B does not.",
+                "submission_trace": [
+                    {"step": "structural-analysis", "status": "success", "detail": "Identified acetate esters and thiourea."}
+                ],
+                "evidence_limits": ["No literature retrieval was run."],
+                "claim_anchors": [{"anchor": "claim-1", "claim": "A requires enzymatic activation."}],
+            }
+            final_submission_path = temp_dir / "final_submission.json"
+            final_submission_path.write_text(json.dumps(final_submission), encoding="utf-8")
+            qa_result = {
+                "final_answer": "F",
+                "artifact_paths": {
+                    "final_submission": str(final_submission_path),
+                },
+            }
+            short_text, full_text = benchmark_test.build_chemqa_full_response(qa_result=qa_result)
+            self.assertEqual("F", short_text)
+            self.assertIn("Summary:", full_text)
+            self.assertIn("Probe A needs esterase cleavage", full_text)
+            self.assertIn("Reasoning / submission trace:", full_text)
+            self.assertIn("FINAL ANSWER: F", full_text)
+
     def test_evaluate_superchem_multiple_choice_rpf(self) -> None:
         record = benchmark_test.BenchmarkRecord(
             record_id="superchem-1",
@@ -361,13 +392,19 @@ Points: 0.5, Item: Second criterion
                 "summary": "partial",
             }
         )
-        result = benchmark_test.evaluate_superchem_multiple_choice_rpf(record, "Reasoning\nFINAL ANSWER: B", judge=judge)
+        result = benchmark_test.evaluate_superchem_multiple_choice_rpf(
+            record,
+            short_answer_text="B",
+            full_response_text="Reasoning\nFINAL ANSWER: B",
+            judge=judge,
+        )
         self.assertTrue(result.passed)
         self.assertEqual(1.0, result.score)
         self.assertAlmostEqual(2.0 / 3.0, result.details["rpf"])
         self.assertEqual("B", result.details["parsed_prediction"])
         self.assertEqual(2, len(result.details["checkpoint_matches"]))
         self.assertEqual(1, len(judge.prompts))
+        self.assertIn("Reasoning", judge.prompts[0])
 
     def test_aggregate_results_groups_by_experiment(self) -> None:
         sample = [
@@ -496,7 +533,12 @@ Points: 0.5, Item: Second criterion
                 _ = group
                 if getattr(record, "record_id") == "r1":
                     raise RuntimeError("boom")
-                return benchmark_test.RunOutput(text="FINAL ANSWER: 5", raw={}, runner_meta={})
+                return benchmark_test.RunOutput(
+                    short_answer_text="5",
+                    full_response_text="Reasoning\nFINAL ANSWER: 5",
+                    raw={},
+                    runner_meta={},
+                )
 
         original_runner = benchmark_test.SingleLLMRunner
         benchmark_test.SingleLLMRunner = StubSingleRunner

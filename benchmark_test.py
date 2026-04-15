@@ -127,7 +127,8 @@ class BenchmarkRecord:
 
 @dataclass
 class RunOutput:
-    text: str
+    short_answer_text: str
+    full_response_text: str
     raw: dict[str, Any]
     runner_meta: dict[str, Any]
 
@@ -177,6 +178,8 @@ class GroupRecordResult:
     raw: dict[str, Any]
     elapsed_seconds: float
     error: str | None = None
+    short_answer_text: str = ""
+    full_response_text: str = ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -1002,6 +1005,90 @@ def summarize_payloads(payloads: list[dict[str, Any]]) -> str:
     return "\n\n".join(texts).strip()
 
 
+def normalize_answer_tracks(*, short_answer_text: str = "", full_response_text: str = "") -> tuple[str, str]:
+    short_text = str(short_answer_text or "").strip()
+    full_text = str(full_response_text or "").strip()
+    if not short_text and full_text:
+        short_text = extract_candidate_short_answer(full_text)
+    if not full_text and short_text:
+        full_text = f"FINAL ANSWER: {short_text}"
+    return short_text, full_text
+
+
+def render_chemqa_submission_rationale(final_submission: dict[str, Any], *, final_answer_text: str = "") -> str:
+    parts: list[str] = []
+    summary = normalize_space(str(final_submission.get("summary") or ""))
+    if summary:
+        parts.extend(["Summary:", summary])
+
+    submission_trace = list(final_submission.get("submission_trace") or [])
+    if submission_trace:
+        parts.append("")
+        parts.append("Reasoning / submission trace:")
+        for item in submission_trace:
+            if not isinstance(item, dict):
+                continue
+            step = normalize_space(str(item.get("step") or item.get("phase") or "reasoning"))
+            detail = normalize_space(str(item.get("detail") or item.get("summary") or item.get("finding") or ""))
+            status = normalize_space(str(item.get("status") or ""))
+            bullet = f"- {step}"
+            if status:
+                bullet += f" [{status}]"
+            if detail:
+                bullet += f": {detail}"
+            parts.append(bullet)
+
+    claim_anchors = list(final_submission.get("claim_anchors") or [])
+    if claim_anchors:
+        parts.append("")
+        parts.append("Claim anchors:")
+        for item in claim_anchors:
+            if not isinstance(item, dict):
+                continue
+            claim = normalize_space(str(item.get("claim") or ""))
+            anchor = normalize_space(str(item.get("anchor") or ""))
+            if claim:
+                parts.append(f"- {anchor + ': ' if anchor else ''}{claim}")
+
+    evidence_limits = list(final_submission.get("evidence_limits") or [])
+    if evidence_limits:
+        parts.append("")
+        parts.append("Evidence limits:")
+        for item in evidence_limits:
+            text = normalize_space(str(item or ""))
+            if text:
+                parts.append(f"- {text}")
+
+    final_answer = normalize_space(final_answer_text or str(final_submission.get("direct_answer") or ""))
+    if final_answer:
+        parts.append("")
+        parts.append(f"FINAL ANSWER: {final_answer}")
+
+    return "\n".join(part for part in parts if part is not None).strip()
+
+
+def build_chemqa_full_response(*, qa_result: dict[str, Any]) -> tuple[str, str]:
+    artifact_paths = dict(qa_result.get("artifact_paths") or {})
+    short_answer_text = normalize_space(str(qa_result.get("final_answer") or ""))
+    final_submission_path = str(artifact_paths.get("final_submission") or "").strip()
+    if final_submission_path:
+        path = Path(final_submission_path)
+        if path.is_file():
+            try:
+                final_submission = json.loads(path.read_text(encoding="utf-8"))
+                full_response_text = render_chemqa_submission_rationale(final_submission, final_answer_text=short_answer_text)
+                return normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
+            except Exception:
+                pass
+    final_answer_path = str(artifact_paths.get("final_answer") or "").strip()
+    if final_answer_path:
+        path = Path(final_answer_path)
+        if path.is_file():
+            fallback_text = path.read_text(encoding="utf-8").strip()
+            return normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=fallback_text)
+    return normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text="")
+
+
 class JudgeClient:
     def __init__(
         self,
@@ -1086,11 +1173,17 @@ class SingleLLMRunner:
         payload = parse_json_stdout(result, command)
         result_payload = unwrap_agent_payload(payload)
         payloads = list((result_payload.get("payloads") or []))
-        text = summarize_payloads(payloads)
+        full_response_text = summarize_payloads(payloads)
+        short_answer_text, full_response_text = normalize_answer_tracks(full_response_text=full_response_text)
         runner_meta = deep_copy_jsonish(result_payload.get("meta") or {})
         if input_bundle is not None:
             runner_meta["runtime_bundle"] = input_bundle.to_meta()
-        return RunOutput(text=text, raw=payload, runner_meta=runner_meta)
+        return RunOutput(
+            short_answer_text=short_answer_text,
+            full_response_text=full_response_text,
+            raw=payload,
+            runner_meta=runner_meta,
+        )
 
 
 class ChemQARunner:
@@ -1279,12 +1372,10 @@ class ChemQARunner:
             }
             if input_bundle is not None:
                 runner_meta["runtime_bundle"] = input_bundle.to_meta()
-            return RunOutput(text="", raw={"run_status": run_status}, runner_meta=runner_meta)
+            return RunOutput(short_answer_text="", full_response_text="", raw={"run_status": run_status}, runner_meta=runner_meta)
         qa_result_path = self._ensure_artifacts(run_id, env=env, run_status=run_status)
         qa_result = json.loads(qa_result_path.read_text(encoding="utf-8"))
-        text = str(qa_result.get("final_answer") or "").strip()
-        if not text:
-            text = (Path(qa_result["artifact_paths"]["final_answer"]).read_text(encoding="utf-8")).strip()
+        short_answer_text, full_response_text = build_chemqa_full_response(qa_result=qa_result)
         runner_meta = {
             "run_id": run_id,
             "launch": payload,
@@ -1295,12 +1386,22 @@ class ChemQARunner:
         }
         if input_bundle is not None:
             runner_meta["runtime_bundle"] = input_bundle.to_meta()
-        return RunOutput(text=text, raw=qa_result, runner_meta=runner_meta)
+        return RunOutput(
+            short_answer_text=short_answer_text,
+            full_response_text=full_response_text,
+            raw=qa_result,
+            runner_meta=runner_meta,
+        )
 
 
-def evaluate_chembench_open_ended(record: BenchmarkRecord, answer_text: str) -> EvaluationResult:
+def evaluate_chembench_open_ended(
+    record: BenchmarkRecord,
+    *,
+    short_answer_text: str,
+    full_response_text: str,
+) -> EvaluationResult:
     expected = str(record.payload.get("target") or record.reference_answer)
-    predicted_short = extract_candidate_short_answer(answer_text)
+    predicted_short, _ = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
     expected_norm = normalize_loose(expected)
     predicted_norm = normalize_loose(predicted_short)
 
@@ -1381,12 +1482,13 @@ def heuristic_semantic_match(expected: str, predicted: str) -> bool | None:
 
 def evaluate_frontierscience_olympiad(
     record: BenchmarkRecord,
-    answer_text: str,
     *,
+    short_answer_text: str,
+    full_response_text: str,
     judge: JudgeClient,
 ) -> EvaluationResult:
     expected = record.reference_answer
-    predicted = extract_candidate_short_answer(answer_text)
+    predicted, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
     heuristic = heuristic_semantic_match(expected, predicted)
     if heuristic is not None:
         return EvaluationResult(
@@ -1426,8 +1528,11 @@ QUESTION:
 REFERENCE ANSWER:
 {expected}
 
-CANDIDATE ANSWER:
+CANDIDATE SHORT ANSWER:
 {predicted}
+
+CANDIDATE FULL RESPONSE:
+{full_text}
 """.strip()
     judged = judge.evaluate_json(prompt)
     correct = bool(judged.get("correct"))
@@ -1475,8 +1580,9 @@ def parse_frontierscience_research_rubric(text: str) -> list[dict[str, Any]]:
 
 def evaluate_frontierscience_research(
     record: BenchmarkRecord,
-    answer_text: str,
     *,
+    short_answer_text: str,
+    full_response_text: str,
     judge: JudgeClient,
 ) -> EvaluationResult:
     rubric_items = parse_frontierscience_research_rubric(record.reference_answer)
@@ -1484,6 +1590,8 @@ def evaluate_frontierscience_research(
         raise BenchmarkError(f"No rubric items parsed for record: {record.record_id}")
     rubric_lines = [f"{idx + 1}. [{item['points']} points] {item['description']}" for idx, item in enumerate(rubric_items)]
     max_score = float(sum(item["points"] for item in rubric_items))
+    short_text, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
+    candidate_response = full_text or short_text
     prompt = f"""
 You are grading a chemistry research benchmark response against a point rubric.
 For each rubric item, award either 0 or the item's full points only.
@@ -1507,7 +1615,7 @@ RUBRIC ITEMS:
 {os.linesep.join(rubric_lines)}
 
 CANDIDATE ANSWER:
-{answer_text}
+{candidate_response}
 """.strip()
     judged = judge.evaluate_json(prompt)
     judged_items = judged.get("items")
@@ -1563,13 +1671,15 @@ CANDIDATE ANSWER:
 
 def evaluate_superchem_multiple_choice_rpf(
     record: BenchmarkRecord,
-    answer_text: str,
     *,
+    short_answer_text: str,
+    full_response_text: str,
     judge: JudgeClient,
 ) -> EvaluationResult:
     valid_options = superchem_valid_options(record)
+    short_text, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
     expected = parse_superchem_option_answer(record.reference_answer, valid_options=valid_options) or record.reference_answer
-    predicted = parse_superchem_option_answer(answer_text, valid_options=valid_options)
+    predicted = parse_superchem_option_answer(short_text, valid_options=valid_options)
     answer_accuracy = 1.0 if predicted and predicted == expected else 0.0
 
     checkpoints = parse_superchem_checkpoints(str(record.payload.get("reference_reasoning") or ""))
@@ -1601,7 +1711,7 @@ REFERENCE CHECKPOINTS:
 {os.linesep.join(rendered_checkpoints)}
 
 CANDIDATE RESPONSE:
-{answer_text}
+{full_text}
 """.strip()
     judged = judge.evaluate_json(prompt)
     judged_items = judged.get("items")
@@ -1648,12 +1758,13 @@ CANDIDATE RESPONSE:
 
 def evaluate_generic_semantic(
     record: BenchmarkRecord,
-    answer_text: str,
     *,
+    short_answer_text: str,
+    full_response_text: str,
     judge: JudgeClient,
 ) -> EvaluationResult:
     expected = record.reference_answer
-    predicted = extract_candidate_short_answer(answer_text)
+    predicted, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
     heuristic = heuristic_semantic_match(expected, predicted)
     if heuristic is not None:
         score = 1.0 if heuristic else 0.0
@@ -1685,8 +1796,11 @@ QUESTION:
 REFERENCE ANSWER:
 {expected}
 
-CANDIDATE ANSWER:
+CANDIDATE SHORT ANSWER:
 {predicted}
+
+CANDIDATE FULL RESPONSE:
+{full_text}
 """.strip()
     judged = judge.evaluate_json(prompt)
     correct = bool(judged.get("correct"))
@@ -1703,16 +1817,22 @@ CANDIDATE ANSWER:
     )
 
 
-def evaluate_answer(record: BenchmarkRecord, answer_text: str, *, judge: JudgeClient) -> EvaluationResult:
+def evaluate_answer(
+    record: BenchmarkRecord,
+    *,
+    short_answer_text: str,
+    full_response_text: str,
+    judge: JudgeClient,
+) -> EvaluationResult:
     if record.eval_kind == "chembench_open_ended":
-        return evaluate_chembench_open_ended(record, answer_text)
+        return evaluate_chembench_open_ended(record, short_answer_text=short_answer_text, full_response_text=full_response_text)
     if record.eval_kind == "frontierscience_olympiad":
-        return evaluate_frontierscience_olympiad(record, answer_text, judge=judge)
+        return evaluate_frontierscience_olympiad(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
     if record.eval_kind == "frontierscience_research":
-        return evaluate_frontierscience_research(record, answer_text, judge=judge)
+        return evaluate_frontierscience_research(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
     if record.eval_kind == "superchem_multiple_choice_rpf":
-        return evaluate_superchem_multiple_choice_rpf(record, answer_text, judge=judge)
-    return evaluate_generic_semantic(record, answer_text, judge=judge)
+        return evaluate_superchem_multiple_choice_rpf(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
+    return evaluate_generic_semantic(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
 
 
 def average_optional_metric(items: list[GroupRecordResult], key: str) -> float | None:
@@ -1897,6 +2017,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
                 "passed": item.evaluation["passed"],
                 "primary_metric": item.evaluation["primary_metric"],
                 "elapsed_seconds": item.elapsed_seconds,
+                "short_answer_text": item.short_answer_text,
+                "full_response_text": item.full_response_text,
                 "answer_accuracy": (item.evaluation.get("details") or {}).get("answer_accuracy"),
                 "rpf": (item.evaluation.get("details") or {}).get("rpf"),
                 "error": item.error or (item.evaluation.get("details") or {}).get("error"),
@@ -1921,6 +2043,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
             "passed",
             "primary_metric",
             "elapsed_seconds",
+            "short_answer_text",
+            "full_response_text",
             "answer_accuracy",
             "rpf",
             "error",
@@ -1949,6 +2073,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
             row[f"{group_id}_normalized_score"] = "" if result is None else result.evaluation["normalized_score"]
             row[f"{group_id}_passed"] = "" if result is None else result.evaluation["passed"]
             row[f"{group_id}_elapsed_seconds"] = "" if result is None else result.elapsed_seconds
+            row[f"{group_id}_short_answer_text"] = "" if result is None else result.short_answer_text
+            row[f"{group_id}_full_response_text"] = "" if result is None else result.full_response_text
             row[f"{group_id}_answer_accuracy"] = "" if result is None else (result.evaluation.get("details") or {}).get("answer_accuracy")
             row[f"{group_id}_rpf"] = "" if result is None else (result.evaluation.get("details") or {}).get("rpf")
             row[f"{group_id}_error"] = "" if result is None else (result.error or (result.evaluation.get("details") or {}).get("error"))
@@ -1961,6 +2087,8 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
                 f"{group_id}_normalized_score",
                 f"{group_id}_passed",
                 f"{group_id}_elapsed_seconds",
+                f"{group_id}_short_answer_text",
+                f"{group_id}_full_response_text",
                 f"{group_id}_answer_accuracy",
                 f"{group_id}_rpf",
                 f"{group_id}_error",
@@ -2057,6 +2185,8 @@ def build_error_group_record_result(
     error_message: str,
     elapsed_seconds: float = 0.0,
     answer_text: str = "",
+    short_answer_text: str = "",
+    full_response_text: str = "",
     runner_meta: dict[str, Any] | None = None,
     raw: dict[str, Any] | None = None,
 ) -> GroupRecordResult:
@@ -2064,6 +2194,8 @@ def build_error_group_record_result(
     meta = deep_copy_jsonish(runner_meta or {})
     meta.setdefault("error", error_message)
     payload = deep_copy_jsonish(raw or {"error": error_message})
+    short_text, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
+    compatible_answer_text = answer_text or full_text or short_text
     return GroupRecordResult(
         group_id=group.id,
         group_label=group.label,
@@ -2076,12 +2208,14 @@ def build_error_group_record_result(
         eval_kind=record.eval_kind,
         prompt=record.prompt,
         reference_answer=record.reference_answer,
-        answer_text=answer_text,
+        answer_text=compatible_answer_text,
         evaluation=asdict(evaluation),
         runner_meta=meta,
         raw=payload,
         elapsed_seconds=elapsed_seconds,
         error=error_message,
+        short_answer_text=short_text,
+        full_response_text=full_text,
     )
 
 
@@ -2136,8 +2270,14 @@ def run_group(
         started = time.time()
         try:
             run_output = runner.run(record, group)
-            evaluation = evaluate_answer(record, run_output.text, judge=judge)
+            evaluation = evaluate_answer(
+                record,
+                short_answer_text=run_output.short_answer_text,
+                full_response_text=run_output.full_response_text,
+                judge=judge,
+            )
             elapsed = time.time() - started
+            answer_text = run_output.full_response_text or run_output.short_answer_text
             entry = GroupRecordResult(
                 group_id=group.id,
                 group_label=group.label,
@@ -2150,12 +2290,14 @@ def run_group(
                 eval_kind=record.eval_kind,
                 prompt=record.prompt,
                 reference_answer=record.reference_answer,
-                answer_text=run_output.text,
+                answer_text=answer_text,
                 evaluation=asdict(evaluation),
                 runner_meta=run_output.runner_meta,
                 raw=run_output.raw,
                 elapsed_seconds=elapsed,
                 error=None,
+                short_answer_text=run_output.short_answer_text,
+                full_response_text=run_output.full_response_text,
             )
         except Exception as exc:
             elapsed = time.time() - started
