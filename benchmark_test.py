@@ -193,6 +193,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--openclaw-config", default=str(DEFAULT_OPENCLAW_CONFIG), help="基础 OpenClaw 配置文件")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="结果输出目录")
     parser.add_argument(
+        "--exact-output-dir",
+        help="若提供，则直接把该目录作为本次输出根目录，而不是自动创建 benchmark-时间戳 子目录",
+    )
+    parser.add_argument(
+        "--merge-existing-per-record",
+        action="store_true",
+        help="聚合结果时合并输出目录中已存在的 per-record 结果，适合断点续跑/部分重跑",
+    )
+    parser.add_argument(
         "--groups",
         default=",".join(EXPERIMENT_GROUPS.keys()),
         help="要运行的实验组，逗号分隔。默认四组全跑",
@@ -2294,6 +2303,42 @@ def count_per_record_outputs(output_root: Path, *, group_ids: list[str]) -> dict
 
 
 
+def load_group_record_result(path: Path) -> GroupRecordResult:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return GroupRecordResult(**payload)
+
+
+
+def resolve_aggregate_group_ids(
+    selected_group_ids: list[str],
+    *,
+    output_root: Path,
+    merge_existing_per_record: bool,
+) -> list[str]:
+    if not merge_existing_per_record:
+        return list(selected_group_ids)
+    present = set(selected_group_ids)
+    per_record_root = output_root / "per-record"
+    for group_id in EXPERIMENT_GROUPS:
+        group_dir = per_record_root / group_id
+        if group_dir.is_dir() and any(group_dir.glob("*.json")):
+            present.add(group_id)
+    return [group_id for group_id in EXPERIMENT_GROUPS if group_id in present]
+
+
+
+def load_results_from_output_root(output_root: Path, *, group_ids: list[str]) -> list[GroupRecordResult]:
+    results: list[GroupRecordResult] = []
+    for group_id in group_ids:
+        group_dir = output_root / "per-record" / group_id
+        if not group_dir.is_dir():
+            continue
+        for path in sorted(group_dir.glob("*.json")):
+            results.append(load_group_record_result(path))
+    return results
+
+
+
 def write_wave_status(
     output_root: Path,
     *,
@@ -2514,7 +2559,10 @@ def main() -> int:
         print_selected_records(records)
         return 0
 
-    output_root = Path(args.output_dir).expanduser().resolve() / f"benchmark-{now_stamp()}"
+    if args.exact_output_dir:
+        output_root = Path(args.exact_output_dir).expanduser().resolve()
+    else:
+        output_root = Path(args.output_dir).expanduser().resolve() / f"benchmark-{now_stamp()}"
     ensure_dir(output_root)
 
     config_pool = ConfigPool(
@@ -2592,16 +2640,26 @@ def main() -> int:
         if wave_index < len(group_waves) and args.inter_wave_delay_seconds > 0:
             time.sleep(args.inter_wave_delay_seconds)
 
-    results: list[GroupRecordResult] = []
-    for group_id in group_ids:
-        results.extend(group_results.get(group_id, []))
+    aggregate_group_ids = resolve_aggregate_group_ids(
+        group_ids,
+        output_root=output_root,
+        merge_existing_per_record=args.merge_existing_per_record,
+    )
+    if args.merge_existing_per_record:
+        results = load_results_from_output_root(output_root, group_ids=aggregate_group_ids)
+    else:
+        results: list[GroupRecordResult] = []
+        for group_id in group_ids:
+            results.extend(group_results.get(group_id, []))
 
     summary = aggregate_results(results)
     payload = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "benchmark_root": str(Path(args.benchmark_root).expanduser().resolve()),
         "dataset_files": [str(path) for path in dataset_files],
-        "groups": [asdict(EXPERIMENT_GROUPS[group_id]) for group_id in group_ids],
+        "groups": [asdict(EXPERIMENT_GROUPS[group_id]) for group_id in aggregate_group_ids],
+        "run_groups": [asdict(EXPERIMENT_GROUPS[group_id]) for group_id in group_ids],
+        "merge_existing_per_record": args.merge_existing_per_record,
         "random_sampling": {
             "enabled": args.random_count_per_subset is not None,
             "count_per_subset": args.random_count_per_subset,
@@ -2627,7 +2685,7 @@ def main() -> int:
         ],
     }
     save_json(output_root / "results.json", payload)
-    export_csv_reports(output_root, results, summary, group_ids)
+    export_csv_reports(output_root, results, summary, aggregate_group_ids)
     save_json(
         output_root / "runtime-manifest.json",
         {
@@ -2637,6 +2695,9 @@ def main() -> int:
                 "inter_wave_delay_seconds": args.inter_wave_delay_seconds,
                 "waves": group_waves,
             },
+            "aggregate_groups": aggregate_group_ids,
+            "run_groups": group_ids,
+            "merge_existing_per_record": args.merge_existing_per_record,
             "groups": {
                 group_id: {
                     "group": asdict(EXPERIMENT_GROUPS[group_id]),

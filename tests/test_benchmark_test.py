@@ -79,6 +79,54 @@ Points: 0.5, Item: Second criterion
             waves,
         )
 
+    def test_resolve_aggregate_group_ids_includes_existing_group_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            existing = root / "per-record" / "single_llm_web_on"
+            existing.mkdir(parents=True, exist_ok=True)
+            (existing / "demo.json").write_text("{}\n", encoding="utf-8")
+            aggregate = benchmark_test.resolve_aggregate_group_ids(
+                ["chemqa_web_on", "chemqa_web_off", "single_llm_web_off"],
+                output_root=root,
+                merge_existing_per_record=True,
+            )
+            self.assertEqual(
+                ["chemqa_web_on", "chemqa_web_off", "single_llm_web_on", "single_llm_web_off"],
+                aggregate,
+            )
+
+    def test_load_results_from_output_root_reads_existing_per_record_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            group_dir = root / "per-record" / "single_llm_web_on"
+            group_dir.mkdir(parents=True, exist_ok=True)
+            payload = benchmark_test.GroupRecordResult(
+                group_id="single_llm_web_on",
+                group_label="单一 LLM + 启用 websearch plugin",
+                runner="single_llm",
+                websearch=True,
+                record_id="demo-record",
+                subset="chembench",
+                dataset="chembench",
+                source_file="/tmp/demo.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="Q",
+                reference_answer="A",
+                answer_text="A",
+                evaluation={"score": 1},
+                runner_meta={},
+                raw={},
+                elapsed_seconds=1.0,
+                error=None,
+                short_answer_text="A",
+                full_response_text="FINAL ANSWER: A",
+            )
+            (group_dir / "demo-record.json").write_text(json.dumps(benchmark_test.asdict(payload)), encoding="utf-8")
+            loaded = benchmark_test.load_results_from_output_root(root, group_ids=["single_llm_web_on"])
+            self.assertEqual(1, len(loaded))
+            self.assertEqual("demo-record", loaded[0].record_id)
+            self.assertEqual("A", loaded[0].short_answer_text)
+
     def test_build_run_scoped_config_payload_uses_explicit_single_and_judge_models(self) -> None:
         base = {
             "agents": {"list": []},
