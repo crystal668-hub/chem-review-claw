@@ -43,6 +43,7 @@ BASELINE_AGENT_IDS = {
     "single_llm_web_off": "benchmark-single-web-off",
 }
 JUDGE_AGENT_ID = "benchmark-judge"
+BENCHMARK_AGENT_THINKING = "high"
 CHEMQA_WORKSPACE_ROOTS = {
     "A": Path.home() / ".openclaw" / "debateclaw" / "workspacesA",
     "B": Path.home() / ".openclaw" / "debateclaw" / "workspacesB",
@@ -339,7 +340,15 @@ def ensure_basic_agent_dirs(*paths: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
-def upsert_agent_entry(payload: dict[str, Any], *, agent_id: str, workspace: Path, agent_dir: Path, model: str) -> None:
+def upsert_agent_entry(
+    payload: dict[str, Any],
+    *,
+    agent_id: str,
+    workspace: Path,
+    agent_dir: Path,
+    model: str,
+    thinking: str | None = None,
+) -> None:
     agents = payload.setdefault("agents", {})
     entries = agents.setdefault("list", [])
     if not isinstance(entries, list):
@@ -352,16 +361,19 @@ def upsert_agent_entry(payload: dict[str, Any], *, agent_id: str, workspace: Pat
             entry["workspace"] = normalized_workspace
             entry["agentDir"] = normalized_agent_dir
             entry["model"] = model
+            if thinking is not None:
+                entry["thinking"] = thinking
             return
-    entries.append(
-        {
-            "id": agent_id,
-            "name": agent_id,
-            "workspace": normalized_workspace,
-            "agentDir": normalized_agent_dir,
-            "model": model,
-        }
-    )
+    row = {
+        "id": agent_id,
+        "name": agent_id,
+        "workspace": normalized_workspace,
+        "agentDir": normalized_agent_dir,
+        "model": model,
+    }
+    if thinking is not None:
+        row["thinking"] = thinking
+    entries.append(row)
 
 
 def build_run_scoped_config_payload(
@@ -381,14 +393,25 @@ def build_run_scoped_config_payload(
         workspace=judge_workspace,
         agent_dir=judge_agent_dir,
         model=judge_model,
+        thinking=BENCHMARK_AGENT_THINKING,
     )
+
+    if group.id == "benchmark-judge-runtime":
+        return payload
 
     if group.runner == "single_llm":
         agent_id = BASELINE_AGENT_IDS.get(group.id, JUDGE_AGENT_ID)
         workspace = BASELINE_WORKSPACE_ROOT / agent_id
         agent_dir = Path.home() / ".openclaw" / "agents" / agent_id / "agent"
         ensure_basic_agent_dirs(workspace, agent_dir)
-        upsert_agent_entry(payload, agent_id=agent_id, workspace=workspace, agent_dir=agent_dir, model=single_agent_model)
+        upsert_agent_entry(
+            payload,
+            agent_id=agent_id,
+            workspace=workspace,
+            agent_dir=agent_dir,
+            model=single_agent_model,
+            thinking=BENCHMARK_AGENT_THINKING,
+        )
         return payload
 
     slot_set = CHEMQA_SLOT_SETS[group.id]
@@ -400,7 +423,14 @@ def build_run_scoped_config_payload(
         ensure_basic_agent_dirs(agent_dir)
         ensure_slot_workspace(workspace, slot_id=actual_slot_id, workspace_root=workspace_root)
         default_model = judge_model if logical_slot_id == "debate-coordinator" else single_agent_model
-        upsert_agent_entry(payload, agent_id=actual_slot_id, workspace=workspace, agent_dir=agent_dir, model=default_model)
+        upsert_agent_entry(
+            payload,
+            agent_id=actual_slot_id,
+            workspace=workspace,
+            agent_dir=agent_dir,
+            model=default_model,
+            thinking=BENCHMARK_AGENT_THINKING,
+        )
     return payload
 
 
@@ -1128,7 +1158,7 @@ class JudgeClient:
             "--message",
             prompt,
             "--thinking",
-            "medium",
+            BENCHMARK_AGENT_THINKING,
             "--timeout",
             str(self.timeout_seconds),
             "--json",
@@ -1175,7 +1205,7 @@ class SingleLLMRunner:
             "--message",
             prompt,
             "--thinking",
-            "low",
+            BENCHMARK_AGENT_THINKING,
             "--timeout",
             str(self.timeout_seconds),
             "--json",

@@ -95,6 +95,30 @@ Points: 0.5, Item: Second criterion
         agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
         self.assertEqual("qwen3.5-plus", agents["benchmark-single-web-on"]["model"])
         self.assertEqual("su8/gpt-5.4", agents["benchmark-judge"]["model"])
+        self.assertEqual("high", agents["benchmark-single-web-on"]["thinking"])
+        self.assertEqual("high", agents["benchmark-judge"]["thinking"])
+
+    def test_build_run_scoped_config_payload_benchmark_judge_runtime_uses_judge_model(self) -> None:
+        base = {
+            "agents": {"list": []},
+            "tools": {"web": {"search": {"enabled": False}}},
+            "plugins": {"entries": {"duckduckgo": {"enabled": False, "config": {}}}},
+        }
+        group = benchmark_test.ExperimentGroup(
+            id="benchmark-judge-runtime",
+            label="benchmark judge runtime",
+            runner="single_llm",
+            websearch=False,
+        )
+        payload = benchmark_test.build_run_scoped_config_payload(
+            base,
+            group=group,
+            single_agent_model="qwen3.5-plus",
+            judge_model="su8/gpt-5.4",
+        )
+        agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
+        self.assertEqual("su8/gpt-5.4", agents["benchmark-judge"]["model"])
+        self.assertEqual("high", agents["benchmark-judge"]["thinking"])
 
     def test_build_run_scoped_config_payload_chemqa_uses_judge_for_coordinator_only(self) -> None:
         base = {
@@ -111,8 +135,10 @@ Points: 0.5, Item: Second criterion
         )
         agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
         self.assertEqual("su8/gpt-5.4", agents["debateB-coordinator"]["model"])
+        self.assertEqual("high", agents["debateB-coordinator"]["thinking"])
         for slot in ["debateB-1", "debateB-2", "debateB-3", "debateB-4", "debateB-5"]:
             self.assertEqual("qwen3.5-plus", agents[slot]["model"])
+            self.assertEqual("high", agents[slot]["thinking"])
 
     def test_chemqa_wait_for_terminal_status_accepts_stalled(self) -> None:
         runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
@@ -522,6 +548,77 @@ Points: 0.5, Item: Second criterion
         summary = benchmark_test.aggregate_results(sample)
         self.assertEqual(1.0, summary["groups"]["g1"]["avg_answer_accuracy"])
         self.assertEqual(0.75, summary["groups"]["g1"]["avg_rpf"])
+
+    def test_judge_client_invokes_openclaw_with_high_thinking(self) -> None:
+        captured: dict[str, object] = {}
+        original_run_subprocess = benchmark_test.run_subprocess
+        try:
+            def fake_run_subprocess(command: list[str], *, env=None, cwd=None, timeout=None):
+                captured["command"] = list(command)
+                captured["env"] = dict(env or {})
+                return benchmark_test.subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps({"result": {"payloads": [{"text": '{"items": [], "summary": "ok"}'}], "meta": {}}}),
+                    stderr="",
+                )
+
+            benchmark_test.run_subprocess = fake_run_subprocess
+            client = benchmark_test.JudgeClient(
+                judge_agent="benchmark-judge",
+                timeout_seconds=30,
+                config_path=Path("/tmp/judge.json"),
+            )
+            payload = client.evaluate_json("score this")
+            self.assertEqual([], payload["items"])
+            command = captured["command"]
+            assert isinstance(command, list)
+            self.assertIn("--thinking", command)
+            self.assertEqual("high", command[command.index("--thinking") + 1])
+        finally:
+            benchmark_test.run_subprocess = original_run_subprocess
+
+    def test_single_llm_runner_invokes_openclaw_with_high_thinking(self) -> None:
+        captured: dict[str, object] = {}
+        original_run_subprocess = benchmark_test.run_subprocess
+        original_ensure_runtime_bundle = benchmark_test.ensure_runtime_bundle
+        try:
+            def fake_run_subprocess(command: list[str], *, env=None, cwd=None, timeout=None):
+                captured["command"] = list(command)
+                captured["env"] = dict(env or {})
+                return benchmark_test.subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps({"result": {"payloads": [{"text": 'Reasoning\nFINAL ANSWER: 5'}], "meta": {}}}),
+                    stderr="",
+                )
+
+            benchmark_test.run_subprocess = fake_run_subprocess
+            benchmark_test.ensure_runtime_bundle = lambda record, bundle_root: None
+            runner = benchmark_test.SingleLLMRunner(
+                agent_id="benchmark-single-web-on",
+                timeout_seconds=30,
+                config_path=Path("/tmp/single.json"),
+                runtime_bundle_root=Path("/tmp"),
+            )
+            record = benchmark_test.BenchmarkRecord(
+                record_id="demo",
+                dataset="chembench",
+                source_file="/tmp/demo.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="What is 2+3?",
+                reference_answer="5",
+                payload={},
+            )
+            out = runner.run(record, benchmark_test.EXPERIMENT_GROUPS["single_llm_web_on"])
+            self.assertEqual("5", out.short_answer_text)
+            command = captured["command"]
+            assert isinstance(command, list)
+            self.assertIn("--thinking", command)
+            self.assertEqual("high", command[command.index("--thinking") + 1])
+        finally:
+            benchmark_test.run_subprocess = original_run_subprocess
+            benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
 
     def test_run_group_continues_after_record_failure(self) -> None:
         records = [
