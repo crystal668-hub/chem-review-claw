@@ -146,6 +146,47 @@ Points: 0.5, Item: Second criterion
         payload = benchmark_test.ChemQARunner._wait_for_terminal_status(runner, "demo-run", timeout_seconds=1)
         self.assertEqual("stalled", payload["status"])
 
+    def test_build_chemqa_response_from_submission_uses_direct_answer(self) -> None:
+        short_text, full_text = benchmark_test.build_chemqa_response_from_submission(
+            final_submission={
+                "direct_answer": "3-(trifluoromethyl)benzamide",
+                "summary": "Candidate summary.",
+                "submission_trace": [{"step": "structure_proposal", "status": "success", "detail": "Picked the best matching structure."}],
+            }
+        )
+        self.assertEqual("3-(trifluoromethyl)benzamide", short_text)
+        self.assertIn("FINAL ANSWER: 3-(trifluoromethyl)benzamide", full_text)
+
+    def test_chemqa_runner_builds_fallback_from_proposer_one_submission_when_stalled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            team_dir = Path(tmpdir) / "team"
+            proposal_path = team_dir / "debate" / "artifacts" / "proposals" / "epoch-001" / "proposer-1.md"
+            proposal_path.parent.mkdir(parents=True, exist_ok=True)
+            proposal_path.write_text(
+                "\n".join(
+                    [
+                        "artifact_kind: candidate_submission",
+                        "artifact_contract_version: react-reviewed-v2",
+                        "phase: propose",
+                        "owner: proposer-1",
+                        "direct_answer: 3-(trifluoromethyl)benzamide",
+                        "summary: Candidate survived proposer-main reasoning.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
+            runner._candidate_protocol_dirs = lambda _run_id, _run_status: [team_dir]
+            short_text, full_text, meta = benchmark_test.ChemQARunner._build_candidate_submission_fallback(
+                runner,
+                "demo-run",
+                {"status": "stalled", "phase": "review"},
+            )
+            self.assertEqual("3-(trifluoromethyl)benzamide", short_text)
+            self.assertIn("FINAL ANSWER: 3-(trifluoromethyl)benzamide", full_text)
+            self.assertEqual("proposer-1-proposal", meta["fallback_source"])
+            self.assertEqual(str(proposal_path), meta["proposal_path"])
+
     def test_evaluate_chembench_open_ended_numeric_match(self) -> None:
         record = benchmark_test.BenchmarkRecord(
             record_id="demo",

@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+import yaml
+
 
 DEFAULT_WORKSPACE = Path("/home/dministrator/.openclaw/workspace")
 DEFAULT_BENCHMARK_ROOT = Path("/home/dministrator/.openclaw/benchmarks")
@@ -1103,6 +1105,22 @@ def render_chemqa_submission_rationale(final_submission: dict[str, Any], *, fina
     return "\n".join(part for part in parts if part is not None).strip()
 
 
+def load_yaml_mapping(path: Path) -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+
+def build_chemqa_response_from_submission(*, final_submission: dict[str, Any], final_answer_text: str = "") -> tuple[str, str]:
+    short_answer_text = normalize_space(final_answer_text or str(final_submission.get("direct_answer") or ""))
+    full_response_text = render_chemqa_submission_rationale(final_submission, final_answer_text=short_answer_text)
+    return normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
+
+
+
 def build_chemqa_full_response(*, qa_result: dict[str, Any]) -> tuple[str, str]:
     artifact_paths = dict(qa_result.get("artifact_paths") or {})
     short_answer_text = normalize_space(str(qa_result.get("final_answer") or ""))
@@ -1112,8 +1130,7 @@ def build_chemqa_full_response(*, qa_result: dict[str, Any]) -> tuple[str, str]:
         if path.is_file():
             try:
                 final_submission = json.loads(path.read_text(encoding="utf-8"))
-                full_response_text = render_chemqa_submission_rationale(final_submission, final_answer_text=short_answer_text)
-                return normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
+                return build_chemqa_response_from_submission(final_submission=final_submission, final_answer_text=short_answer_text)
             except Exception:
                 pass
     final_answer_path = str(artifact_paths.get("final_answer") or "").strip()
@@ -1306,6 +1323,56 @@ class ChemQARunner:
                 return path
         return None
 
+    def _candidate_submission_paths(self, run_id: str, run_status: dict[str, Any]) -> list[Path]:
+        candidates: list[Path] = []
+        for root in self._candidate_protocol_dirs(run_id, run_status):
+            if not root.exists():
+                continue
+            for path in root.rglob("proposer-1.md"):
+                if "proposals" not in path.parts:
+                    continue
+                candidates.append(path.resolve())
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+
+        def sort_key(path: Path) -> tuple[int, float, str]:
+            match = re.search(r"epoch-(\d+)", str(path))
+            epoch = int(match.group(1)) if match else -1
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            return (epoch, mtime, str(path))
+
+        return sorted(deduped, key=sort_key, reverse=True)
+
+    def _build_candidate_submission_fallback(self, run_id: str, run_status: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
+        for proposal_path in self._candidate_submission_paths(run_id, run_status):
+            proposal_payload = load_yaml_mapping(proposal_path)
+            if not proposal_payload:
+                continue
+            short_answer_text, full_response_text = build_chemqa_response_from_submission(final_submission=proposal_payload)
+            if short_answer_text:
+                return short_answer_text, full_response_text, {
+                    "fallback_source": "proposer-1-proposal",
+                    "proposal_path": str(proposal_path),
+                    "proposal_payload": proposal_payload,
+                }
+
+        preview = normalize_space(str(run_status.get("final_answer_preview") or ""))
+        if preview:
+            return preview, f"FINAL ANSWER: {preview}", {
+                "fallback_source": "run-status-final-answer-preview",
+            }
+        return None
+
     def _collect_artifacts_from_source(self, *, source_dir: Path, output_dir: Path, env: dict[str, str]) -> None:
         command = [
             "python3",
@@ -1404,10 +1471,27 @@ class ChemQARunner:
                 "acceptance_status": None,
                 "terminal_state": terminal_status or "unknown",
                 "run_status": run_status,
+                "non_success_terminal_status": terminal_status or "unknown",
+                "missing_reviewer_lanes": list(((run_status.get("phase_progress") or {}).get("missing_reviewer_lanes") or [])),
                 "error": f"ChemQA run ended with non-success status: {terminal_status or 'unknown'}",
             }
+            fallback_payload = self._build_candidate_submission_fallback(run_id, run_status)
             if input_bundle is not None:
                 runner_meta["runtime_bundle"] = input_bundle.to_meta()
+            if fallback_payload is not None:
+                short_answer_text, full_response_text, fallback_meta = fallback_payload
+                runner_meta.update(
+                    {
+                        "fallback_used": True,
+                        **fallback_meta,
+                    }
+                )
+                return RunOutput(
+                    short_answer_text=short_answer_text,
+                    full_response_text=full_response_text,
+                    raw={"run_status": run_status, "fallback": fallback_meta},
+                    runner_meta=runner_meta,
+                )
             return RunOutput(short_answer_text="", full_response_text="", raw={"run_status": run_status}, runner_meta=runner_meta)
         qa_result_path = self._ensure_artifacts(run_id, env=env, run_status=run_status)
         qa_result = json.loads(qa_result_path.read_text(encoding="utf-8"))
