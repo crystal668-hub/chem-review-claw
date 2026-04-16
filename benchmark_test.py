@@ -2069,14 +2069,6 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
 
 
 def export_csv_reports(output_root: Path, summary: dict[str, Any], group_ids: list[str]) -> None:
-    legacy_paths = [
-        output_root / "per_record_long.csv",
-        output_root / "per_record_wide.csv",
-    ]
-    for path in legacy_paths:
-        if path.exists():
-            path.unlink()
-
     summary_rows = []
     for group_id in group_ids:
         group_summary = summary["groups"].get(group_id)

@@ -645,7 +645,7 @@ Points: 0.5, Item: Second criterion
         self.assertEqual(1.0, summary["groups"]["g1"]["avg_answer_accuracy"])
         self.assertEqual(0.75, summary["groups"]["g1"]["avg_rpf"])
 
-    def test_export_csv_reports_keeps_only_summary_files(self) -> None:
+    def test_export_csv_reports_writes_summary_files(self) -> None:
         summary = {
             "groups": {
                 "g1": {
@@ -674,13 +674,9 @@ Points: 0.5, Item: Second criterion
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            (root / "per_record_long.csv").write_text("obsolete\n", encoding="utf-8")
-            (root / "per_record_wide.csv").write_text("obsolete\n", encoding="utf-8")
             benchmark_test.export_csv_reports(root, summary, ["g1"])
             self.assertTrue((root / "summary_by_group.csv").exists())
             self.assertTrue((root / "summary_by_group_and_subset.csv").exists())
-            self.assertFalse((root / "per_record_long.csv").exists())
-            self.assertFalse((root / "per_record_wide.csv").exists())
 
             with (root / "summary_by_group.csv").open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
