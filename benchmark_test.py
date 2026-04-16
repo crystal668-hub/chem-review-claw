@@ -2068,7 +2068,15 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
 
 
 
-def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summary: dict[str, Any], group_ids: list[str]) -> None:
+def export_csv_reports(output_root: Path, summary: dict[str, Any], group_ids: list[str]) -> None:
+    legacy_paths = [
+        output_root / "per_record_long.csv",
+        output_root / "per_record_wide.csv",
+    ]
+    for path in legacy_paths:
+        if path.exists():
+            path.unlink()
+
     summary_rows = []
     for group_id in group_ids:
         group_summary = summary["groups"].get(group_id)
@@ -2077,14 +2085,11 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
         summary_rows.append(
             {
                 "group_id": group_id,
-                "group_label": group_summary["group_label"],
                 "runner": group_summary["runner"],
                 "websearch": group_summary["websearch"],
                 "count": group_summary["count"],
                 "pass_count": group_summary["pass_count"],
-                "avg_score": group_summary["avg_score"],
                 "avg_normalized_score": group_summary["avg_normalized_score"],
-                "avg_elapsed_seconds": group_summary["avg_elapsed_seconds"],
                 "avg_answer_accuracy": group_summary.get("avg_answer_accuracy"),
                 "avg_rpf": group_summary.get("avg_rpf"),
             }
@@ -2094,136 +2099,47 @@ def export_csv_reports(output_root: Path, results: list[GroupRecordResult], summ
         summary_rows,
         [
             "group_id",
-            "group_label",
             "runner",
             "websearch",
             "count",
             "pass_count",
-            "avg_score",
             "avg_normalized_score",
-            "avg_elapsed_seconds",
             "avg_answer_accuracy",
             "avg_rpf",
         ],
     )
 
-    subset_rows = [summary["group_subset"][key] for key in sorted(summary.get("group_subset", {}))]
+    subset_rows = []
+    for key in sorted(summary.get("group_subset", {})):
+        row = summary["group_subset"][key]
+        subset_rows.append(
+            {
+                "group_id": row["group_id"],
+                "runner": row["runner"],
+                "websearch": row["websearch"],
+                "subset": row["subset"],
+                "count": row["count"],
+                "pass_count": row["pass_count"],
+                "avg_normalized_score": row["avg_normalized_score"],
+                "avg_answer_accuracy": row.get("avg_answer_accuracy"),
+                "avg_rpf": row.get("avg_rpf"),
+            }
+        )
     write_csv(
         output_root / "summary_by_group_and_subset.csv",
         subset_rows,
         [
             "group_id",
-            "group_label",
             "runner",
             "websearch",
             "subset",
             "count",
             "pass_count",
-            "avg_score",
             "avg_normalized_score",
-            "avg_elapsed_seconds",
             "avg_answer_accuracy",
             "avg_rpf",
         ],
     )
-
-    per_record_long_rows = []
-    for item in results:
-        per_record_long_rows.append(
-            {
-                "record_id": item.record_id,
-                "subset": item.subset,
-                "dataset": item.dataset,
-                "eval_kind": item.eval_kind,
-                "source_file": item.source_file,
-                "group_id": item.group_id,
-                "group_label": item.group_label,
-                "runner": item.runner,
-                "websearch": item.websearch,
-                "score": item.evaluation["score"],
-                "max_score": item.evaluation["max_score"],
-                "normalized_score": item.evaluation["normalized_score"],
-                "passed": item.evaluation["passed"],
-                "primary_metric": item.evaluation["primary_metric"],
-                "elapsed_seconds": item.elapsed_seconds,
-                "short_answer_text": item.short_answer_text,
-                "full_response_text": item.full_response_text,
-                "answer_accuracy": (item.evaluation.get("details") or {}).get("answer_accuracy"),
-                "rpf": (item.evaluation.get("details") or {}).get("rpf"),
-                "error": item.error or (item.evaluation.get("details") or {}).get("error"),
-            }
-        )
-    write_csv(
-        output_root / "per_record_long.csv",
-        per_record_long_rows,
-        [
-            "record_id",
-            "subset",
-            "dataset",
-            "eval_kind",
-            "source_file",
-            "group_id",
-            "group_label",
-            "runner",
-            "websearch",
-            "score",
-            "max_score",
-            "normalized_score",
-            "passed",
-            "primary_metric",
-            "elapsed_seconds",
-            "short_answer_text",
-            "full_response_text",
-            "answer_accuracy",
-            "rpf",
-            "error",
-        ],
-    )
-
-    grouped_by_record: dict[str, dict[str, GroupRecordResult]] = {}
-    record_meta: dict[str, GroupRecordResult] = {}
-    for item in results:
-        grouped_by_record.setdefault(item.record_id, {})[item.group_id] = item
-        record_meta[item.record_id] = item
-    wide_rows = []
-    for record_id in sorted(grouped_by_record):
-        meta = record_meta[record_id]
-        row: dict[str, Any] = {
-            "record_id": record_id,
-            "subset": meta.subset,
-            "dataset": meta.dataset,
-            "eval_kind": meta.eval_kind,
-            "source_file": meta.source_file,
-        }
-        by_group = grouped_by_record[record_id]
-        for group_id in group_ids:
-            result = by_group.get(group_id)
-            row[f"{group_id}_score"] = "" if result is None else result.evaluation["score"]
-            row[f"{group_id}_normalized_score"] = "" if result is None else result.evaluation["normalized_score"]
-            row[f"{group_id}_passed"] = "" if result is None else result.evaluation["passed"]
-            row[f"{group_id}_elapsed_seconds"] = "" if result is None else result.elapsed_seconds
-            row[f"{group_id}_short_answer_text"] = "" if result is None else result.short_answer_text
-            row[f"{group_id}_full_response_text"] = "" if result is None else result.full_response_text
-            row[f"{group_id}_answer_accuracy"] = "" if result is None else (result.evaluation.get("details") or {}).get("answer_accuracy")
-            row[f"{group_id}_rpf"] = "" if result is None else (result.evaluation.get("details") or {}).get("rpf")
-            row[f"{group_id}_error"] = "" if result is None else (result.error or (result.evaluation.get("details") or {}).get("error"))
-        wide_rows.append(row)
-    wide_fieldnames = ["record_id", "subset", "dataset", "eval_kind", "source_file"]
-    for group_id in group_ids:
-        wide_fieldnames.extend(
-            [
-                f"{group_id}_score",
-                f"{group_id}_normalized_score",
-                f"{group_id}_passed",
-                f"{group_id}_elapsed_seconds",
-                f"{group_id}_short_answer_text",
-                f"{group_id}_full_response_text",
-                f"{group_id}_answer_accuracy",
-                f"{group_id}_rpf",
-                f"{group_id}_error",
-            ]
-        )
-    write_csv(output_root / "per_record_wide.csv", wide_rows, wide_fieldnames)
 
 
 def select_group_ids(raw: str) -> list[str]:
@@ -2685,7 +2601,7 @@ def main() -> int:
         ],
     }
     save_json(output_root / "results.json", payload)
-    export_csv_reports(output_root, results, summary, aggregate_group_ids)
+    export_csv_reports(output_root, summary, aggregate_group_ids)
     save_json(
         output_root / "runtime-manifest.json",
         {

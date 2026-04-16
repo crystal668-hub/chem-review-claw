@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import importlib.util
 import io
 import json
@@ -643,6 +644,68 @@ Points: 0.5, Item: Second criterion
         summary = benchmark_test.aggregate_results(sample)
         self.assertEqual(1.0, summary["groups"]["g1"]["avg_answer_accuracy"])
         self.assertEqual(0.75, summary["groups"]["g1"]["avg_rpf"])
+
+    def test_export_csv_reports_keeps_only_summary_files(self) -> None:
+        summary = {
+            "groups": {
+                "g1": {
+                    "runner": "single_llm",
+                    "websearch": False,
+                    "count": 2,
+                    "pass_count": 1,
+                    "avg_normalized_score": 0.5,
+                    "avg_answer_accuracy": 1.0,
+                    "avg_rpf": 0.75,
+                }
+            },
+            "group_subset": {
+                "g1::chembench": {
+                    "group_id": "g1",
+                    "runner": "single_llm",
+                    "websearch": False,
+                    "subset": "chembench",
+                    "count": 2,
+                    "pass_count": 1,
+                    "avg_normalized_score": 0.5,
+                    "avg_answer_accuracy": None,
+                    "avg_rpf": None,
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "per_record_long.csv").write_text("obsolete\n", encoding="utf-8")
+            (root / "per_record_wide.csv").write_text("obsolete\n", encoding="utf-8")
+            benchmark_test.export_csv_reports(root, summary, ["g1"])
+            self.assertTrue((root / "summary_by_group.csv").exists())
+            self.assertTrue((root / "summary_by_group_and_subset.csv").exists())
+            self.assertFalse((root / "per_record_long.csv").exists())
+            self.assertFalse((root / "per_record_wide.csv").exists())
+
+            with (root / "summary_by_group.csv").open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(
+                [
+                    "group_id",
+                    "runner",
+                    "websearch",
+                    "count",
+                    "pass_count",
+                    "avg_normalized_score",
+                    "avg_answer_accuracy",
+                    "avg_rpf",
+                ],
+                list(rows[0].keys()),
+            )
+            self.assertEqual("g1", rows[0]["group_id"])
+            self.assertEqual("single_llm", rows[0]["runner"])
+            self.assertEqual("0.5", rows[0]["avg_normalized_score"])
+            self.assertEqual("1.0", rows[0]["avg_answer_accuracy"])
+            self.assertEqual("0.75", rows[0]["avg_rpf"])
+
+            with (root / "summary_by_group_and_subset.csv").open(newline="", encoding="utf-8") as handle:
+                subset_rows = list(csv.DictReader(handle))
+            self.assertEqual("chembench", subset_rows[0]["subset"])
 
     def test_judge_client_invokes_openclaw_with_high_thinking(self) -> None:
         captured: dict[str, object] = {}
