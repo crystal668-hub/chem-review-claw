@@ -1288,7 +1288,7 @@ class ChemQARunner:
         while time.time() < deadline:
             last_status = self._read_run_status(run_id)
             status = str(last_status.get("status") or "")
-            if status in {"completed", "completed_with_artifact_errors", "failed", "abandoned", "cancelled", "stalled"}:
+            if status in {"completed", "completed_with_artifact_errors", "failed", "abandoned", "cancelled", "stalled", "terminal_failure"}:
                 return last_status
             time.sleep(5)
         raise BenchmarkError(

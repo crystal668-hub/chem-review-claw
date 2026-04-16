@@ -194,6 +194,12 @@ Points: 0.5, Item: Second criterion
         payload = benchmark_test.ChemQARunner._wait_for_terminal_status(runner, "demo-run", timeout_seconds=1)
         self.assertEqual("stalled", payload["status"])
 
+    def test_chemqa_wait_for_terminal_status_accepts_terminal_failure(self) -> None:
+        runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
+        runner._read_run_status = lambda _run_id: {"status": "terminal_failure", "phase": "review"}
+        payload = benchmark_test.ChemQARunner._wait_for_terminal_status(runner, "demo-run", timeout_seconds=1)
+        self.assertEqual("terminal_failure", payload["status"])
+
     def test_build_chemqa_response_from_submission_uses_direct_answer(self) -> None:
         short_text, full_text = benchmark_test.build_chemqa_response_from_submission(
             final_submission={
