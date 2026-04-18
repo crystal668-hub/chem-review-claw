@@ -295,7 +295,7 @@ Points: 0.5, Item: Second criterion
         self.assertEqual("frontierscience_Research", benchmark_test.classify_subset(research_record))
 
     def test_classify_subset_superchem(self) -> None:
-        text_record = benchmark_test.BenchmarkRecord(
+        legacy_text_record = benchmark_test.BenchmarkRecord(
             record_id="s1",
             dataset="superchem",
             source_file="/tmp/superchem.jsonl",
@@ -313,7 +313,7 @@ Points: 0.5, Item: Second criterion
             reference_answer="A",
             payload={"modality": "multimodal"},
         )
-        self.assertEqual("superchem_text_only", benchmark_test.classify_subset(text_record))
+        self.assertEqual("superchem_multimodal", benchmark_test.classify_subset(legacy_text_record))
         self.assertEqual("superchem_multimodal", benchmark_test.classify_subset(multimodal_record))
 
     def test_sample_records_per_subset_draws_requested_count(self) -> None:
@@ -361,17 +361,8 @@ Points: 0.5, Item: Second criterion
         self.assertEqual(2, counts["frontierscience_Olympiad"])
         self.assertEqual(2, counts["frontierscience_Research"])
 
-    def test_sample_records_per_subset_pairs_superchem_by_source_uuid(self) -> None:
+    def test_sample_records_per_subset_samples_superchem_multimodal_only(self) -> None:
         records = [
-            benchmark_test.BenchmarkRecord(
-                record_id="s1-txt",
-                dataset="superchem",
-                source_file="/tmp/superchem.jsonl",
-                eval_kind="superchem_multiple_choice_rpf",
-                prompt="Q1",
-                reference_answer="A",
-                payload={"modality": "text_only", "source_uuid": "uuid-1"},
-            ),
             benchmark_test.BenchmarkRecord(
                 record_id="s1-mm",
                 dataset="superchem",
@@ -380,15 +371,6 @@ Points: 0.5, Item: Second criterion
                 prompt="Q1",
                 reference_answer="A",
                 payload={"modality": "multimodal", "source_uuid": "uuid-1"},
-            ),
-            benchmark_test.BenchmarkRecord(
-                record_id="s2-txt",
-                dataset="superchem",
-                source_file="/tmp/superchem.jsonl",
-                eval_kind="superchem_multiple_choice_rpf",
-                prompt="Q2",
-                reference_answer="B",
-                payload={"modality": "text_only", "source_uuid": "uuid-2"},
             ),
             benchmark_test.BenchmarkRecord(
                 record_id="s2-mm",
@@ -401,9 +383,9 @@ Points: 0.5, Item: Second criterion
             ),
         ]
         sampled = benchmark_test.sample_records_per_subset(records, per_subset_count=1, seed=3)
-        self.assertEqual(2, len(sampled))
+        self.assertEqual(1, len(sampled))
         self.assertEqual(
-            {"superchem_text_only", "superchem_multimodal"},
+            {"superchem_multimodal"},
             {benchmark_test.classify_subset(record) for record in sampled},
         )
         self.assertEqual(1, len({record.payload["source_uuid"] for record in sampled}))

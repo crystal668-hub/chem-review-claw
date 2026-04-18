@@ -58,10 +58,9 @@ SUBSET_ORDER = (
     "chembench",
     "frontierscience_Olympiad",
     "frontierscience_Research",
-    "superchem_text_only",
     "superchem_multimodal",
 )
-SUPERCHEM_SUBSETS = ("superchem_text_only", "superchem_multimodal")
+SUPERCHEM_SUBSETS = ("superchem_multimodal",)
 FINAL_ANSWER_RE = re.compile(r"^\s*FINAL\s+ANSWER\s*[:：-]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 NUMBER_RE = re.compile(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?")
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*\}|\[.*\])\s*```", re.DOTALL | re.IGNORECASE)
@@ -216,7 +215,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "按子集随机抽样时，每个子集抽取多少题；当前支持 chembench / "
             "frontierscience_Olympiad / frontierscience_Research / "
-            "superchem_text_only / superchem_multimodal"
+            "superchem_multimodal"
         ),
     )
     parser.add_argument(
@@ -631,10 +630,7 @@ def classify_subset(record: BenchmarkRecord) -> str:
         if track == "research" or record.eval_kind == "frontierscience_research":
             return "frontierscience_Research"
     if record.dataset == "superchem":
-        modality = str(record.payload.get("modality") or "").strip().lower()
-        if modality == "multimodal":
-            return "superchem_multimodal"
-        return "superchem_text_only"
+        return "superchem_multimodal"
     return f"{record.dataset}:{record.eval_kind}"
 
 
