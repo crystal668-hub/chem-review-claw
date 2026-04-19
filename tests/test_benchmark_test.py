@@ -189,6 +189,24 @@ Points: 0.5, Item: Second criterion
             self.assertEqual("qwen3.5-plus", agents[slot]["model"])
             self.assertNotIn("thinking", agents[slot])
 
+    def test_build_run_scoped_config_payload_chemqa_uses_benchmark_workspace_roots(self) -> None:
+        base = {
+            "agents": {"list": []},
+            "tools": {"web": {"search": {"enabled": False}}},
+            "plugins": {"entries": {"duckduckgo": {"enabled": False, "config": {}}}},
+        }
+        group = benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"]
+        payload = benchmark_test.build_run_scoped_config_payload(
+            base,
+            group=group,
+            single_agent_model="qwen3.5-plus",
+            judge_model="su8/gpt-5.4",
+        )
+        agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
+        expected_root = benchmark_test.BASELINE_WORKSPACE_ROOT / "chemqa_web_on"
+        self.assertEqual(str((expected_root / "debateA-coordinator").resolve()), agents["debateA-coordinator"]["workspace"])
+        self.assertEqual(str((expected_root / "debateA-1").resolve()), agents["debateA-1"]["workspace"])
+
     def test_chemqa_wait_for_terminal_status_accepts_stalled(self) -> None:
         runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
         runner._read_run_status = lambda _run_id: {"status": "stalled", "phase": "review"}
@@ -241,6 +259,16 @@ Points: 0.5, Item: Second criterion
             self.assertIn("FINAL ANSWER: 3-(trifluoromethyl)benzamide", full_text)
             self.assertEqual("proposer-1-proposal", meta["fallback_source"])
             self.assertEqual(str(proposal_path), meta["proposal_path"])
+
+    def test_candidate_protocol_dirs_include_new_benchmark_coordinator_workspace(self) -> None:
+        runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
+        runner.chemqa_root = Path("/tmp/chemqa-root")
+        runner.slot_set = "B"
+        candidates = benchmark_test.ChemQARunner._candidate_protocol_dirs(runner, "demo-run", {})
+        self.assertIn(
+            benchmark_test.BASELINE_WORKSPACE_ROOT / "chemqa_web_off" / "debateB-coordinator",
+            candidates,
+        )
 
     def test_evaluate_chembench_open_ended_numeric_match(self) -> None:
         record = benchmark_test.BenchmarkRecord(

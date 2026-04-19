@@ -36,6 +36,7 @@ DEFAULT_JUDGE_AGENT = "benchmark-judge"
 DEFAULT_JUDGE_MODEL = "su8/gpt-5.4"
 DEFAULT_CHEMQA_PRESET = "chemqa-review@1"
 DEFAULT_CHEMQA_MODEL_PROFILE = "chemqa-review-su8-coord-qwen-ds-kimi-glm-minimax"
+BASELINE_WORKSPACE_ROOT = Path.home() / ".openclaw" / "benchmark" / "workspaces"
 CHEMQA_SLOT_SETS = {
     "chemqa_web_on": "A",
     "chemqa_web_off": "B",
@@ -47,10 +48,9 @@ BASELINE_AGENT_IDS = {
 JUDGE_AGENT_ID = "benchmark-judge"
 BENCHMARK_AGENT_THINKING = "high"
 CHEMQA_WORKSPACE_ROOTS = {
-    "A": Path.home() / ".openclaw" / "debateclaw" / "workspacesA",
-    "B": Path.home() / ".openclaw" / "debateclaw" / "workspacesB",
+    "A": BASELINE_WORKSPACE_ROOT / "chemqa_web_on",
+    "B": BASELINE_WORKSPACE_ROOT / "chemqa_web_off",
 }
-BASELINE_WORKSPACE_ROOT = Path.home() / ".openclaw" / "benchmark" / "workspaces"
 SLOT_SENTINEL_FILENAME = ".debateclaw-slot.json"
 SLOT_SENTINEL_KIND = "debateclaw-slot-workspace"
 SLOT_SENTINEL_VERSION = 1
