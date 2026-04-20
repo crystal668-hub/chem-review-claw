@@ -24,6 +24,14 @@ from typing import Any, Iterable
 
 import yaml
 
+from workspace.conformabench_judge import (
+    ConformaBenchDependencyError,
+    ConformaBenchJudgeError,
+    evaluate_submission as evaluate_conformabench_submission,
+    load_hidden_judge_spec,
+    resolve_hidden_judge_spec_path,
+)
+
 
 DEFAULT_WORKSPACE = Path("/home/dministrator/.openclaw/workspace")
 DEFAULT_BENCHMARK_ROOT = Path("/home/dministrator/.openclaw/benchmarks")
@@ -56,6 +64,7 @@ SLOT_SENTINEL_KIND = "debateclaw-slot-workspace"
 SLOT_SENTINEL_VERSION = 1
 SUBSET_ORDER = (
     "chembench",
+    "conformabench",
     "frontierscience_Olympiad",
     "frontierscience_Research",
     "superchem_multimodal",
@@ -623,6 +632,8 @@ def load_records(paths: Iterable[Path]) -> list[BenchmarkRecord]:
 def classify_subset(record: BenchmarkRecord) -> str:
     if record.dataset == "chembench":
         return "chembench"
+    if record.dataset == "conformabench":
+        return "conformabench"
     if record.dataset == "frontierscience":
         track = str(record.payload.get("track") or "").strip().lower()
         if track == "olympiad" or record.eval_kind == "frontierscience_olympiad":
@@ -1011,6 +1022,8 @@ def build_single_llm_prompt(
         instructions.append("Show brief reasoning if needed, then end with exactly one line formatted as: FINAL ANSWER: <answer>.")
     elif record.eval_kind == "frontierscience_olympiad":
         instructions.append("End with exactly one line formatted as: FINAL ANSWER: <answer>.")
+    elif record.eval_kind == "conformabench_constructive":
+        instructions.append("Propose one chemically valid molecule and end with exactly one line formatted as: FINAL ANSWER: <SMILES>.")
     else:
         instructions.append("Provide a complete answer. If you include a final answer line, use: FINAL ANSWER: <answer>.")
 
@@ -1038,6 +1051,8 @@ def build_chemqa_goal(
         if input_bundle is not None:
             instructions.append(f"Use the local file bundle at `{input_bundle.bundle_dir}`.")
             instructions.append(f"Open `{input_bundle.question_markdown}` first and inspect any referenced images.")
+    elif record.eval_kind == "conformabench_constructive":
+        instructions.append("End with exactly one line `FINAL ANSWER: <SMILES>`.")
     elif record.eval_kind in {"chembench_open_ended", "frontierscience_olympiad"}:
         instructions.append("If appropriate, end with a line `FINAL ANSWER: <answer>`.")
     return "\n".join(instructions) + "\n\nQUESTION:\n" + record.prompt.strip()
@@ -1703,6 +1718,83 @@ def parse_frontierscience_research_rubric(text: str) -> list[dict[str, Any]]:
     return items
 
 
+def evaluate_conformabench_constructive(
+    record: BenchmarkRecord,
+    *,
+    short_answer_text: str,
+    full_response_text: str,
+    judge: JudgeClient,
+) -> EvaluationResult:
+    short_text, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
+    final_answer = extract_final_answer_line(full_text) or short_text
+    hidden_ref = str(record.payload.get("hidden_judge_spec_ref") or "").strip()
+    if not hidden_ref:
+        raise BenchmarkError(f"ConformaBench record is missing hidden_judge_spec_ref: {record.record_id}")
+    hidden_path = resolve_hidden_judge_spec_path(record.source_file, hidden_ref)
+    hidden_spec = load_hidden_judge_spec(hidden_path)
+    try:
+        gate_details = evaluate_conformabench_submission(final_answer_smiles=final_answer, hidden_spec=hidden_spec)
+    except ConformaBenchDependencyError as exc:
+        raise BenchmarkError(str(exc)) from exc
+    except ConformaBenchJudgeError as exc:
+        raise BenchmarkError(f"ConformaBench judge failed for `{record.record_id}`: {exc}") from exc
+
+    passed = bool(gate_details.get("passed"))
+    score = 1.0 if passed else 0.0
+    details = {
+        "method": "conformabench_rdkit_gate",
+        "hidden_judge_spec_ref": hidden_ref,
+        "hidden_judge_spec_path": str(hidden_path),
+        **gate_details,
+    }
+
+    rubric_items = parse_frontierscience_research_rubric(record.reference_answer)
+    if passed and rubric_items:
+        rubric_lines = [f"{idx + 1}. [{item['points']} points] {item['description']}" for idx, item in enumerate(rubric_items)]
+        max_score = float(sum(item["points"] for item in rubric_items))
+        candidate_response = full_text or short_text
+        prompt = f"""
+You are grading a chemistry benchmark explanation against a point rubric.
+The submitted molecule has already passed a deterministic RDKit structure/geometry gate.
+For each rubric item, award either 0 or the item's full points only.
+Return strict JSON only.
+
+Required JSON schema:
+{{
+  "items": [
+    {{"index": 1, "awarded": 1.0, "max_points": 1.0, "met": true, "rationale": "brief"}}
+  ],
+  "total_awarded": 0.0,
+  "max_points": {max_score},
+  "summary": "brief overall summary"
+}}
+
+QUESTION:
+{record.prompt}
+
+RUBRIC ITEMS:
+{os.linesep.join(rubric_lines)}
+
+CANDIDATE ANSWER:
+{candidate_response}
+""".strip()
+        try:
+            details["rubric"] = judge.evaluate_json(prompt)
+        except Exception as exc:
+            details["rubric_error"] = str(exc)
+
+    return EvaluationResult(
+        eval_kind=record.eval_kind,
+        score=score,
+        max_score=1.0,
+        normalized_score=score,
+        passed=passed,
+        primary_metric="rdkit_gate_pass",
+        primary_metric_direction="higher_is_better",
+        details=details,
+    )
+
+
 def evaluate_frontierscience_research(
     record: BenchmarkRecord,
     *,
@@ -1951,6 +2043,8 @@ def evaluate_answer(
 ) -> EvaluationResult:
     if record.eval_kind == "chembench_open_ended":
         return evaluate_chembench_open_ended(record, short_answer_text=short_answer_text, full_response_text=full_response_text)
+    if record.eval_kind == "conformabench_constructive":
+        return evaluate_conformabench_constructive(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
     if record.eval_kind == "frontierscience_olympiad":
         return evaluate_frontierscience_olympiad(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
     if record.eval_kind == "frontierscience_research":
