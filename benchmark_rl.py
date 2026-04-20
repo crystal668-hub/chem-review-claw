@@ -98,6 +98,21 @@ class GroupRecordResult:
     full_response_text: str = ""
 
 
+@dataclass
+class RuntimeContext:
+    output_root: Path
+    group: ExperimentGroup
+    dataset_files: list[Path]
+    records: list[BenchmarkRecord]
+    benchmark_root: Path
+    config_path: Path
+    model_profile: str
+    args_payload: dict[str, Any]
+    status_path: Path
+    partial_results_path: Path
+    runtime_manifest_path: Path
+
+
 EXPERIMENT_GROUPS: dict[str, ExperimentGroup] = {
     "review_loop_web_on": ExperimentGroup(
         id="review_loop_web_on",
@@ -349,6 +364,193 @@ def export_csv_reports(output_root: Path, summary: dict[str, Any], group_ids: li
         subset_rows,
         ["group_id", "runner", "websearch", "subset", "count", "pass_count", "avg_normalized_score", "avg_answer_accuracy", "avg_rpf"],
     )
+
+
+def runtime_manifest_payload(
+    *,
+    args_payload: dict[str, Any],
+    group: ExperimentGroup,
+    config_path: Path,
+    judge_config_path: Path,
+    model_profile: str,
+) -> dict[str, Any]:
+    return {
+        "group": asdict(group),
+        "websearch": args_payload["websearch"],
+        "config_path": str(config_path),
+        "model_profile": model_profile,
+        "review_rounds": args_payload["review_rounds"],
+        "rebuttal_rounds": args_payload["rebuttal_rounds"],
+        "proposer_count": args_payload["proposer_count"],
+        "collector": {
+            "agent": args_payload["collector_agent"],
+            "model": args_payload["collector_model"],
+        },
+        "judge": {
+            "agent": args_payload["judge_agent"],
+            "model": args_payload["judge_model"],
+            "config_path": str(judge_config_path),
+        },
+    }
+
+
+def build_results_payload(
+    *,
+    benchmark_root: Path,
+    dataset_files: list[Path],
+    group: ExperimentGroup,
+    records: list[BenchmarkRecord],
+    results: list[GroupRecordResult],
+    summary: dict[str, Any],
+    completed: bool,
+    fatal_error: str | None = None,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "benchmark_root": str(benchmark_root),
+        "dataset_files": [str(path) for path in dataset_files],
+        "group": asdict(group),
+        "records": len(records),
+        "completed": completed,
+        "fatal_error": fatal_error,
+        "warnings": list(warnings or []),
+        "results": [asdict(item) for item in results],
+        "summary": summary,
+        "errors": [{"group_id": item.group_id, "record_id": item.record_id, "error": item.error} for item in results if item.error],
+    }
+
+
+def write_runtime_status(
+    path: Path,
+    *,
+    group: ExperimentGroup,
+    records: list[BenchmarkRecord],
+    completed_record_ids: list[str],
+    current_record_id: str = "",
+    status: str,
+    fatal_error: str | None = None,
+) -> None:
+    save_json(
+        path,
+        {
+            "status": status,
+            "pid": os.getpid(),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "group": asdict(group),
+            "record_count": len(records),
+            "completed_record_ids": completed_record_ids,
+            "current_record_id": current_record_id,
+            "fatal_error": fatal_error,
+        },
+    )
+
+
+def load_existing_group_results(output_root: Path, group_id: str) -> list[GroupRecordResult]:
+    per_record_dir = output_root / "per-record" / group_id
+    if not per_record_dir.is_dir():
+        return []
+    loaded: list[GroupRecordResult] = []
+    for path in sorted(per_record_dir.glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        loaded.append(GroupRecordResult(**payload))
+    return loaded
+
+
+def safe_persist_group_record_result(output_root: Path, group: ExperimentGroup, record: BenchmarkRecord, entry: GroupRecordResult) -> GroupRecordResult:
+    path = output_root / "per-record" / group.id / f"{slugify(record.record_id)}.json"
+    try:
+        save_json(path, asdict(entry))
+        return entry
+    except Exception as exc:
+        degraded = build_error_group_record_result(
+            group=group,
+            record=record,
+            error_message=f"Failed to persist per-record result for `{record.record_id}`: {exc}",
+            elapsed_seconds=entry.elapsed_seconds,
+            answer_text=entry.answer_text,
+            short_answer_text=entry.short_answer_text,
+            full_response_text=entry.full_response_text,
+            runner_meta={
+                **deep_copy_jsonish(entry.runner_meta),
+                "persist_error": str(exc),
+            },
+            raw={
+                "persist_error": str(exc),
+                "original_entry": deep_copy_jsonish(asdict(entry)),
+            },
+        )
+        save_json(path, asdict(degraded))
+        return degraded
+
+
+def persist_partial_results(
+    runtime: RuntimeContext,
+    results: list[GroupRecordResult],
+    *,
+    fatal_error: str | None = None,
+) -> dict[str, Any] | None:
+    summary = aggregate_results(results)
+    payload = build_results_payload(
+        benchmark_root=runtime.benchmark_root,
+        dataset_files=runtime.dataset_files,
+        group=runtime.group,
+        records=runtime.records,
+        results=results,
+        summary=summary,
+        completed=False,
+        fatal_error=fatal_error,
+    )
+    try:
+        save_json(runtime.partial_results_path, payload)
+    except Exception:
+        return None
+    return payload
+
+
+def finalize_outputs(
+    runtime: RuntimeContext,
+    *,
+    results: list[GroupRecordResult] | None,
+    status: str,
+    fatal_error: str | None = None,
+) -> dict[str, Any]:
+    effective_results = list(results or [])
+    if not effective_results:
+        effective_results = load_existing_group_results(runtime.output_root, runtime.group.id)
+    summary = aggregate_results(effective_results)
+    warnings: list[str] = []
+    completed_record_ids = [item.record_id for item in effective_results]
+    write_runtime_status(
+        runtime.status_path,
+        group=runtime.group,
+        records=runtime.records,
+        completed_record_ids=completed_record_ids,
+        current_record_id="",
+        status=status,
+        fatal_error=fatal_error,
+    )
+    payload = build_results_payload(
+        benchmark_root=runtime.benchmark_root,
+        dataset_files=runtime.dataset_files,
+        group=runtime.group,
+        records=runtime.records,
+        results=effective_results,
+        summary=summary,
+        completed=status == "completed",
+        fatal_error=fatal_error,
+        warnings=warnings,
+    )
+    save_json(runtime.output_root / "results.json", payload)
+    save_json(runtime.partial_results_path, payload)
+    try:
+        export_csv_reports(runtime.output_root, summary, [runtime.group.id])
+    except Exception as exc:
+        warnings.append(f"CSV export failed: {exc}")
+        payload["warnings"] = warnings
+        save_json(runtime.output_root / "results.json", payload)
+        save_json(runtime.partial_results_path, payload)
+    return payload
 
 
 class ReviewLoopConfigPool:
@@ -1088,6 +1290,7 @@ class ReviewLoopRunner:
 
 def run_group(
     *,
+    runtime: RuntimeContext,
     group: ExperimentGroup,
     records: list[BenchmarkRecord],
     output_root: Path,
@@ -1123,7 +1326,16 @@ def run_group(
         model_profile=model_profile,
     )
     group_results: list[GroupRecordResult] = []
+    completed_record_ids: list[str] = []
     for record in records:
+        write_runtime_status(
+            runtime.status_path,
+            group=group,
+            records=records,
+            completed_record_ids=completed_record_ids,
+            current_record_id=record.record_id,
+            status="running",
+        )
         started = time.time()
         try:
             run_output = runner.run(record, group)
@@ -1166,8 +1378,18 @@ def run_group(
                 elapsed_seconds=elapsed,
                 runner_meta={"traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))},
             )
+        entry = safe_persist_group_record_result(output_root, group, record, entry)
         group_results.append(entry)
-        save_json(output_root / "per-record" / group.id / f"{slugify(record.record_id)}.json", asdict(entry))
+        completed_record_ids.append(record.record_id)
+        write_runtime_status(
+            runtime.status_path,
+            group=group,
+            records=records,
+            completed_record_ids=completed_record_ids,
+            current_record_id="",
+            status="running",
+        )
+        persist_partial_results(runtime, group_results)
     return group_results
 
 
@@ -1214,57 +1436,91 @@ def main() -> int:
         timeout_seconds=args.judge_timeout,
         config_path=config_pool.judge_config_path(),
     )
-    results = run_group(
+    args_payload = {
+        "websearch": args.websearch,
+        "review_rounds": args.review_rounds,
+        "rebuttal_rounds": args.rebuttal_rounds,
+        "proposer_count": args.proposer_count,
+        "collector_agent": args.collector_agent,
+        "collector_model": args.collector_model,
+        "judge_agent": args.judge_agent,
+        "judge_model": args.judge_model,
+    }
+    runtime = RuntimeContext(
+        output_root=output_root,
+        group=group,
+        dataset_files=dataset_files,
+        records=records,
+        benchmark_root=Path(args.benchmark_root).expanduser().resolve(),
+        config_path=config_path,
+        model_profile=model_profile,
+        args_payload=args_payload,
+        status_path=output_root / "runtime-status.json",
+        partial_results_path=output_root / "results.partial.json",
+        runtime_manifest_path=output_root / "runtime-manifest.json",
+    )
+    save_json(
+        runtime.runtime_manifest_path,
+        runtime_manifest_payload(
+            args_payload=args_payload,
+            group=group,
+            config_path=config_path,
+            judge_config_path=config_pool.judge_config_path(),
+            model_profile=model_profile,
+        ),
+    )
+    write_runtime_status(
+        runtime.status_path,
         group=group,
         records=records,
-        output_root=output_root,
-        debateclaw_root=debateclaw_root,
-        rl_timeout=args.rl_timeout,
-        collector_timeout=args.collector_timeout,
-        judge=judge,
-        config_path=config_path,
-        collector_agent=args.collector_agent,
-        review_rounds=args.review_rounds,
-        rebuttal_rounds=args.rebuttal_rounds,
-        proposer_count=args.proposer_count,
-        model_profile=model_profile,
+        completed_record_ids=[],
+        current_record_id="",
+        status="running",
     )
-    summary = aggregate_results(results)
-    payload = {
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "benchmark_root": str(Path(args.benchmark_root).expanduser().resolve()),
-        "dataset_files": [str(path) for path in dataset_files],
-        "group": asdict(group),
-        "records": len(records),
-        "results": [asdict(item) for item in results],
-        "summary": summary,
-        "errors": [{"group_id": item.group_id, "record_id": item.record_id, "error": item.error} for item in results if item.error],
-    }
-    save_json(output_root / "results.json", payload)
-    export_csv_reports(output_root, summary, [group_id])
-    save_json(
-        output_root / "runtime-manifest.json",
-        {
-            "group": asdict(group),
-            "websearch": args.websearch,
-            "config_path": str(config_path),
-            "model_profile": model_profile,
-            "review_rounds": args.review_rounds,
-            "rebuttal_rounds": args.rebuttal_rounds,
-            "proposer_count": args.proposer_count,
-            "collector": {
-                "agent": args.collector_agent,
-                "model": args.collector_model,
-            },
-            "judge": {
-                "agent": args.judge_agent,
-                "model": args.judge_model,
-                "config_path": str(config_pool.judge_config_path()),
-            },
-        },
-    )
-    print(json.dumps({"output_dir": str(output_root), "summary": summary}, indent=2, ensure_ascii=False))
-    return 0
+    results: list[GroupRecordResult] = []
+    final_payload: dict[str, Any] | None = None
+    fatal_error: str | None = None
+    exit_code = 0
+    try:
+        results = run_group(
+            runtime=runtime,
+            group=group,
+            records=records,
+            output_root=output_root,
+            debateclaw_root=debateclaw_root,
+            rl_timeout=args.rl_timeout,
+            collector_timeout=args.collector_timeout,
+            judge=judge,
+            config_path=config_path,
+            collector_agent=args.collector_agent,
+            review_rounds=args.review_rounds,
+            rebuttal_rounds=args.rebuttal_rounds,
+            proposer_count=args.proposer_count,
+            model_profile=model_profile,
+        )
+        final_payload = finalize_outputs(runtime, results=results, status="completed")
+    except KeyboardInterrupt:
+        fatal_error = "Interrupted by user"
+        exit_code = 130
+        final_payload = finalize_outputs(runtime, results=results, status="interrupted", fatal_error=fatal_error)
+    except Exception as exc:
+        fatal_error = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        exit_code = 1
+        final_payload = finalize_outputs(runtime, results=results, status="failed", fatal_error=fatal_error)
+    if final_payload is not None:
+        print(
+            json.dumps(
+                {
+                    "output_dir": str(output_root),
+                    "summary": final_payload.get("summary"),
+                    "status": "completed" if exit_code == 0 else ("interrupted" if exit_code == 130 else "failed"),
+                    "fatal_error": fatal_error,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    return exit_code
 
 
 if __name__ == "__main__":
