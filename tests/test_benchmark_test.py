@@ -30,6 +30,20 @@ class JudgeStub:
 
 
 class BenchmarkTestModuleTests(unittest.TestCase):
+    def test_cleanup_manifest_path_uses_cleanroom_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir)
+            path = benchmark_test.cleanup_manifest_path(output_root, "demo-run")
+            self.assertEqual(output_root / "cleanroom" / "manifests" / "demo-run.manifest.json", path)
+
+    def test_register_and_unregister_pending_cleanup_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "demo.manifest.json"
+            benchmark_test.register_pending_cleanup_manifest(manifest_path)
+            self.assertIn(manifest_path, benchmark_test.iter_pending_cleanup_manifests())
+            benchmark_test.unregister_pending_cleanup_manifest(manifest_path)
+            self.assertNotIn(manifest_path, benchmark_test.iter_pending_cleanup_manifests())
+
     def test_extract_final_answer_line_prefers_explicit_marker(self) -> None:
         text = "reasoning\nFINAL ANSWER: 42\n"
         self.assertEqual("42", benchmark_test.extract_final_answer_line(text))
@@ -169,7 +183,7 @@ Points: 0.5, Item: Second criterion
         self.assertEqual("su8/gpt-5.4", agents["benchmark-judge"]["model"])
         self.assertNotIn("thinking", agents["benchmark-judge"])
 
-    def test_build_run_scoped_config_payload_chemqa_uses_judge_for_coordinator_only(self) -> None:
+    def test_build_run_scoped_config_payload_chemqa_uses_single_model_for_all_slots(self) -> None:
         base = {
             "agents": {"list": []},
             "tools": {"web": {"search": {"enabled": False}}},
@@ -183,7 +197,8 @@ Points: 0.5, Item: Second criterion
             judge_model="su8/gpt-5.4",
         )
         agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
-        self.assertEqual("su8/gpt-5.4", agents["debateB-coordinator"]["model"])
+        self.assertEqual("su8/gpt-5.4", agents["benchmark-judge"]["model"])
+        self.assertEqual("qwen3.5-plus", agents["debateB-coordinator"]["model"])
         self.assertNotIn("thinking", agents["debateB-coordinator"])
         for slot in ["debateB-1", "debateB-2", "debateB-3", "debateB-4", "debateB-5"]:
             self.assertEqual("qwen3.5-plus", agents[slot]["model"])
@@ -207,17 +222,50 @@ Points: 0.5, Item: Second criterion
         self.assertEqual(str((expected_root / "debateA-coordinator").resolve()), agents["debateA-coordinator"]["workspace"])
         self.assertEqual(str((expected_root / "debateA-1").resolve()), agents["debateA-1"]["workspace"])
 
-    def test_chemqa_wait_for_terminal_status_accepts_stalled(self) -> None:
-        runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
-        runner._read_run_status = lambda _run_id: {"status": "stalled", "phase": "review"}
-        payload = benchmark_test.ChemQARunner._wait_for_terminal_status(runner, "demo-run", timeout_seconds=1)
-        self.assertEqual("stalled", payload["status"])
+    def test_normalize_chemqa_run_status_maps_completed_with_artifact_errors(self) -> None:
+        payload = benchmark_test.normalize_chemqa_run_status({"status": "completed_with_artifact_errors"})
+        self.assertEqual("done", payload["status"])
+        self.assertEqual("completed", payload["terminal_state"])
+        self.assertEqual("artifact_collection_error", payload["terminal_reason_code"])
+        self.assertEqual("error", payload["artifact_collection"]["status"])
+        self.assertEqual("completed_with_artifact_errors", payload["legacy_status"])
 
-    def test_chemqa_wait_for_terminal_status_accepts_terminal_failure(self) -> None:
+    def test_normalize_chemqa_run_status_maps_stalled(self) -> None:
+        payload = benchmark_test.normalize_chemqa_run_status({"status": "stalled", "phase": "review"})
+        self.assertEqual("done", payload["status"])
+        self.assertEqual("failed", payload["terminal_state"])
+        self.assertEqual("stalled", payload["terminal_reason_code"])
+        self.assertEqual("stalled", payload["legacy_status"])
+
+    def test_normalize_chemqa_run_status_maps_terminal_failure(self) -> None:
+        payload = benchmark_test.normalize_chemqa_run_status({"status": "terminal_failure", "reason": "boom"})
+        self.assertEqual("done", payload["status"])
+        self.assertEqual("failed", payload["terminal_state"])
+        self.assertEqual("terminal_failure", payload["terminal_reason_code"])
+        self.assertEqual("boom", payload["terminal_reason"])
+        self.assertEqual("terminal_failure", payload["legacy_status"])
+
+    def test_normalize_chemqa_run_status_maps_abandoned(self) -> None:
+        payload = benchmark_test.normalize_chemqa_run_status({"status": "abandoned"})
+        self.assertEqual("done", payload["status"])
+        self.assertEqual("cancelled", payload["terminal_state"])
+        self.assertEqual("abandoned", payload["terminal_reason_code"])
+        self.assertEqual("abandoned", payload["legacy_status"])
+
+    def test_chemqa_wait_for_terminal_status_accepts_new_done_state(self) -> None:
         runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
-        runner._read_run_status = lambda _run_id: {"status": "terminal_failure", "phase": "review"}
+        runner._read_run_status = lambda _run_id: {"status": "done", "terminal_state": "failed", "terminal_reason_code": "stalled"}
         payload = benchmark_test.ChemQARunner._wait_for_terminal_status(runner, "demo-run", timeout_seconds=1)
-        self.assertEqual("terminal_failure", payload["status"])
+        self.assertEqual("done", payload["status"])
+        self.assertEqual("failed", payload["terminal_state"])
+
+    def test_chemqa_wait_for_terminal_status_accepts_legacy_terminal_failure(self) -> None:
+        runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
+        runner._read_run_status = lambda _run_id: benchmark_test.normalize_chemqa_run_status({"status": "terminal_failure", "phase": "review"})
+        payload = benchmark_test.ChemQARunner._wait_for_terminal_status(runner, "demo-run", timeout_seconds=1)
+        self.assertEqual("done", payload["status"])
+        self.assertEqual("failed", payload["terminal_state"])
+        self.assertEqual("terminal_failure", payload["legacy_status"])
 
     def test_build_chemqa_response_from_submission_uses_direct_answer(self) -> None:
         short_text, full_text = benchmark_test.build_chemqa_response_from_submission(
@@ -343,6 +391,81 @@ Points: 0.5, Item: Second criterion
         )
         self.assertEqual("superchem_multimodal", benchmark_test.classify_subset(legacy_text_record))
         self.assertEqual("superchem_multimodal", benchmark_test.classify_subset(multimodal_record))
+
+    def test_classify_subset_conformabench(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="cb-1",
+            dataset="conformabench",
+            source_file="/tmp/conformabench.jsonl",
+            eval_kind="conformabench_constructive",
+            prompt="Q",
+            reference_answer="A",
+            payload={},
+        )
+        self.assertEqual("conformabench", benchmark_test.classify_subset(record))
+
+    def test_build_single_llm_prompt_conformabench_requires_smiles_final_line(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="cb-1",
+            dataset="conformabench",
+            source_file="/tmp/conformabench.jsonl",
+            eval_kind="conformabench_constructive",
+            prompt="Design a molecule.",
+            reference_answer="Points: 1.0, Item: ok",
+            payload={},
+        )
+        prompt = benchmark_test.build_single_llm_prompt(record, websearch_enabled=False, input_bundle=None)
+        self.assertIn("FINAL ANSWER: <SMILES>", prompt)
+
+    def test_build_chemqa_goal_conformabench_requires_smiles_final_line(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="cb-1",
+            dataset="conformabench",
+            source_file="/tmp/conformabench.jsonl",
+            eval_kind="conformabench_constructive",
+            prompt="Design a molecule.",
+            reference_answer="Points: 1.0, Item: ok",
+            payload={},
+        )
+        goal = benchmark_test.build_chemqa_goal(record, websearch_enabled=True, input_bundle=None)
+        self.assertIn("FINAL ANSWER: <SMILES>", goal)
+
+    def test_evaluate_conformabench_constructive_handles_current_rdkit_environment(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="conformabench-0001",
+            dataset="conformabench",
+            source_file=str(
+                Path(__file__).resolve().parents[2] / "benchmarks" / "conformabench" / "data" / "conformabench_pool.jsonl"
+            ),
+            eval_kind="conformabench_constructive",
+            prompt="Design one molecule.",
+            reference_answer="Points: 1.0, Item: Submitted a chemically valid molecule in parseable SMILES form.",
+            payload={"hidden_judge_spec_ref": "conformabench-0001"},
+        )
+        try:
+            import rdkit  # noqa: F401
+        except ModuleNotFoundError:
+            with self.assertRaises(benchmark_test.BenchmarkError) as exc:
+                benchmark_test.evaluate_answer(
+                    record,
+                    short_answer_text="c1ccccc1O",
+                    full_response_text="Reasoning\nFINAL ANSWER: c1ccccc1O",
+                    judge=JudgeStub({}),
+                )
+            self.assertIn("optional `rdkit` dependency", str(exc.exception))
+            return
+
+        result = benchmark_test.evaluate_answer(
+            record,
+            short_answer_text="Nc1ccccc1O",
+            full_response_text="Reasoning\nFINAL ANSWER: Nc1ccccc1O",
+            judge=JudgeStub({}),
+        )
+        self.assertEqual("rdkit_gate_pass", result.primary_metric)
+        self.assertEqual("conformabench_rdkit_gate", result.details["method"])
+        self.assertIn("canonical_smiles", result.details)
+        self.assertIn("topology_predicates", result.details)
+        self.assertIn("seed_runs", result.details)
 
     def test_sample_records_per_subset_draws_requested_count(self) -> None:
         records = []
@@ -783,6 +906,97 @@ Points: 0.5, Item: Second criterion
         finally:
             benchmark_test.run_subprocess = original_run_subprocess
             benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
+
+    def test_chemqa_runner_uses_run_scoped_writable_template_and_command_map_dirs(self) -> None:
+        captured: dict[str, object] = {}
+        original_run_subprocess = benchmark_test.run_subprocess
+        original_ensure_runtime_bundle = benchmark_test.ensure_runtime_bundle
+        original_wait_for_terminal_status = benchmark_test.ChemQARunner._wait_for_terminal_status
+        original_ensure_artifacts = benchmark_test.ChemQARunner._ensure_artifacts
+        original_invoke_cleanroom_cleanup = benchmark_test.invoke_cleanroom_cleanup
+        try:
+            def fake_run_subprocess(command: list[str], *, env=None, cwd=None, timeout=None):
+                captured["command"] = list(command)
+                captured["env"] = dict(env or {})
+                return benchmark_test.subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps({"run_id": "demo", "launch_mode": "run", "launched": {"returncode": 0}}),
+                    stderr="",
+                )
+
+            benchmark_test.run_subprocess = fake_run_subprocess
+            benchmark_test.ensure_runtime_bundle = lambda record, bundle_root: None
+            benchmark_test.invoke_cleanroom_cleanup = lambda manifest_path: {"status": "cleaned", "manifest_path": str(manifest_path)}
+            benchmark_test.ChemQARunner._wait_for_terminal_status = lambda self, run_id, timeout_seconds: {
+                "status": "done",
+                "terminal_state": "completed",
+                "terminal_reason_code": "",
+                "artifact_collection": {},
+            }
+
+            def fake_ensure_artifacts(self, run_id, *, env, run_status, wait_seconds=120, poll_seconds=5):
+                qa_result_path = self.launch_workspace_root / "qa_result.json"
+                qa_result_path.write_text(
+                    json.dumps(
+                        {
+                            "final_answer": "c1ccccc1",
+                            "artifact_paths": {},
+                            "acceptance_status": "accepted",
+                            "terminal_state": "completed",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return qa_result_path
+
+            benchmark_test.ChemQARunner._ensure_artifacts = fake_ensure_artifacts
+            with tempfile.TemporaryDirectory() as tmpdir:
+                launch_root = Path(tmpdir) / "chemqa-launch"
+                runner = benchmark_test.ChemQARunner(
+                    chemqa_root=Path(tmpdir) / "chemqa-root",
+                    timeout_seconds=30,
+                    config_path=Path(tmpdir) / "config.json",
+                    slot_set="A",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                    model_profile="profile-x",
+                    runtime_bundle_root=Path(tmpdir) / "bundles",
+                    launch_workspace_root=launch_root,
+                )
+                record = benchmark_test.BenchmarkRecord(
+                    record_id="conformabench-0001",
+                    dataset="conformabench",
+                    source_file="/tmp/demo.jsonl",
+                    eval_kind="conformabench_constructive",
+                    prompt="Design a molecule.",
+                    reference_answer="Points: 1.0, Item: ok",
+                    payload={},
+                )
+                out = runner.run(record, benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"])
+                self.assertEqual("c1ccccc1", out.short_answer_text)
+                command = captured["command"]
+                assert isinstance(command, list)
+                self.assertIn("--template-dir", command)
+                self.assertIn("--command-map-dir", command)
+                template_dir = Path(command[command.index("--template-dir") + 1])
+                command_map_dir = Path(command[command.index("--command-map-dir") + 1])
+                self.assertTrue(str(template_dir).startswith(str(launch_root)))
+                self.assertTrue(str(command_map_dir).startswith(str(launch_root)))
+                self.assertEqual("templates", template_dir.name)
+                self.assertEqual("command-maps", command_map_dir.name)
+                self.assertEqual(".clawteam", template_dir.parent.name)
+                self.assertNotEqual(str(Path.home() / ".clawteam" / "templates"), str(template_dir))
+                env = captured["env"]
+                assert isinstance(env, dict)
+                self.assertEqual(str(launch_root / "chemqa_web_on" / "conformabench-0001" / "home"), env["HOME"])
+                self.assertEqual(str(benchmark_test.DEFAULT_OPENCLAW_ENV_FILE), env["OPENCLAW_ENV_FILE"])
+        finally:
+            benchmark_test.run_subprocess = original_run_subprocess
+            benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
+            benchmark_test.invoke_cleanroom_cleanup = original_invoke_cleanroom_cleanup
+            benchmark_test.ChemQARunner._wait_for_terminal_status = original_wait_for_terminal_status
+            benchmark_test.ChemQARunner._ensure_artifacts = original_ensure_artifacts
 
     def test_run_group_continues_after_record_failure(self) -> None:
         records = [

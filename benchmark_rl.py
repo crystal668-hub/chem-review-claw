@@ -8,14 +8,13 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import sys
 import time
 import traceback
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 WORKSPACE_ROOT = Path("/home/dministrator/.openclaw/workspace")
@@ -46,6 +45,60 @@ benchmark_test = load_benchmark_test_module()
 
 class BenchmarkError(RuntimeError):
     pass
+
+
+class ReviewLoopRunError(BenchmarkError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str,
+        error_kind: str,
+        failure_reason: str = "",
+        terminal_state: str = "",
+        launch_payload: dict[str, Any] | None = None,
+        last_summary: dict[str, Any] | None = None,
+        cleanup: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.error_kind = error_kind
+        self.failure_reason = failure_reason
+        self.terminal_state = terminal_state
+        self.launch_payload = deep_copy_jsonish(launch_payload or {})
+        self.last_summary = deep_copy_jsonish(last_summary or {})
+        self.cleanup = deep_copy_jsonish(cleanup or {})
+
+    def enrich(
+        self,
+        *,
+        launch_payload: dict[str, Any] | None = None,
+        last_summary: dict[str, Any] | None = None,
+        cleanup: dict[str, Any] | None = None,
+        failure_reason: str | None = None,
+        terminal_state: str | None = None,
+    ) -> None:
+        if launch_payload and not self.launch_payload:
+            self.launch_payload = deep_copy_jsonish(launch_payload)
+        if last_summary and not self.last_summary:
+            self.last_summary = deep_copy_jsonish(last_summary)
+        if cleanup:
+            self.cleanup = deep_copy_jsonish(cleanup)
+        if failure_reason and not self.failure_reason:
+            self.failure_reason = failure_reason
+        if terminal_state and not self.terminal_state:
+            self.terminal_state = terminal_state
+
+    def to_runner_meta(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "error_kind": self.error_kind,
+            "failure_reason": self.failure_reason,
+            "terminal_state": self.terminal_state,
+            "launch": deep_copy_jsonish(self.launch_payload),
+            "last_summary": deep_copy_jsonish(self.last_summary),
+            "cleanup": deep_copy_jsonish(self.cleanup),
+        }
 
 
 @dataclass(frozen=True)
@@ -113,6 +166,12 @@ class RuntimeContext:
     runtime_manifest_path: Path
 
 
+@dataclass
+class CleanupInvocation:
+    manifest_path: Path
+    report: dict[str, Any] | None = None
+
+
 EXPERIMENT_GROUPS: dict[str, ExperimentGroup] = {
     "review_loop_web_on": ExperimentGroup(
         id="review_loop_web_on",
@@ -145,7 +204,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rebuttal-rounds", type=int, help="rebuttal rounds 覆盖值")
     parser.add_argument("--proposer-count", type=int, help="proposer 数量覆盖值")
     parser.add_argument("--model-profile", help="review-loop model profile 覆盖值")
-    parser.add_argument("--rl-timeout", type=int, default=3600, help="每题 review-loop 超时秒数")
+    parser.add_argument("--rl-timeout", type=int, default=1800, help="每题 review-loop 超时秒数")
+    parser.add_argument("--rl-stall-timeout", type=int, default=600, help="每题 review-loop 无进展判定超时秒数")
     parser.add_argument("--collector-timeout", type=int, default=300, help="outer collector 超时秒数")
     parser.add_argument("--judge-timeout", type=int, default=300, help="benchmark judge 超时秒数")
     parser.add_argument("--collector-agent", default=DEFAULT_COLLECTOR_AGENT, help="outer collector agent id")
@@ -159,6 +219,10 @@ def parse_args() -> argparse.Namespace:
 
 def now_stamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S")
+
+
+def format_timestamp(epoch: float | None = None) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(epoch or time.time()))
 
 
 def slugify(value: str, *, limit: int = 64) -> str:
@@ -382,6 +446,7 @@ def runtime_manifest_payload(
         "review_rounds": args_payload["review_rounds"],
         "rebuttal_rounds": args_payload["rebuttal_rounds"],
         "proposer_count": args_payload["proposer_count"],
+        "rl_stall_timeout": args_payload["rl_stall_timeout"],
         "collector": {
             "agent": args_payload["collector_agent"],
             "model": args_payload["collector_model"],
@@ -430,18 +495,20 @@ def write_runtime_status(
     current_record_id: str = "",
     status: str,
     fatal_error: str | None = None,
+    current_run: dict[str, Any] | None = None,
 ) -> None:
     save_json(
         path,
         {
             "status": status,
             "pid": os.getpid(),
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "updated_at": format_timestamp(),
             "group": asdict(group),
             "record_count": len(records),
             "completed_record_ids": completed_record_ids,
             "current_record_id": current_record_id,
             "fatal_error": fatal_error,
+            "current_run": deep_copy_jsonish(current_run),
         },
     )
 
@@ -529,6 +596,7 @@ def finalize_outputs(
         current_record_id="",
         status=status,
         fatal_error=fatal_error,
+        current_run=None,
     )
     payload = build_results_payload(
         benchmark_root=runtime.benchmark_root,
@@ -1041,12 +1109,49 @@ def fallback_collect_answer(summary_payload: dict[str, Any]) -> dict[str, Any] |
     }
 
 
+def review_loop_progress_fingerprint(summary_payload: dict[str, Any]) -> str:
+    payload = {
+        "status": str(summary_payload.get("status") or ""),
+        "phase": str(summary_payload.get("phase") or ""),
+        "epoch": summary_payload.get("epoch"),
+        "review_round": summary_payload.get("review_round"),
+        "rebuttal_round": summary_payload.get("rebuttal_round"),
+        "phase_progress": deep_copy_jsonish(summary_payload.get("phase_progress") or {}),
+        "advance_ready": summary_payload.get("advance_ready"),
+        "active_reviewer_lanes": sorted(str(item) for item in (summary_payload.get("active_reviewer_lanes") or [])),
+        "final_candidates": sorted(str(item) for item in (summary_payload.get("final_candidates") or [])),
+    }
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+
+
+def build_current_run_payload(
+    *,
+    run_id: str,
+    summary_payload: dict[str, Any],
+    last_progress_at: float,
+    stall_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "status": str(summary_payload.get("status") or ""),
+        "phase": str(summary_payload.get("phase") or ""),
+        "terminal_state": str(summary_payload.get("terminal_state") or ""),
+        "review_round": summary_payload.get("review_round"),
+        "rebuttal_round": summary_payload.get("rebuttal_round"),
+        "phase_progress": deep_copy_jsonish(summary_payload.get("phase_progress") or {}),
+        "final_candidates": deep_copy_jsonish(summary_payload.get("final_candidates") or []),
+        "last_progress_at": format_timestamp(last_progress_at),
+        "stall_seconds": int(max(0.0, stall_seconds)),
+    }
+
+
 class ReviewLoopRunner:
     def __init__(
         self,
         *,
         debateclaw_root: Path,
         timeout_seconds: int,
+        stall_timeout_seconds: int,
         config_path: Path,
         collector: OuterCollectorClient,
         runtime_bundle_root: Path,
@@ -1060,6 +1165,7 @@ class ReviewLoopRunner:
     ) -> None:
         self.debateclaw_root = debateclaw_root
         self.timeout_seconds = timeout_seconds
+        self.stall_timeout_seconds = stall_timeout_seconds
         self.config_path = config_path
         self.collector = collector
         self.runtime_bundle_root = runtime_bundle_root
@@ -1081,6 +1187,10 @@ class ReviewLoopRunner:
         self.launch_home_dir.mkdir(parents=True, exist_ok=True)
         self.launch_openclaw_dir.mkdir(parents=True, exist_ok=True)
         self.clawteam_data_dir.mkdir(parents=True, exist_ok=True)
+        self.cleanup_output_root = self.output_root_for_cleanup()
+
+    def output_root_for_cleanup(self) -> Path:
+        return self.launch_home_dir.parent
 
     def _prepare_launch_home(self) -> None:
         self.launch_openclaw_dir.mkdir(parents=True, exist_ok=True)
@@ -1105,19 +1215,123 @@ class ReviewLoopRunner:
         result = run_subprocess(command, env=env, cwd=self.debateclaw_root, timeout=120)
         return parse_json_stdout(result, command)
 
-    def _wait_for_done(self, run_id: str) -> dict[str, Any]:
+    def _wait_for_done(
+        self,
+        run_id: str,
+        *,
+        heartbeat: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         deadline = time.time() + self.timeout_seconds
         last_payload: dict[str, Any] = {}
+        last_fingerprint = ""
+        last_progress_at = time.time()
         while time.time() < deadline:
             last_payload = self._status_summary(run_id)
-            if str(last_payload.get("status") or "") == "done" and str(last_payload.get("terminal_state") or "") in {"completed", "failed"}:
+            now = time.time()
+            fingerprint = review_loop_progress_fingerprint(last_payload)
+            if fingerprint != last_fingerprint:
+                last_fingerprint = fingerprint
+                last_progress_at = now
+            stall_seconds = max(0.0, now - last_progress_at)
+            current_run = build_current_run_payload(
+                run_id=run_id,
+                summary_payload=last_payload,
+                last_progress_at=last_progress_at,
+                stall_seconds=stall_seconds,
+            )
+            if heartbeat is not None:
+                heartbeat(current_run)
+
+            status = str(last_payload.get("status") or "")
+            terminal_state = str(last_payload.get("terminal_state") or "")
+            if status == "done" and terminal_state in {"completed", "failed"}:
                 return last_payload
-            time.sleep(5)
-        raise BenchmarkError(
-            f"Review-loop run `{run_id}` did not reach terminal state within {self.timeout_seconds}s. Last summary: {last_payload}"
+            if status in {"stalled", "terminal_failure"}:
+                raise ReviewLoopRunError(
+                    f"Review-loop run `{run_id}` reached terminal error status `{status}`.",
+                    run_id=run_id,
+                    error_kind="review_loop_stalled" if status == "stalled" else "review_loop_terminal_failure",
+                    failure_reason=str(last_payload.get("failure_reason") or status),
+                    terminal_state=terminal_state or status,
+                    last_summary=last_payload,
+                )
+            if self.stall_timeout_seconds > 0 and stall_seconds >= self.stall_timeout_seconds:
+                raise ReviewLoopRunError(
+                    f"Review-loop run `{run_id}` stalled for {int(stall_seconds)}s without progress.",
+                    run_id=run_id,
+                    error_kind="review_loop_stalled",
+                    failure_reason=f"No progress fingerprint change for {int(stall_seconds)} seconds.",
+                    terminal_state=terminal_state or status or "stalled",
+                    last_summary=last_payload,
+                )
+            time.sleep(30)
+        raise ReviewLoopRunError(
+            f"Review-loop run `{run_id}` did not reach terminal state within {self.timeout_seconds}s.",
+            run_id=run_id,
+            error_kind="review_loop_timeout",
+            failure_reason=f"Run exceeded rl-timeout={self.timeout_seconds}s.",
+            terminal_state=str(last_payload.get("terminal_state") or "timeout"),
+            last_summary=last_payload,
         )
 
-    def _launch(self, *, goal: str, run_id: str, additional_file_workspace: str | None) -> dict[str, Any]:
+    def _run_session_paths(self, run_id: str, launch_payload: dict[str, Any] | None) -> list[Path]:
+        session_paths: list[Path] = []
+        compile_payload = (launch_payload or {}).get("compile") or {}
+        session_assignments = compile_payload.get("session_assignments") or {}
+        for slot_id, session_id in session_assignments.items():
+            session_name = str(session_id or "").strip()
+            if not session_name:
+                continue
+            session_dir = self.launch_home_dir / ".openclaw" / "agents" / str(slot_id) / "sessions"
+            session_paths.append(session_dir / f"{session_name}.jsonl")
+            session_paths.append(session_dir / f"{session_name}.jsonl.lock")
+            session_paths.extend(sorted(session_dir.glob(f"{session_name}.checkpoint.*.jsonl")))
+            session_paths.extend(sorted(session_dir.glob(f"{session_name}.checkpoint.*.jsonl.lock")))
+        if session_paths:
+            return session_paths
+        for path in self.launch_home_dir.glob(f".openclaw/agents/*/sessions/*{run_id}*"):
+            session_paths.append(path)
+        return session_paths
+
+    def _cleanup_run_state(self, run_id: str, launch_payload: dict[str, Any] | None, manifest_path: Path | None = None) -> dict[str, Any]:
+        if manifest_path is None:
+            raise BenchmarkError(f"Missing cleanroom manifest for review-loop run `{run_id}`.")
+        return benchmark_test.invoke_cleanroom_cleanup(manifest_path=manifest_path)
+
+    def _manifest_path_for_run(self, run_id: str) -> Path:
+        return benchmark_test.cleanup_manifest_path(self.cleanup_output_root, run_id)
+
+    def _write_initial_manifest(self, *, run_id: str, group: ExperimentGroup) -> Path:
+        manifest_path = self._manifest_path_for_run(run_id)
+        payload = benchmark_test.build_cleanup_manifest_payload(
+            run_id=run_id,
+            benchmark_kind="review-loop",
+            group_id=group.id,
+            output_root=self.cleanup_output_root,
+            launch_home=self.launch_home_dir,
+            clawteam_data_dir=self.clawteam_data_dir,
+            control_roots=[
+                self.debateclaw_root / "control" / "runplans" / f"{run_id}.json",
+                self.debateclaw_root / "control" / "run-status" / f"{run_id}.json",
+            ],
+            generated_roots=[
+                self.debateclaw_root / "generated" / "command-maps" / f"{run_id}-command-map.json",
+                self.debateclaw_root / "generated" / "prompt-bundles" / f"{run_id}-prompts.json",
+                self.debateclaw_root / "generated" / "runtime-context" / f"{run_id}-context.json",
+                self.debateclaw_root / "generated" / "templates" / f"debate-review-loop-{run_id}.toml",
+                self.template_output_dir,
+            ],
+            artifact_roots=[
+                self.clawteam_data_dir,
+                self.debateclaw_root / "generated" / "clawteam-data" / "runs" / run_id,
+            ],
+            extra={"launch_home_root": str(self.launch_home_dir)},
+        )
+        benchmark_test.write_cleanup_manifest(manifest_path, payload)
+        benchmark_test.register_pending_cleanup_manifest(manifest_path)
+        return manifest_path
+
+    def _launch(self, *, goal: str, run_id: str, additional_file_workspace: str | None, manifest_path: Path | None = None) -> dict[str, Any]:
         compile_command = [
             "python3",
             str(self.compile_script),
@@ -1145,6 +1359,8 @@ class ReviewLoopRunner:
         env["OPENCLAW_CONFIG_PATH"] = str(self.config_path)
         env["CLAWTEAM_DATA_DIR"] = str(self.clawteam_data_dir)
         env["HOME"] = str(self.launch_home_dir)
+        env["BENCHMARK_CLEANROOM_RUN_ID"] = run_id
+        env["BENCHMARK_CLEANROOM_LEASE_DIR"] = str((self.cleanup_output_root / "cleanroom" / "leases").resolve())
         if self.real_openclaw_env_file.is_file():
             env["OPENCLAW_ENV_FILE"] = str(self.real_openclaw_env_file)
         compile_result = run_subprocess(compile_command, env=env, cwd=self.debateclaw_root, timeout=120)
@@ -1164,6 +1380,34 @@ class ReviewLoopRunner:
         ]
         materialize_result = run_subprocess(materialize_command, env=env, cwd=self.debateclaw_root, timeout=180)
         materialized = parse_json_stdout(materialize_result, materialize_command)
+        if manifest_path is not None:
+            benchmark_test.update_cleanup_manifest(
+                manifest_path,
+                {
+                    "launch_home": str(self.launch_home_dir.resolve()),
+                    "clawteam_data_dir": str(self.clawteam_data_dir.resolve()),
+                    "session_assignments": deep_copy_jsonish(((compiled.get("session_assignments") or {}))),
+                    "control_roots": [
+                        str(self.debateclaw_root / "control" / "runplans" / f"{run_id}.json"),
+                        str(self.debateclaw_root / "control" / "run-status" / f"{run_id}.json"),
+                    ],
+                    "generated_roots": [
+                        str(self.debateclaw_root / "generated" / "command-maps" / f"{run_id}-command-map.json"),
+                        str(self.debateclaw_root / "generated" / "prompt-bundles" / f"{run_id}-prompts.json"),
+                        str(self.debateclaw_root / "generated" / "runtime-context" / f"{run_id}-context.json"),
+                        str(self.debateclaw_root / "generated" / "templates" / f"debate-review-loop-{run_id}.toml"),
+                        str(self.template_output_dir.resolve()),
+                    ],
+                    "artifact_roots": [
+                        str((self.clawteam_data_dir / "teams" / run_id).resolve()),
+                        str((self.clawteam_data_dir / "tasks" / run_id).resolve()),
+                    ],
+                    "launch_payload": {
+                        "compile": deep_copy_jsonish(compiled),
+                        "materialize": deep_copy_jsonish(materialized),
+                    },
+                },
+            )
 
         launch_command: list[str] | None = None
         launch_command_json = str(materialized.get("launch_command_json") or "").strip()
@@ -1213,79 +1457,134 @@ class ReviewLoopRunner:
             },
         }
 
-    def run(self, record: BenchmarkRecord, group: ExperimentGroup) -> RunOutput:
+    def run(
+        self,
+        record: BenchmarkRecord,
+        group: ExperimentGroup,
+        *,
+        heartbeat: Callable[[dict[str, Any]], None] | None = None,
+    ) -> RunOutput:
         input_bundle = ensure_runtime_bundle(record, bundle_root=self.runtime_bundle_root)
         goal = build_review_loop_goal(record, websearch_enabled=group.websearch, input_bundle=input_bundle)
         run_id = f"benchmark-{group.id}-{slugify(record.record_id, limit=40)}-{hash_text(goal)}-{time.strftime('%Y%m%d-%H%M%S')}"
-        launch_payload = self._launch(
-            goal=goal,
-            run_id=run_id,
-            additional_file_workspace=str(input_bundle.bundle_dir) if input_bundle is not None else None,
-        )
-        summary_payload = self._wait_for_done(run_id)
-        candidate_payloads = proposal_payloads_for_candidates(summary_payload)
-        coordinator_summary_path = coordinator_summary_path_for_run(run_id, self.debateclaw_root)
-        coordinator_summary_text = coordinator_summary_path.read_text(encoding="utf-8") if coordinator_summary_path else ""
-
-        collector_meta: dict[str, Any] = {}
-        if str(summary_payload.get("terminal_state") or "") == "failed" or not candidate_payloads:
-            collector_result = None
-        else:
-            try:
-                collector_result = self.collector.decide(
-                    record=record,
-                    summary_payload=summary_payload,
-                    candidate_payloads=candidate_payloads,
-                    coordinator_summary_text=coordinator_summary_text,
-                )
-                collector_meta["mode"] = "collector"
-            except Exception as exc:
-                collector_meta["mode"] = "collector_failed"
-                collector_meta["error"] = str(exc)
-                collector_result = None
-
-        if collector_result is None:
-            fallback = fallback_collect_answer(summary_payload)
-            if fallback is None:
-                raise BenchmarkError(
-                    f"Review-loop run `{run_id}` did not produce a collectible final answer. terminal_state={summary_payload.get('terminal_state')}"
-                )
-            collector_result = fallback
-            collector_meta.setdefault("mode", "fallback")
-
-        short_answer_text, full_response_text = normalize_answer_tracks(
-            short_answer_text=str(collector_result.get("short_answer") or collector_result.get("final_answer") or ""),
-            full_response_text=str(collector_result.get("full_response_text") or ""),
-        )
-        runner_meta = {
+        manifest_path = self._write_initial_manifest(run_id=run_id, group=group)
+        launch_payload: dict[str, Any] = {
+            "preset": "review-loop@1",
+            "goal": goal,
             "run_id": run_id,
-            "launch": launch_payload,
-            "summary_payload": summary_payload,
-            "summary_json_path": "",
-            "clawteam_data_dir": str(self.clawteam_data_dir),
-            "terminal_state": summary_payload.get("terminal_state"),
-            "final_candidates": summary_payload.get("final_candidates"),
-            "collector": {
-                **collector_meta,
-                "result": collector_result,
-            },
         }
-        if coordinator_summary_path is not None:
-            runner_meta["summary_json_path"] = str(coordinator_summary_path)
-        if input_bundle is not None:
-            runner_meta["runtime_bundle"] = input_bundle.to_meta()
-        return RunOutput(
-            short_answer_text=short_answer_text,
-            full_response_text=full_response_text,
-            raw={
+        summary_payload: dict[str, Any] = {}
+        pending_error: ReviewLoopRunError | None = None
+        cleanup_report: dict[str, Any] | None = None
+        try:
+            launch_payload = self._launch(
+                goal=goal,
+                run_id=run_id,
+                additional_file_workspace=str(input_bundle.bundle_dir) if input_bundle is not None else None,
+                manifest_path=manifest_path,
+            )
+            summary_payload = self._wait_for_done(run_id, heartbeat=heartbeat)
+            candidate_payloads = proposal_payloads_for_candidates(summary_payload)
+            coordinator_summary_path = coordinator_summary_path_for_run(run_id, self.debateclaw_root)
+            coordinator_summary_text = coordinator_summary_path.read_text(encoding="utf-8") if coordinator_summary_path else ""
+
+            collector_meta: dict[str, Any] = {}
+            if str(summary_payload.get("terminal_state") or "") == "failed" or not candidate_payloads:
+                collector_result = None
+            else:
+                try:
+                    collector_result = self.collector.decide(
+                        record=record,
+                        summary_payload=summary_payload,
+                        candidate_payloads=candidate_payloads,
+                        coordinator_summary_text=coordinator_summary_text,
+                    )
+                    collector_meta["mode"] = "collector"
+                except Exception as exc:
+                    collector_meta["mode"] = "collector_failed"
+                    collector_meta["error"] = str(exc)
+                    collector_result = None
+
+            if collector_result is None:
+                fallback = fallback_collect_answer(summary_payload)
+                if fallback is None:
+                    raise ReviewLoopRunError(
+                        f"Review-loop run `{run_id}` did not produce a collectible final answer.",
+                        run_id=run_id,
+                        error_kind="review_loop_no_collectible_answer",
+                        failure_reason=(
+                            f"terminal_state={summary_payload.get('terminal_state')} and no fallback collectible answer"
+                        ),
+                        terminal_state=str(summary_payload.get("terminal_state") or ""),
+                        launch_payload=launch_payload,
+                        last_summary=summary_payload,
+                    )
+                collector_result = fallback
+                collector_meta.setdefault("mode", "fallback")
+
+            short_answer_text, full_response_text = normalize_answer_tracks(
+                short_answer_text=str(collector_result.get("short_answer") or collector_result.get("final_answer") or ""),
+                full_response_text=str(collector_result.get("full_response_text") or ""),
+            )
+            runner_meta = {
+                "run_id": run_id,
                 "launch": launch_payload,
-                "summary": summary_payload,
-                "candidate_payloads": candidate_payloads,
-                "coordinator_summary_text": coordinator_summary_text,
-                "collector": collector_result,
-            },
-            runner_meta=runner_meta,
-        )
+                "summary_payload": summary_payload,
+                "summary_json_path": "",
+                "clawteam_data_dir": str(self.clawteam_data_dir),
+                "terminal_state": summary_payload.get("terminal_state"),
+                "final_candidates": summary_payload.get("final_candidates"),
+                "collector": {
+                    **collector_meta,
+                    "result": collector_result,
+                },
+            }
+            if coordinator_summary_path is not None:
+                runner_meta["summary_json_path"] = str(coordinator_summary_path)
+            if input_bundle is not None:
+                runner_meta["runtime_bundle"] = input_bundle.to_meta()
+            return RunOutput(
+                short_answer_text=short_answer_text,
+                full_response_text=full_response_text,
+                raw={
+                    "launch": launch_payload,
+                    "summary": summary_payload,
+                    "candidate_payloads": candidate_payloads,
+                    "coordinator_summary_text": coordinator_summary_text,
+                    "collector": collector_result,
+                },
+                runner_meta=runner_meta,
+            )
+        except ReviewLoopRunError as exc:
+            exc.enrich(
+                launch_payload=launch_payload,
+                last_summary=summary_payload,
+                terminal_state=str(summary_payload.get("terminal_state") or ""),
+            )
+            pending_error = exc
+        except Exception as exc:
+            pending_error = ReviewLoopRunError(
+                f"Review-loop run `{run_id}` failed: {exc}",
+                run_id=run_id,
+                error_kind="review_loop_run_failed",
+                failure_reason=str(exc),
+                terminal_state=str(summary_payload.get("terminal_state") or ""),
+                launch_payload=launch_payload,
+                last_summary=summary_payload,
+            )
+        finally:
+            try:
+                cleanup_report = self._cleanup_run_state(run_id, launch_payload, manifest_path=manifest_path)
+            except Exception as exc:
+                benchmark_test.unregister_pending_cleanup_manifest(manifest_path)
+                raise benchmark_test.CleanupFatalError(f"Review-loop cleanup failed for run `{run_id}`: {exc}") from exc
+            else:
+                benchmark_test.unregister_pending_cleanup_manifest(manifest_path)
+                launch_payload.setdefault("cleanup_report", cleanup_report)
+                if pending_error is not None:
+                    pending_error.enrich(cleanup=cleanup_report)
+        if pending_error is not None:
+            raise pending_error
 
 
 def run_group(
@@ -1296,6 +1595,7 @@ def run_group(
     output_root: Path,
     debateclaw_root: Path,
     rl_timeout: int,
+    rl_stall_timeout: int,
     collector_timeout: int,
     judge: JudgeClient,
     config_path: Path,
@@ -1314,6 +1614,7 @@ def run_group(
     runner = ReviewLoopRunner(
         debateclaw_root=debateclaw_root,
         timeout_seconds=rl_timeout,
+        stall_timeout_seconds=rl_stall_timeout,
         config_path=config_path,
         collector=collector,
         runtime_bundle_root=runtime_bundle_root,
@@ -1335,10 +1636,22 @@ def run_group(
             completed_record_ids=completed_record_ids,
             current_record_id=record.record_id,
             status="running",
+            current_run=None,
         )
         started = time.time()
         try:
-            run_output = runner.run(record, group)
+            def update_current_run(current_run: dict[str, Any]) -> None:
+                write_runtime_status(
+                    runtime.status_path,
+                    group=group,
+                    records=records,
+                    completed_record_ids=completed_record_ids,
+                    current_record_id=record.record_id,
+                    status="running",
+                    current_run=current_run,
+                )
+
+            run_output = runner.run(record, group, heartbeat=update_current_run)
             evaluation = evaluate_answer(
                 record,
                 short_answer_text=run_output.short_answer_text,
@@ -1371,12 +1684,19 @@ def run_group(
         except Exception as exc:
             elapsed = time.time() - started
             error_message = f"Record `{record.record_id}` failed in group `{group.id}`: {exc}"
+            if isinstance(exc, ReviewLoopRunError):
+                runner_meta = {
+                    **exc.to_runner_meta(),
+                    "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                }
+            else:
+                runner_meta = {"traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))}
             entry = build_error_group_record_result(
                 group=group,
                 record=record,
                 error_message=error_message,
                 elapsed_seconds=elapsed,
-                runner_meta={"traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))},
+                runner_meta=runner_meta,
             )
         entry = safe_persist_group_record_result(output_root, group, record, entry)
         group_results.append(entry)
@@ -1388,6 +1708,7 @@ def run_group(
             completed_record_ids=completed_record_ids,
             current_record_id="",
             status="running",
+            current_run=None,
         )
         persist_partial_results(runtime, group_results)
     return group_results
@@ -1441,6 +1762,7 @@ def main() -> int:
         "review_rounds": args.review_rounds,
         "rebuttal_rounds": args.rebuttal_rounds,
         "proposer_count": args.proposer_count,
+        "rl_stall_timeout": args.rl_stall_timeout,
         "collector_agent": args.collector_agent,
         "collector_model": args.collector_model,
         "judge_agent": args.judge_agent,
@@ -1476,6 +1798,7 @@ def main() -> int:
         completed_record_ids=[],
         current_record_id="",
         status="running",
+        current_run=None,
     )
     results: list[GroupRecordResult] = []
     final_payload: dict[str, Any] | None = None
@@ -1489,6 +1812,7 @@ def main() -> int:
             output_root=output_root,
             debateclaw_root=debateclaw_root,
             rl_timeout=args.rl_timeout,
+            rl_stall_timeout=args.rl_stall_timeout,
             collector_timeout=args.collector_timeout,
             judge=judge,
             config_path=config_path,
@@ -1507,6 +1831,8 @@ def main() -> int:
         fatal_error = "".join(traceback.format_exception_only(type(exc), exc)).strip()
         exit_code = 1
         final_payload = finalize_outputs(runtime, results=results, status="failed", fatal_error=fatal_error)
+    finally:
+        benchmark_test.run_pending_cleanroom_cleanup()
     if final_payload is not None:
         print(
             json.dumps(

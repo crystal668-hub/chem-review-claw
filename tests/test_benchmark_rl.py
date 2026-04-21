@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -301,6 +302,188 @@ class BenchmarkRLModuleTests(unittest.TestCase):
             self.assertTrue((root / "results.json").is_file())
             self.assertTrue((root / "results.partial.json").is_file())
 
+    def test_wait_for_done_accepts_done_completed(self) -> None:
+        runner = benchmark_rl.ReviewLoopRunner.__new__(benchmark_rl.ReviewLoopRunner)
+        runner.timeout_seconds = 1
+        runner.stall_timeout_seconds = 600
+        runner._status_summary = lambda _run_id: {"status": "done", "terminal_state": "completed"}  # type: ignore[method-assign]
+        payload = benchmark_rl.ReviewLoopRunner._wait_for_done(runner, "demo-run")
+        self.assertEqual("done", payload["status"])
+        self.assertEqual("completed", payload["terminal_state"])
+
+    def test_wait_for_done_accepts_done_failed(self) -> None:
+        runner = benchmark_rl.ReviewLoopRunner.__new__(benchmark_rl.ReviewLoopRunner)
+        runner.timeout_seconds = 1
+        runner.stall_timeout_seconds = 600
+        runner._status_summary = lambda _run_id: {"status": "done", "terminal_state": "failed"}  # type: ignore[method-assign]
+        payload = benchmark_rl.ReviewLoopRunner._wait_for_done(runner, "demo-run")
+        self.assertEqual("failed", payload["terminal_state"])
+
+    def test_wait_for_done_raises_on_stalled_status(self) -> None:
+        runner = benchmark_rl.ReviewLoopRunner.__new__(benchmark_rl.ReviewLoopRunner)
+        runner.timeout_seconds = 1
+        runner.stall_timeout_seconds = 600
+        runner._status_summary = lambda _run_id: {"status": "stalled", "phase": "review"}  # type: ignore[method-assign]
+        with self.assertRaises(benchmark_rl.ReviewLoopRunError) as ctx:
+            benchmark_rl.ReviewLoopRunner._wait_for_done(runner, "demo-run")
+        self.assertEqual("review_loop_stalled", ctx.exception.error_kind)
+        self.assertEqual("demo-run", ctx.exception.run_id)
+        self.assertEqual("stalled", ctx.exception.last_summary["status"])
+
+    def test_wait_for_done_raises_on_terminal_failure_status(self) -> None:
+        runner = benchmark_rl.ReviewLoopRunner.__new__(benchmark_rl.ReviewLoopRunner)
+        runner.timeout_seconds = 1
+        runner.stall_timeout_seconds = 600
+        runner._status_summary = lambda _run_id: {"status": "terminal_failure", "phase": "review"}  # type: ignore[method-assign]
+        with self.assertRaises(benchmark_rl.ReviewLoopRunError) as ctx:
+            benchmark_rl.ReviewLoopRunner._wait_for_done(runner, "demo-run")
+        self.assertEqual("review_loop_terminal_failure", ctx.exception.error_kind)
+        self.assertEqual("terminal_failure", ctx.exception.last_summary["status"])
+
+    def test_wait_for_done_detects_stall_and_reports_heartbeat(self) -> None:
+        runner = benchmark_rl.ReviewLoopRunner.__new__(benchmark_rl.ReviewLoopRunner)
+        runner.timeout_seconds = 3600
+        runner.stall_timeout_seconds = 10
+        payload = {
+            "status": "running",
+            "phase": "review",
+            "epoch": 1,
+            "review_round": 2,
+            "rebuttal_round": 1,
+            "phase_progress": {"actual": 4, "expected": 6, "round": 2},
+            "advance_ready": False,
+            "active_reviewer_lanes": ["proposer-2"],
+            "final_candidates": [],
+        }
+        runner._status_summary = lambda _run_id: payload  # type: ignore[method-assign]
+        heartbeat_calls: list[dict[str, object]] = []
+        tick_values = [100.0, 100.0, 105.0, 105.0, 112.0, 112.0, 200.0]
+
+        def fake_time() -> float:
+            if tick_values:
+                return tick_values.pop(0)
+            return 200.0
+
+        with mock.patch.object(benchmark_rl.time, "time", side_effect=fake_time), \
+            mock.patch.object(benchmark_rl.time, "sleep", return_value=None):
+            with self.assertRaises(benchmark_rl.ReviewLoopRunError) as ctx:
+                benchmark_rl.ReviewLoopRunner._wait_for_done(
+                    runner,
+                    "demo-run",
+                    heartbeat=lambda item: heartbeat_calls.append(item),
+                )
+        self.assertEqual("review_loop_stalled", ctx.exception.error_kind)
+        self.assertGreaterEqual(len(heartbeat_calls), 2)
+        self.assertEqual("demo-run", heartbeat_calls[-1]["run_id"])
+        self.assertGreaterEqual(heartbeat_calls[-1]["stall_seconds"], 10)
+        self.assertEqual("review", heartbeat_calls[-1]["phase"])
+
+    def test_cleanup_run_state_removes_only_run_scoped_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runner = benchmark_rl.ReviewLoopRunner.__new__(benchmark_rl.ReviewLoopRunner)
+            runner.clawteam_data_dir = root / "clawteam-data"
+            runner.launch_home_dir = root / "clawteam-home"
+            run_id = "demo-run"
+            manifest_path = root / "demo.manifest.json"
+            cleanup_report = {"success": True, "removed_paths": [{"path": "/tmp/demo", "removed": True}]}
+            with mock.patch.object(benchmark_rl.benchmark_test, "invoke_cleanroom_cleanup", return_value=cleanup_report) as invoke:
+                cleanup = benchmark_rl.ReviewLoopRunner._cleanup_run_state(runner, run_id, {"compile": {}}, manifest_path=manifest_path)
+            self.assertEqual(cleanup_report, cleanup)
+            invoke.assert_called_once_with(manifest_path=manifest_path)
+
+    def test_run_group_persists_structured_stalled_error_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            group = benchmark_rl.EXPERIMENT_GROUPS["review_loop_web_off"]
+            record1 = self.make_record("record-one")
+            record2 = self.make_record("record-two")
+            runtime = benchmark_rl.RuntimeContext(
+                output_root=root,
+                group=group,
+                dataset_files=[root / "bench.jsonl"],
+                records=[record1, record2],
+                benchmark_root=root,
+                config_path=root / "runtime-config" / "cfg.json",
+                model_profile="review-loop-test",
+                args_payload={
+                    "websearch": "off",
+                    "review_rounds": 3,
+                    "rebuttal_rounds": 3,
+                    "proposer_count": 3,
+                    "rl_stall_timeout": 600,
+                    "collector_agent": "benchmark-rl-collector",
+                    "collector_model": "collector-model",
+                    "judge_agent": "benchmark-judge",
+                    "judge_model": "judge-model",
+                },
+                status_path=root / "runtime-status.json",
+                partial_results_path=root / "results.partial.json",
+                runtime_manifest_path=root / "runtime-manifest.json",
+            )
+
+            class DummyRunner:
+                def __init__(self, **_: object) -> None:
+                    self.calls = 0
+
+                def run(self, record: object, group: object, *, heartbeat: object | None = None) -> benchmark_rl.RunOutput:
+                    self.calls += 1
+                    if self.calls == 1:
+                        if heartbeat is not None:
+                            heartbeat({"run_id": "run-1", "status": "running", "phase": "review", "terminal_state": "", "review_round": 2, "rebuttal_round": 1, "phase_progress": {"actual": 4, "expected": 6}, "final_candidates": [], "last_progress_at": "2026-01-01T00:00:00+0000", "stall_seconds": 600})
+                        raise benchmark_rl.ReviewLoopRunError(
+                            "stalled",
+                            run_id="run-1",
+                            error_kind="review_loop_stalled",
+                            failure_reason="No progress fingerprint change for 600 seconds.",
+                            terminal_state="stalled",
+                            launch_payload={"run_id": "run-1"},
+                            last_summary={"status": "running", "phase": "review"},
+                            cleanup={"attempted": True, "removed_paths": ["/tmp/run-1"], "errors": []},
+                        )
+                    return benchmark_rl.RunOutput(
+                        short_answer_text="42",
+                        full_response_text="FINAL ANSWER: 42",
+                        raw={},
+                        runner_meta={"run_id": "run-2"},
+                    )
+
+            with mock.patch.object(benchmark_rl, "OuterCollectorClient", return_value=object()), \
+                mock.patch.object(benchmark_rl, "ReviewLoopRunner", DummyRunner), \
+                mock.patch.object(
+                    benchmark_rl,
+                    "evaluate_answer",
+                    side_effect=lambda record, **kwargs: benchmark_rl.build_execution_error_evaluation(record, error_message="unused"),
+                ):
+                results = benchmark_rl.run_group(
+                    runtime=runtime,
+                    group=group,
+                    records=[record1, record2],
+                    output_root=root,
+                    debateclaw_root=root,
+                    rl_timeout=3600,
+                    rl_stall_timeout=600,
+                    collector_timeout=300,
+                    judge=object(),
+                    config_path=root / "runtime-config" / "cfg.json",
+                    collector_agent="benchmark-rl-collector",
+                    review_rounds=3,
+                    rebuttal_rounds=3,
+                    proposer_count=3,
+                    model_profile="review-loop-test",
+                )
+
+            self.assertEqual(2, len(results))
+            self.assertIsNotNone(results[0].error)
+            self.assertEqual("review_loop_stalled", results[0].runner_meta["error_kind"])
+            self.assertEqual("run-1", results[0].runner_meta["run_id"])
+            self.assertTrue(results[0].runner_meta["cleanup"]["attempted"])
+            self.assertIsNone(results[1].error)
+            status = json.loads(runtime.status_path.read_text(encoding="utf-8"))
+            self.assertIsNone(status["current_run"])
+            saved = json.loads((root / "per-record" / group.id / "record-one.json").read_text(encoding="utf-8"))
+            self.assertEqual("review_loop_stalled", saved["runner_meta"]["error_kind"])
+
     def test_main_keyboard_interrupt_still_writes_runtime_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -366,6 +549,7 @@ class BenchmarkRLModuleTests(unittest.TestCase):
             results = json.loads((output_root / "results.json").read_text(encoding="utf-8"))
             self.assertFalse(results["completed"])
             self.assertEqual("Interrupted by user", results["fatal_error"])
+            self.assertIsNone(status["current_run"])
 
 
 if __name__ == "__main__":
