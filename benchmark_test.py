@@ -29,6 +29,7 @@ from typing import Any, Iterable
 import yaml
 
 try:
+    from workspace import runtime_paths
     from workspace.conformabench_judge import (
         ConformaBenchDependencyError,
         ConformaBenchJudgeError,
@@ -37,6 +38,7 @@ try:
         resolve_hidden_judge_spec_path,
     )
 except ModuleNotFoundError:  # pragma: no cover - script entry fallback
+    import runtime_paths
     from conformabench_judge import (
         ConformaBenchDependencyError,
         ConformaBenchJudgeError,
@@ -46,20 +48,20 @@ except ModuleNotFoundError:  # pragma: no cover - script entry fallback
     )
 
 
-DEFAULT_WORKSPACE = Path("/home/dministrator/.openclaw/workspace")
-DEFAULT_BENCHMARK_ROOT = Path("/home/dministrator/.openclaw/benchmarks")
-DEFAULT_CHEMQA_ROOT = Path("/home/dministrator/.openclaw/skills/chemqa-review")
-DEFAULT_BENCHMARK_CLEANROOM_ROOT = Path("/home/dministrator/.openclaw/skills/benchmark-cleanroom")
-DEFAULT_OPENCLAW_ENV_FILE = DEFAULT_WORKSPACE.parent / ".env"
-DEFAULT_OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
-DEFAULT_OUTPUT_DIR = DEFAULT_WORKSPACE / "state" / "benchmark-runs"
+DEFAULT_WORKSPACE = runtime_paths.project_root
+DEFAULT_BENCHMARK_ROOT = runtime_paths.benchmarks_root
+DEFAULT_CHEMQA_ROOT = runtime_paths.skills_root / "chemqa-review"
+DEFAULT_BENCHMARK_CLEANROOM_ROOT = runtime_paths.skills_root / "benchmark-cleanroom"
+DEFAULT_OPENCLAW_ENV_FILE = runtime_paths.openclaw_env
+DEFAULT_OPENCLAW_CONFIG = runtime_paths.openclaw_config
+DEFAULT_OUTPUT_DIR = runtime_paths.project_state_root / "benchmark-runs"
 DEFAULT_SINGLE_AGENT = "benchmark-single-web-off"
 DEFAULT_SINGLE_AGENT_MODEL = "qwen3.5-plus"
 DEFAULT_JUDGE_AGENT = "benchmark-judge"
 DEFAULT_JUDGE_MODEL = "su8/gpt-5.4"
 DEFAULT_CHEMQA_PRESET = "chemqa-review@1"
 DEFAULT_CHEMQA_MODEL_PROFILE = "chemqa-review-su8-coord-qwen-ds-kimi-glm-minimax"
-BASELINE_WORKSPACE_ROOT = Path.home() / ".openclaw" / "benchmark" / "workspaces"
+BASELINE_WORKSPACE_ROOT = runtime_paths.benchmark_runtime_root
 CHEMQA_SLOT_SETS = {
     "chemqa_web_on": "A",
     "chemqa_web_off": "B",
@@ -509,7 +511,7 @@ def slot_role_map(slot_set: str) -> dict[str, str]:
 
 
 def slot_agents_template_path() -> Path:
-    return Path("/home/dministrator/.openclaw/skills/debateclaw-v1/scripts/templates/debate-slot-AGENTS.md")
+    return runtime_paths.skills_root / "debateclaw-v1" / "scripts" / "templates" / "debate-slot-AGENTS.md"
 
 
 def load_slot_agents_template() -> str:
@@ -583,7 +585,7 @@ def build_run_scoped_config_payload(
 ) -> dict[str, Any]:
     payload = build_temp_openclaw_config_payload(base_payload, enable_websearch=group.websearch)
     judge_workspace = BASELINE_WORKSPACE_ROOT / JUDGE_AGENT_ID
-    judge_agent_dir = Path.home() / ".openclaw" / "agents" / JUDGE_AGENT_ID / "agent"
+    judge_agent_dir = runtime_paths.agents_root / JUDGE_AGENT_ID / "agent"
     ensure_basic_agent_dirs(judge_workspace, judge_agent_dir)
     upsert_agent_entry(
         payload,
@@ -599,7 +601,7 @@ def build_run_scoped_config_payload(
     if group.runner == "single_llm":
         agent_id = BASELINE_AGENT_IDS.get(group.id, JUDGE_AGENT_ID)
         workspace = BASELINE_WORKSPACE_ROOT / agent_id
-        agent_dir = Path.home() / ".openclaw" / "agents" / agent_id / "agent"
+        agent_dir = runtime_paths.agents_root / agent_id / "agent"
         ensure_basic_agent_dirs(workspace, agent_dir)
         upsert_agent_entry(
             payload,
@@ -615,7 +617,7 @@ def build_run_scoped_config_payload(
     slot_map = actual_slot_ids(slot_set)
     for logical_slot_id, actual_slot_id in slot_map.items():
         workspace = workspace_root / actual_slot_id
-        agent_dir = Path.home() / ".openclaw" / "agents" / actual_slot_id / "agent"
+        agent_dir = runtime_paths.agents_root / actual_slot_id / "agent"
         ensure_basic_agent_dirs(agent_dir)
         ensure_slot_workspace(workspace, slot_id=actual_slot_id, workspace_root=workspace_root)
         upsert_agent_entry(

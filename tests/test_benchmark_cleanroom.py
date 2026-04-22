@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_LEASE_PATH = ROOT / "skills" / "benchmark-cleanroom" / "scripts" / "runtime_lease.py"
 CLEANUP_PATH = ROOT / "skills" / "benchmark-cleanroom" / "scripts" / "cleanup_benchmark_run.py"
 

@@ -13,8 +13,26 @@
 # Python cache artefacts
 __pycache__/
 *.py[cod]
+.DS_Store
+*.backup
 
 # Local notes and benchmark runtime outputs
 /memory/
 /state/
 /temp-benchmarks/
+
+# Benchmark datasets
+/benchmarks/
+
+# Skill runtime control outputs
+/skills/chemqa-review/control/runplans/
+/skills/chemqa-review/control/run-status/
+/skills/debateclaw-v1/control/runplans/
+/skills/debateclaw-v1/control/run-status/
+/skills/*/generated/
+
+# Benchmark run output roots
+/runtime-config/
+/per-record/
+/waves/
+/cleanroom/

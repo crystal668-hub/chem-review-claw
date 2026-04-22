@@ -18,7 +18,7 @@ assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = benchmark_rl
 SPEC.loader.exec_module(benchmark_rl)
 
-MATERIALIZE_MODULE_PATH = Path(__file__).resolve().parents[2] / "skills" / "debateclaw-v1" / "scripts" / "materialize_runplan.py"
+MATERIALIZE_MODULE_PATH = Path(__file__).resolve().parents[1] / "skills" / "debateclaw-v1" / "scripts" / "materialize_runplan.py"
 MATERIALIZE_SCRIPT_DIR = MATERIALIZE_MODULE_PATH.parent
 if str(MATERIALIZE_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(MATERIALIZE_SCRIPT_DIR))

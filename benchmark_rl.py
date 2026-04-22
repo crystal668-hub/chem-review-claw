@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import traceback
@@ -16,12 +17,17 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+try:
+    from workspace import runtime_paths
+except ModuleNotFoundError:  # pragma: no cover - script entry fallback
+    import runtime_paths
 
-WORKSPACE_ROOT = Path("/home/dministrator/.openclaw/workspace")
-DEFAULT_BENCHMARK_ROOT = WORKSPACE_ROOT / "temp-benchmarks" / "representative15"
-DEFAULT_OUTPUT_DIR = WORKSPACE_ROOT / "state" / "benchmark-rl-runs"
-DEFAULT_OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
-DEFAULT_DEBATECLAW_ROOT = Path("/home/dministrator/.openclaw/skills/debateclaw-v1")
+
+WORKSPACE_ROOT = runtime_paths.project_root
+DEFAULT_BENCHMARK_ROOT = runtime_paths.temp_benchmarks_root / "representative15"
+DEFAULT_OUTPUT_DIR = runtime_paths.project_state_root / "benchmark-rl-runs"
+DEFAULT_OPENCLAW_CONFIG = runtime_paths.openclaw_config
+DEFAULT_DEBATECLAW_ROOT = runtime_paths.skills_root / "debateclaw-v1"
 DEFAULT_COLLECTOR_AGENT = "benchmark-rl-collector"
 DEFAULT_COLLECTOR_MODEL = "packy/gpt-5.4"
 DEFAULT_JUDGE_AGENT = "benchmark-judge"
@@ -725,7 +731,7 @@ class ReviewLoopConfigPool:
 
         for slot_id, slot_payload in slot_models.items():
             workspace = self._slot_workspace_root / group.id / slot_id
-            agent_dir = Path.home() / ".openclaw" / "agents" / slot_id / "agent"
+            agent_dir = runtime_paths.agents_root / slot_id / "agent"
             if slot_id.startswith("debate-"):
                 if slot_id == "debate-coordinator":
                     benchmark_test.ensure_slot_workspace(workspace, slot_id=slot_id, workspace_root=workspace.parent)
@@ -743,9 +749,9 @@ class ReviewLoopConfigPool:
 
         collector_workspace = self.output_root / "collector-workspace"
         collector_agent_dir = self._ensure_agent_dir_with_models(
-            Path.home() / ".openclaw" / "agents" / self.collector_agent / "agent",
-            Path.home() / ".openclaw" / "agents" / self.judge_agent / "agent",
-            Path.home() / ".openclaw" / "agents" / "main" / "agent",
+            runtime_paths.agents_root / self.collector_agent / "agent",
+            runtime_paths.agents_root / self.judge_agent / "agent",
+            runtime_paths.agents_root / "main" / "agent",
         )
         self._ensure_basic_agent_dirs(collector_workspace, collector_agent_dir)
         self._upsert_agent_entry(
@@ -758,8 +764,8 @@ class ReviewLoopConfigPool:
 
         judge_workspace = self.output_root / "judge-workspace"
         judge_agent_dir = self._ensure_agent_dir_with_models(
-            Path.home() / ".openclaw" / "agents" / self.judge_agent / "agent",
-            Path.home() / ".openclaw" / "agents" / "main" / "agent",
+            runtime_paths.agents_root / self.judge_agent / "agent",
+            runtime_paths.agents_root / "main" / "agent",
         )
         self._ensure_basic_agent_dirs(judge_workspace, judge_agent_dir)
         self._upsert_agent_entry(
@@ -787,8 +793,8 @@ class ReviewLoopConfigPool:
         payload = benchmark_test.build_temp_openclaw_config_payload(self._payload, enable_websearch=False)
         judge_workspace = self.output_root / "judge-workspace"
         judge_agent_dir = self._ensure_agent_dir_with_models(
-            Path.home() / ".openclaw" / "agents" / self.judge_agent / "agent",
-            Path.home() / ".openclaw" / "agents" / "main" / "agent",
+            runtime_paths.agents_root / self.judge_agent / "agent",
+            runtime_paths.agents_root / "main" / "agent",
         )
         self._ensure_basic_agent_dirs(judge_workspace, judge_agent_dir)
         self._upsert_agent_entry(
@@ -1179,8 +1185,8 @@ class ReviewLoopRunner:
         self.compile_script = debateclaw_root / "scripts" / "compile_runplan.py"
         self.materialize_script = debateclaw_root / "scripts" / "materialize_runplan.py"
         self.debate_state_script = debateclaw_root / "scripts" / "debate_state.py"
-        self.runtime_helper_dir = Path.home() / ".clawteam" / "debateclaw" / "bin"
-        self.real_openclaw_env_file = Path.home() / ".openclaw" / ".env"
+        self.runtime_helper_dir = runtime_paths.clawteam_home / "debateclaw" / "bin"
+        self.real_openclaw_env_file = runtime_paths.openclaw_env
         self.launch_openclaw_dir = self.launch_home_dir / ".openclaw"
         self.launch_openclaw_config_path = self.launch_openclaw_dir / "openclaw.json"
         self.template_output_dir.mkdir(parents=True, exist_ok=True)

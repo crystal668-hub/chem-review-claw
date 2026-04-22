@@ -8,9 +8,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-DEBATE_STATE = "/home/dministrator/.clawteam/debateclaw/bin/debate_state.py"
-RECOVER_RUN = "/home/dministrator/.openclaw/skills/chemqa-review/scripts/recover_run.py"
-SKILL_ROOT = "/home/dministrator/.openclaw/skills/chemqa-review"
+try:
+    from workspace import runtime_paths
+except ModuleNotFoundError:  # pragma: no cover - direct test execution fallback
+    import runtime_paths
+
+DEBATE_STATE = str(runtime_paths.clawteam_home / "debateclaw" / "bin" / "debate_state.py")
+RECOVER_RUN = str(runtime_paths.skills_root / "chemqa-review" / "scripts" / "recover_run.py")
+SKILL_ROOT = str(runtime_paths.skills_root / "chemqa-review")
 
 PROPOSAL_BODY = """artifact_kind: candidate_submission
 artifact_contract_version: react-reviewed-v2
