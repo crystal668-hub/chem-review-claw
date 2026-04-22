@@ -1,0 +1,95 @@
+[project]
+name = "chemqa"
+version = "0.1.0"
+description = "ChemQA benchmark orchestration and OpenClaw skill runtime workspace"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "PyYAML==6.0.3",
+    "requests==2.33.1",
+]
+
+[project.optional-dependencies]
+chem = [
+    "rdkit==2026.3.1",
+]
+paper-parse = [
+    "PyMuPDF==1.27.2.2",
+]
+mineru = [
+    "mineru==3.0.9",
+    "mineru_vl_utils==0.1.22",
+    "modelscope==1.35.3",
+    "qwen-vl-utils==0.0.14",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "transformers==4.57.6",
+    "tokenizers==0.22.2",
+    "safetensors==0.7.0",
+    "onnxruntime==1.24.4",
+    "opencv-python-headless==4.13.0.92",
+    "albumentations==2.0.8",
+    "ftfy==6.3.1",
+    "omegaconf==2.3.0",
+    "pyclipper==1.4.0",
+    "dill==0.4.1",
+    "shapely==2.1.2",
+]
+gpu = [
+    "cuda-bindings==13.2.0; platform_system == 'Linux'",
+    "cuda-pathfinder==1.5.2; platform_system == 'Linux'",
+    "cuda-toolkit==13.0.2; platform_system == 'Linux'",
+    "nvidia-cublas==13.1.0.3; platform_system == 'Linux'",
+    "nvidia-cuda-cupti==13.0.85; platform_system == 'Linux'",
+    "nvidia-cuda-nvrtc==13.0.88; platform_system == 'Linux'",
+    "nvidia-cuda-runtime==13.0.96; platform_system == 'Linux'",
+    "nvidia-cudnn-cu13==9.19.0.56; platform_system == 'Linux'",
+    "nvidia-cufft==12.0.0.61; platform_system == 'Linux'",
+    "nvidia-cufile==1.15.1.6; platform_system == 'Linux'",
+    "nvidia-curand==10.4.0.35; platform_system == 'Linux'",
+    "nvidia-cusolver==12.0.4.66; platform_system == 'Linux'",
+    "nvidia-cusparse==12.6.3.3; platform_system == 'Linux'",
+    "nvidia-cusparselt-cu13==0.8.0; platform_system == 'Linux'",
+    "nvidia-nccl-cu13==2.28.9; platform_system == 'Linux'",
+    "nvidia-nvjitlink==13.0.88; platform_system == 'Linux'",
+    "nvidia-nvshmem-cu13==3.4.5; platform_system == 'Linux'",
+    "nvidia-nvtx==13.0.85; platform_system == 'Linux'",
+    "triton==3.6.0; platform_system == 'Linux'",
+]
+doc-export = [
+    "reportlab==4.4.10",
+    "pycairo==1.29.0",
+    "rlPyCairo==0.4.0",
+    "python-docx==1.2.0",
+    "pypptx-with-oxml==1.0.3",
+    "openpyxl==3.1.5",
+    "xlsxwriter==3.2.9",
+    "mammoth==1.12.0",
+]
+analysis = [
+    "numpy==2.4.4",
+    "pandas==2.3.3",
+    "matplotlib==3.9.4",
+    "pyarrow==23.0.1",
+]
+web-ui = [
+    "fastapi==0.135.3",
+    "starlette==0.52.1",
+    "uvicorn==0.44.0",
+    "gradio==6.8.0",
+    "gradio_client==2.2.0",
+    "gradio_pdf==0.0.24",
+    "openai==2.31.0",
+]
+paper = [
+    "chemqa[paper-parse]",
+    "chemqa[mineru]",
+]
+full = [
+    "chemqa[chem]",
+    "chemqa[paper]",
+    "chemqa[gpu]",
+    "chemqa[doc-export]",
+    "chemqa[analysis]",
+    "chemqa[web-ui]",
+]
