@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from bundle_common import default_template_dir, resolve_skill_root, run_json
@@ -41,13 +42,22 @@ def effective_template_dir(*, explicit: str | None, launch_mode: str) -> str | N
     return None
 
 
+def current_python() -> str:
+    venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    if venv:
+        candidate = Path(venv).resolve() / "bin" / "python"
+        if candidate.is_file():
+            return str(candidate)
+    return str(Path(sys.executable).resolve())
+
+
 def main() -> int:
     args = parse_args()
     root = resolve_skill_root(args.root)
     scripts_dir = root / "scripts"
 
     compile_cmd = [
-        "python3",
+        current_python(),
         str(scripts_dir / "compile_runplan.py"),
         "--root",
         str(root),
@@ -76,7 +86,7 @@ def main() -> int:
     compiled = run_json(compile_cmd, cwd=root)
 
     materialize_cmd = [
-        "python3",
+        current_python(),
         str(scripts_dir / "materialize_runplan.py"),
         "--root",
         str(root),

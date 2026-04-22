@@ -26,6 +26,15 @@ def openclaw_config_path() -> Path:
     return (Path.home() / ".openclaw" / "openclaw.json").resolve()
 
 
+def current_python() -> str:
+    venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    if venv:
+        candidate = Path(venv).resolve() / "bin" / "python"
+        if candidate.is_file():
+            return str(candidate)
+    return str(Path(sys.executable).resolve())
+
+
 def model_ref_from_definition(model_def: dict) -> str:
     return f"{model_def['provider_ref']}/{model_def['remote_model_id']}"
 
@@ -129,7 +138,7 @@ def build_command_map(
     for role_name, slot_id in role_slots.items():
         session_id = run_plan["session_assignments"][slot_id]
         command = [
-            str(Path(sys.executable).resolve()),
+            current_python(),
             str(driver_path),
             "--skill-root",
             str(skill_root),
@@ -262,7 +271,7 @@ def main() -> int:
 
     prepare_script = engine_script_path(root, "prepare_debate.py")
     prepare_cmd = [
-        "python3",
+        current_python(),
         str(prepare_script),
         "--workflow",
         str(run_plan["launch_spec"].get("engine_workflow_name") or "chemqa-review"),

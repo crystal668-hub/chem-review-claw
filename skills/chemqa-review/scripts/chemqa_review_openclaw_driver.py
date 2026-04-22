@@ -60,6 +60,15 @@ CANDIDATE_CAPTURE_FILENAME = "proposal.captured.yaml"
 CANDIDATE_CAPTURE_POLL_SECONDS = 0.5
 
 
+def current_python() -> str:
+    venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    if venv:
+        candidate = Path(venv).resolve() / "bin" / "python"
+        if candidate.is_file():
+            return str(candidate)
+    return str(Path(sys.executable).resolve())
+
+
 def load_cleanroom_runtime_lease_module(skill_root: Path):
     module_path = skill_root.parent / "benchmark-cleanroom" / "scripts" / "runtime_lease.py"
     if not module_path.is_file():
@@ -323,7 +332,7 @@ class ChemQAReviewDriver:
         return self._debate_state_json(*argv)
 
     def _debate_state_json(self, *argv: str) -> dict[str, Any]:
-        command = [str(Path(sys.executable).resolve()), str(self.debate_state_path), *argv]
+        command = [current_python(), str(self.debate_state_path), *argv]
         result = subprocess.run(command, env=self.env, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             raise DriverError(f"Command failed ({result.returncode}): {' '.join(command)}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
@@ -333,7 +342,7 @@ class ChemQAReviewDriver:
             raise DriverError(f"Command did not return JSON: {' '.join(command)}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}") from exc
 
     def _debate_state_text(self, *argv: str) -> str:
-        command = [str(Path(sys.executable).resolve()), str(self.debate_state_path), *argv]
+        command = [current_python(), str(self.debate_state_path), *argv]
         result = subprocess.run(command, env=self.env, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             raise DriverError(f"Command failed ({result.returncode}): {' '.join(command)}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
@@ -464,7 +473,7 @@ class ChemQAReviewDriver:
         message = "\n\n---\n\n".join(part.strip() for part in self.maybe_include_initial_prompt(prompt_parts) if part.strip())
         model_timeout = self.resolve_model_timeout_seconds(artifact_kind)
         command = [
-            str(Path(sys.executable).resolve()),
+            current_python(),
             str(self.base_wrapper_path),
             "--slot",
             self.args.slot,
@@ -1083,7 +1092,7 @@ class ChemQAReviewDriver:
     def run_recovery_cycle(self) -> dict[str, Any]:
         recover_script = self.skill_root / "scripts" / "recover_run.py"
         command = [
-            str(Path(sys.executable).resolve()),
+            current_python(),
             str(recover_script),
             "--skill-root",
             str(self.skill_root),
@@ -1472,7 +1481,7 @@ class ChemQAReviewDriver:
         collect_script = self.skill_root / "scripts" / "collect_artifacts.py"
         source_dir = team_dir or self.workspace
         command = [
-            str(Path(sys.executable).resolve()),
+            current_python(),
             str(collect_script),
             "--skill-root",
             str(self.skill_root),
