@@ -5,6 +5,8 @@ import argparse
 import json
 import os
 import signal
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +43,13 @@ class CleanupContext:
     manifest_path: Path | None
 
 
+@dataclass(frozen=True)
+class ProcessInfo:
+    pid: int
+    pgid: int
+    command: str
+
+
 def load_context(args: argparse.Namespace) -> CleanupContext:
     if args.manifest:
         path = Path(args.manifest).expanduser().resolve()
@@ -71,12 +80,55 @@ def load_context(args: argparse.Namespace) -> CleanupContext:
     return CleanupContext(manifest=payload, manifest_path=None)
 
 
-def safe_read_cmdline(pid: int) -> str:
+def parse_process_snapshot(raw: str) -> list[ProcessInfo]:
+    processes: list[ProcessInfo] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid = maybe_int(parts[0])
+        pgid = maybe_int(parts[1])
+        command = parts[2].strip()
+        if pid <= 0 or not command:
+            continue
+        processes.append(ProcessInfo(pid=pid, pgid=pgid, command=command))
+    return processes
+
+
+def process_snapshot() -> tuple[list[ProcessInfo], list[str]]:
     try:
-        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
-    except OSError:
+        result = subprocess.run(
+            ["ps", "axww", "-o", "pid=", "-o", "pgid=", "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        return [], [f"Unable to enumerate processes with ps: {exc}"]
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        detail = stderr or f"exit status {result.returncode}"
+        return [], [f"Unable to enumerate processes with ps: {detail}"]
+    return parse_process_snapshot(result.stdout), []
+
+
+def safe_read_cmdline(pid: int, *, snapshot: dict[int, ProcessInfo] | None = None) -> str:
+    if pid <= 0:
         return ""
-    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+    if snapshot is not None:
+        info = snapshot.get(pid)
+        if info is not None:
+            return info.command
+    processes, warnings = process_snapshot()
+    if warnings:
+        return ""
+    for info in processes:
+        if info.pid == pid:
+            return info.command
+    return ""
 
 
 def pid_exists(pid: int) -> bool:
@@ -222,17 +274,24 @@ def remove_path(path: Path, *, dry_run: bool) -> bool:
     return True
 
 
-def process_targets(manifest: dict[str, Any], lease_payloads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def process_targets(
+    manifest: dict[str, Any],
+    lease_payloads: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     run_id = str(manifest.get("run_id") or "")
     session_ids = {str(value).strip() for value in dict(manifest.get("session_assignments") or {}).values() if str(value).strip()}
     pid_targets: dict[int, dict[str, Any]] = {}
     pgid_targets: dict[int, dict[str, Any]] = {}
+    warnings: list[str] = []
     current_pid = os.getpid()
     current_pgid = 0
     try:
         current_pgid = os.getpgid(0)
     except Exception:
         current_pgid = 0
+    snapshot_items, snapshot_warnings = process_snapshot()
+    warnings.extend(snapshot_warnings)
+    snapshot = {item.pid: item for item in snapshot_items}
 
     for lease in lease_payloads:
         pid = maybe_int(lease.get("pid"))
@@ -250,7 +309,7 @@ def process_targets(manifest: dict[str, Any], lease_payloads: list[dict[str, Any
                     "slot": slot,
                     "session_id": session_id,
                     "source": "lease",
-                    "cmdline": safe_read_cmdline(pid),
+                    "cmdline": safe_read_cmdline(pid, snapshot=snapshot),
                 },
             )
         if pgid > 0 and pgid != current_pgid and pgid != current_pid:
@@ -265,23 +324,18 @@ def process_targets(manifest: dict[str, Any], lease_payloads: list[dict[str, Any
                 },
             )
 
-    for pid_dir in Path("/proc").iterdir():
-        if not pid_dir.name.isdigit():
-            continue
-        pid = int(pid_dir.name)
+    for info in snapshot_items:
+        pid = info.pid
         if pid == current_pid:
             continue
-        cmdline = safe_read_cmdline(pid)
+        cmdline = info.command
         if not cmdline:
             continue
         matches_run = run_id and run_id in cmdline
         matches_session = any(session_id in cmdline for session_id in session_ids)
         if not matches_run and not matches_session:
             continue
-        try:
-            pgid = os.getpgid(pid)
-        except OSError:
-            pgid = 0
+        pgid = info.pgid
         pid_targets.setdefault(
             pid,
             {
@@ -297,7 +351,7 @@ def process_targets(manifest: dict[str, Any], lease_payloads: list[dict[str, Any
         if pgid > 0 and pgid != current_pgid and pgid != current_pid:
             pgid_targets.setdefault(pgid, {"pgid": pgid, "source": "proc-scan"})
 
-    return list(pgid_targets.values()), list(pid_targets.values())
+    return list(pgid_targets.values()), list(pid_targets.values()), warnings
 
 
 def terminate_process_groups(
@@ -397,7 +451,7 @@ def cleanup(context: CleanupContext, *, grace_seconds: float, kill_after_seconds
     manifest = context.manifest
     run_id = str(manifest.get("run_id") or "")
     lease_payloads = iter_lease_payloads(manifest)
-    process_groups, pid_targets = process_targets(manifest, lease_payloads)
+    process_groups, pid_targets, process_warnings = process_targets(manifest, lease_payloads)
 
     report: dict[str, Any] = {
         "run_id": run_id,
@@ -410,7 +464,7 @@ def cleanup(context: CleanupContext, *, grace_seconds: float, kill_after_seconds
         "termination": {},
         "session_store_scrub": [],
         "removed_paths": [],
-        "warnings": [],
+        "warnings": list(process_warnings),
         "errors": [],
     }
 
@@ -467,10 +521,13 @@ def cleanup(context: CleanupContext, *, grace_seconds: float, kill_after_seconds
 
     remaining_processes = []
     if not dry_run:
+        snapshot_items, snapshot_warnings = process_snapshot()
+        snapshot = {item.pid: item for item in snapshot_items}
+        report["warnings"].extend(snapshot_warnings)
         for item in pid_targets:
             pid = maybe_int(item.get("pid"))
             if pid_exists(pid):
-                remaining_processes.append({"pid": pid, "cmdline": safe_read_cmdline(pid)})
+                remaining_processes.append({"pid": pid, "cmdline": safe_read_cmdline(pid, snapshot=snapshot)})
     remaining_session_entries = [] if dry_run else postcheck_session_stores(manifest)
     report["postcheck"] = {
         "remaining_processes": remaining_processes,
@@ -493,21 +550,44 @@ def write_report(manifest: dict[str, Any], report: dict[str, Any]) -> Path | Non
 
 def main() -> int:
     args = parse_args()
-    context = load_context(args)
-    report = cleanup(
-        context,
-        grace_seconds=max(0.0, float(args.grace_seconds)),
-        kill_after_seconds=max(0.0, float(args.kill_after_seconds)),
-        dry_run=args.dry_run,
-    )
-    report_path = write_report(context.manifest, report)
-    if report_path is not None:
-        report["report_path"] = str(report_path)
-    if args.json:
-        print(json.dumps(report, indent=2, ensure_ascii=False))
-    else:
-        print(f"cleanup success={report['success']} run_id={report['run_id']}")
-    return 0 if report["success"] else 1
+    try:
+        context = load_context(args)
+        report = cleanup(
+            context,
+            grace_seconds=max(0.0, float(args.grace_seconds)),
+            kill_after_seconds=max(0.0, float(args.kill_after_seconds)),
+            dry_run=args.dry_run,
+        )
+        report_path = write_report(context.manifest, report)
+        if report_path is not None:
+            report["report_path"] = str(report_path)
+        if args.json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            print(f"cleanup success={report['success']} run_id={report['run_id']}")
+        return 0 if report["success"] else 1
+    except Exception as exc:
+        if args.json:
+            payload = {
+                "run_id": str(getattr(locals().get("context", None), "manifest", {}).get("run_id") or args.run_id or ""),
+                "manifest_path": str(getattr(locals().get("context", None), "manifest_path", "") or ""),
+                "dry_run": bool(args.dry_run),
+                "started_at": iso_now(),
+                "completed_at": iso_now(),
+                "lease_count": 0,
+                "process_groups": [],
+                "pid_targets": [],
+                "termination": {},
+                "session_store_scrub": [],
+                "removed_paths": [],
+                "warnings": [],
+                "errors": [f"Unhandled cleanup failure: {exc}"],
+                "postcheck": {"remaining_processes": [], "remaining_session_entries": []},
+                "success": False,
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return 1
+        raise
 
 
 if __name__ == "__main__":
