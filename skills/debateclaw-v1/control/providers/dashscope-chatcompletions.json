@@ -1,0 +1,9 @@
+{
+  "id": "dashscope-chatcompletions",
+  "compat": "openai-completions",
+  "base_url_env": "DASHSCOPE_OPENAI_CHATCOMPLETIONS_BASE_URL",
+  "api_key_env": "DASHSCOPE_API_KEY",
+  "auth_header": false,
+  "extra_headers": {},
+  "timeout_seconds": 120
+}

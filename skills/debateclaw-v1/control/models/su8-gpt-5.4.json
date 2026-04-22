@@ -1,0 +1,13 @@
+{
+  "id": "su8-gpt-5.4",
+  "provider_ref": "su8",
+  "remote_model_id": "gpt-5.4",
+  "reasoning": true,
+  "input_modes": [
+    "text",
+    "image"
+  ],
+  "default_thinking": "high",
+  "max_output_tokens": 65536,
+  "notes": "SU8 OpenAI-responses GPT-5.4 model for chemqa-review proposer-main."
+}

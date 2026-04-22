@@ -1,0 +1,12 @@
+{
+  "id": "minimax-fast",
+  "provider_ref": "minimax",
+  "remote_model_id": "MiniMax-M2.7-highspeed",
+  "reasoning": true,
+  "input_modes": [
+    "text"
+  ],
+  "default_thinking": "medium",
+  "max_output_tokens": 8192,
+  "notes": "Fast proposer model."
+}

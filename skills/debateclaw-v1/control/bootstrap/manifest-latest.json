@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "service": {
+    "id": "debateclaw-main",
+    "runtime": "openclaw",
+    "host": "fixed-backend",
+    "compiled_at": null
+  },
+  "providers": [
+    "glmprovider",
+    "kimi",
+    "minimax"
+  ],
+  "models": [
+    "glm-turbo",
+    "kimi-default",
+    "minimax-fast"
+  ],
+  "model_profiles": [
+    "parallel-default",
+    "review-loop-default"
+  ],
+  "workflows": [
+    "parallel@1",
+    "review-loop@1"
+  ],
+  "presets": [
+    "parallel@1",
+    "review-loop@1"
+  ],
+  "run_scoped_inputs": {
+    "additional_file_workspace": {
+      "kind": "opaque-string",
+      "notes": "Optional per-run locator for extra file context. DebateClaw passes it through but does not interpret it."
+    }
+  },
+  "slot_pool": {
+    "coordinator": [
+      "debate-coordinator"
+    ],
+    "proposers": [
+      "debate-1",
+      "debate-2",
+      "debate-3",
+      "debate-4"
+    ],
+    "session_policy": "fresh-per-run"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "id": "kimi-default",
+  "provider_ref": "kimi",
+  "remote_model_id": "kimi-k2.5",
+  "reasoning": true,
+  "input_modes": [
+    "text"
+  ],
+  "default_thinking": "medium",
+  "max_output_tokens": 32768,
+  "notes": "General proposer model."
+}

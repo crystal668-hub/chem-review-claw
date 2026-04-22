@@ -1,0 +1,12 @@
+{
+  "id": "dashscope-minimax-m2.5",
+  "provider_ref": "dashscope-chatcompletions",
+  "remote_model_id": "MiniMax-M2.5",
+  "reasoning": true,
+  "input_modes": [
+    "text"
+  ],
+  "default_thinking": "medium",
+  "max_output_tokens": 32768,
+  "notes": "DashScope chat-completions MiniMax M2.5 proposer model."
+}

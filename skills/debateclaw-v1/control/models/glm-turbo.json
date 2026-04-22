@@ -1,0 +1,12 @@
+{
+  "id": "glm-turbo",
+  "provider_ref": "glmprovider",
+  "remote_model_id": "GLM-5-Turbo",
+  "reasoning": true,
+  "input_modes": [
+    "text"
+  ],
+  "default_thinking": "high",
+  "max_output_tokens": 128000,
+  "notes": "Default coordinator model."
+}

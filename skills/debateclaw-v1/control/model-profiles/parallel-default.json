@@ -1,0 +1,26 @@
+{
+  "id": "parallel-default",
+  "description": "Default fixed-slot mapping for the parallel workflow.",
+  "slot_models": {
+    "debate-coordinator": {
+      "model_ref": "glm-turbo",
+      "thinking": "high"
+    },
+    "debate-1": {
+      "model_ref": "minimax-fast",
+      "thinking": "medium"
+    },
+    "debate-2": {
+      "model_ref": "kimi-default",
+      "thinking": "medium"
+    },
+    "debate-3": {
+      "model_ref": "glm-turbo",
+      "thinking": "medium"
+    },
+    "debate-4": {
+      "model_ref": "minimax-fast",
+      "thinking": "medium"
+    }
+  }
+}

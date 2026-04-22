@@ -1,0 +1,9 @@
+{
+  "id": "glmprovider",
+  "compat": "anthropic-messages",
+  "base_url_env": "GLM_ANTHROPIC_BASE_URL",
+  "api_key_env": "GLM_API_KEY",
+  "auth_header": false,
+  "extra_headers": {},
+  "timeout_seconds": 120
+}

@@ -1,0 +1,9 @@
+{
+  "id": "minimax",
+  "compat": "anthropic-messages",
+  "base_url_env": "MINIMAX_ANTHROPIC_BASE_URL",
+  "api_key_env": "MINIMAX_API_KEY",
+  "auth_header": true,
+  "extra_headers": {},
+  "timeout_seconds": 120
+}

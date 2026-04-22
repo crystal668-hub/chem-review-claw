@@ -1,0 +1,9 @@
+{
+  "id": "kimi",
+  "compat": "anthropic-messages",
+  "base_url_env": "KIMI_ANTHROPIC_BASE_URL",
+  "api_key_env": "KIMI_API_KEY",
+  "auth_header": false,
+  "extra_headers": {},
+  "timeout_seconds": 120
+}

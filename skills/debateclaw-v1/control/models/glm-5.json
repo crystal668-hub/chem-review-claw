@@ -1,0 +1,12 @@
+{
+  "id": "glm-5",
+  "provider_ref": "dashscope-chatcompletions",
+  "remote_model_id": "glm-5",
+  "reasoning": true,
+  "input_modes": [
+    "text"
+  ],
+  "default_thinking": "high",
+  "max_output_tokens": 128000,
+  "notes": "DashScope chat-completions GLM-5 model."
+}

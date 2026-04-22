@@ -1,0 +1,12 @@
+{
+  "id": "dashscope-qwen3.5-plus",
+  "provider_ref": "dashscope-responses",
+  "remote_model_id": "qwen3.5-plus",
+  "reasoning": true,
+  "input_modes": [
+    "text"
+  ],
+  "default_thinking": "high",
+  "max_output_tokens": 65536,
+  "notes": "DashScope responses Qwen model for coordinator or proposer use."
+}

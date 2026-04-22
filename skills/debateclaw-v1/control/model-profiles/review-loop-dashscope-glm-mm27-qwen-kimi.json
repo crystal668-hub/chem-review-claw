@@ -1,0 +1,22 @@
+{
+  "id": "review-loop-dashscope-glm-mm27-qwen-kimi",
+  "description": "Review-loop fixed-slot mapping for glm-5, MiniMax-M2.7, qwen3.5-plus, and kimi-k2.5.",
+  "slot_models": {
+    "debate-coordinator": {
+      "model_ref": "kimi-k2.5",
+      "thinking": "high"
+    },
+    "debate-1": {
+      "model_ref": "glm-5",
+      "thinking": "high"
+    },
+    "debate-2": {
+      "model_ref": "dashscope-minimax-m2.7",
+      "thinking": "high"
+    },
+    "debate-3": {
+      "model_ref": "dashscope-qwen3.5-plus-chat",
+      "thinking": "high"
+    }
+  }
+}

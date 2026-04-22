@@ -1,0 +1,73 @@
+{
+  "id": "review-loop",
+  "version": 1,
+  "roles": [
+    "coordinator",
+    "proposer"
+  ],
+  "parameters": {
+    "proposer_count": {
+      "type": "int",
+      "default": 4,
+      "min": 1,
+      "max": 6
+    },
+    "review_rounds": {
+      "type": "int",
+      "default": 5,
+      "min": 0,
+      "max": 8
+    },
+    "rebuttal_rounds": {
+      "type": "int",
+      "default": 5,
+      "min": 0,
+      "max": 8
+    }
+  },
+  "phases": [
+    {
+      "id": "propose",
+      "kind": "primitive",
+      "driver": "proposal_fanout",
+      "emits": [
+        "proposal"
+      ],
+      "advance_when": "all_required_submitted",
+      "fallback": {
+        "kind": "free_logic",
+        "driver": "coordinator-fallback"
+      }
+    },
+    {
+      "id": "review",
+      "kind": "primitive",
+      "driver": "all_to_all_review",
+      "emits": [
+        "review"
+      ],
+      "advance_when": "review_quorum_met",
+      "fallback": {
+        "kind": "free_logic",
+        "driver": "coordinator-fallback"
+      }
+    },
+    {
+      "id": "rebuttal",
+      "kind": "primitive",
+      "driver": "owner_rebuttal",
+      "emits": [
+        "rebuttal"
+      ],
+      "advance_when": "all_active_owners_responded",
+      "fallback": {
+        "kind": "free_logic",
+        "driver": "coordinator-fallback"
+      }
+    }
+  ],
+  "completion": {
+    "done_when": "protocol_state_done",
+    "final_decider": "outer-entry-agent"
+  }
+}

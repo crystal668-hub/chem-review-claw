@@ -1,0 +1,22 @@
+{
+  "id": "review-loop-dashscope-ds-mm-qwen",
+  "description": "Review-loop fixed-slot mapping for DashScope-backed deepseek-v3.2 + MiniMax-M2.5 + qwen3.5-plus proposers.",
+  "slot_models": {
+    "debate-coordinator": {
+      "model_ref": "dashscope-qwen3.5-plus-chat",
+      "thinking": "high"
+    },
+    "debate-1": {
+      "model_ref": "dashscope-deepseek-v3.2",
+      "thinking": "medium"
+    },
+    "debate-2": {
+      "model_ref": "dashscope-minimax-m2.5",
+      "thinking": "medium"
+    },
+    "debate-3": {
+      "model_ref": "dashscope-qwen3.5-plus-chat",
+      "thinking": "medium"
+    }
+  }
+}

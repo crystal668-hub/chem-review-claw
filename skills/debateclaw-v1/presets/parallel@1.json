@@ -1,0 +1,39 @@
+{
+  "id": "parallel",
+  "version": 1,
+  "workflow_ref": "parallel@1",
+  "defaults": {
+    "proposer_count": 4,
+    "model_profile": "parallel-default",
+    "evidence_mode": "strict",
+    "backend": "subprocess",
+    "final_decider": "outer-entry-agent"
+  },
+  "overrides": {
+    "proposer_count": {
+      "exposure": "tunable",
+      "min": 1,
+      "max": 6
+    },
+    "model_profile": {
+      "exposure": "tunable"
+    },
+    "evidence_mode": {
+      "exposure": "tunable"
+    }
+  },
+  "prompt_pack": {
+    "role_contracts": {
+      "coordinator": "prompts/contracts/parallel/coordinator.md",
+      "proposer": "prompts/contracts/parallel/proposer.md"
+    },
+    "modules": [
+      "prompts/modules/policies/evidence-strict.md",
+      "prompts/modules/output/coordinator-summary.md"
+    ]
+  },
+  "allowed_model_profiles": [
+    "parallel-default",
+    "review-loop-default"
+  ]
+}

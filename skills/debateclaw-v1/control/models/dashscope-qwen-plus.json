@@ -1,0 +1,12 @@
+{
+  "id": "dashscope-qwen-plus",
+  "provider_ref": "dashscope-chatcompletions",
+  "remote_model_id": "qwen-plus",
+  "reasoning": true,
+  "input_modes": [
+    "text"
+  ],
+  "default_thinking": "high",
+  "max_output_tokens": 65536,
+  "notes": "DashScope chat-completions Qwen model verified by local smoke test."
+}

@@ -1,0 +1,13 @@
+{
+  "id": "packy-gpt-5.4",
+  "provider_ref": "packy",
+  "remote_model_id": "gpt-5.4",
+  "reasoning": true,
+  "input_modes": [
+    "text",
+    "image"
+  ],
+  "default_thinking": "high",
+  "max_output_tokens": 65536,
+  "notes": "Packy OpenAI-responses GPT-5.4 model for chemqa-review coordinator."
+}
