@@ -136,20 +136,37 @@ def load_openclaw_config(path: Path) -> dict[str, Any]:
     return data
 
 
-def resolve_slot_workspace(slot: str, *, config_path: Path | None = None) -> Path:
+def resolve_slot_entry(slot: str, *, config_path: Path | None = None) -> dict[str, Any]:
     config = load_openclaw_config(config_path or openclaw_config_path())
     agents = config.get("agents", {})
     agent_list = agents.get("list", []) if isinstance(agents, dict) else []
+    slot_norm = slot.strip().lower()
     for entry in agent_list:
         if not isinstance(entry, dict):
             continue
-        if str(entry.get("id", "")) != slot:
+        entry_id = str(entry.get("id", "")).strip()
+        if not entry_id:
             continue
-        workspace = str(entry.get("workspace", "")).strip()
-        if not workspace:
-            raise SystemExit(f"DebateClaw slot `{slot}` is missing a workspace path in OpenClaw config.")
-        return Path(workspace).expanduser().resolve()
+        if entry_id != slot and entry_id.lower() != slot_norm:
+            continue
+        return entry
     raise SystemExit(f"Could not find DebateClaw slot `{slot}` in OpenClaw config.")
+
+
+def resolve_effective_slot_id(slot: str, *, config_path: Path | None = None) -> str:
+    entry = resolve_slot_entry(slot, config_path=config_path)
+    entry_id = str(entry.get("id", "")).strip()
+    if not entry_id:
+        raise SystemExit(f"DebateClaw slot `{slot}` is missing an id in OpenClaw config.")
+    return entry_id
+
+
+def resolve_slot_workspace(slot: str, *, config_path: Path | None = None) -> Path:
+    entry = resolve_slot_entry(slot, config_path=config_path)
+    workspace = str(entry.get("workspace", "")).strip()
+    if not workspace:
+        raise SystemExit(f"DebateClaw slot `{slot}` is missing a workspace path in OpenClaw config.")
+    return Path(workspace).expanduser().resolve()
 
 
 def sentinel_path_for_workspace(workspace: Path) -> Path:
@@ -318,11 +335,12 @@ def reset_slot_main_session_if_session_id_changed(
 ) -> None:
     if not requested_session_id:
         return
-    store_path = session_store_path_for_slot(slot)
+    effective_slot = resolve_effective_slot_id(slot, config_path=config_path)
+    store_path = session_store_path_for_slot(effective_slot)
     store = load_session_store(store_path)
     if not store:
         return
-    session_key = main_session_key_for_slot(slot)
+    session_key = main_session_key_for_slot(effective_slot)
     current_entry = store.get(session_key)
     if not isinstance(current_entry, dict):
         return
@@ -405,12 +423,14 @@ def main() -> int:
     if temp_config_path is not None:
         env["OPENCLAW_CONFIG_PATH"] = str(temp_config_path)
 
+    effective_slot = resolve_effective_slot_id(args.slot, config_path=base_config_path)
+
     command = [
         "openclaw",
         "agent",
         "--local",
         "--agent",
-        args.slot,
+        effective_slot,
     ]
     if args.session_id:
         command.extend(["--session-id", args.session_id])
@@ -426,15 +446,15 @@ def main() -> int:
         command.append("--json")
 
     lease_handle = None
-    _, lease_handle = write_cleanroom_lease(slot=args.slot, session_id=str(args.session_id or ""), status="starting")
+    _, lease_handle = write_cleanroom_lease(slot=effective_slot, session_id=str(args.session_id or ""), status="starting")
 
     try:
         result = subprocess.run(command, env=env, check=False)
         if lease_handle is not None and args.session_id:
             lease_handle.write(
                 run_id=os.environ.get("BENCHMARK_CLEANROOM_RUN_ID", ""),
-                role=os.environ.get("BENCHMARK_CLEANROOM_ROLE", "").strip() or args.slot,
-                slot=args.slot,
+                role=os.environ.get("BENCHMARK_CLEANROOM_ROLE", "").strip() or effective_slot,
+                slot=effective_slot,
                 session_id=str(args.session_id or ""),
                 status="exited",
                 cwd=os.getcwd(),

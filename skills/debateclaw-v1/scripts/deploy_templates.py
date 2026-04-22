@@ -145,6 +145,22 @@ def main() -> int:
             conflicts += 1
         results.append(result)
 
+    runtime_templates_dir = SCRIPT_DIR / "templates"
+    if runtime_templates_dir.is_dir():
+        for source in sorted(runtime_templates_dir.rglob("*")):
+            if not source.is_file():
+                continue
+            target = runtime_dir / source.relative_to(SCRIPT_DIR)
+            result = deploy_bytes(
+                source.read_bytes(),
+                target,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+            if result.startswith("conflict "):
+                conflicts += 1
+            results.append(result)
+
     default_parallel = build_parallel_judge_template(
         name=template_name_for("parallel-judge"),
         proposer_count=4,
