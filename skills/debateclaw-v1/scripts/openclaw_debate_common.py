@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -250,3 +252,15 @@ def load_json_file(path: Path) -> dict[str, Any]:
 def dump_json_file(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def resolve_python_interpreter(*, fallback: str | Path | None = None) -> str:
+    venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    if venv:
+        venv_root = Path(venv).expanduser()
+        for candidate in (venv_root / "bin" / "python", venv_root / "Scripts" / "python.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    if fallback:
+        return str(Path(fallback).expanduser())
+    return str(Path(sys.executable).expanduser())

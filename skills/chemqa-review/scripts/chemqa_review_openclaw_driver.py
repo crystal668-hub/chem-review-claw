@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from bundle_common import default_runtime_dir, dump_json, load_module_from_path, resolve_skill_root
+from bundle_common import resolve_python_interpreter
 from chemqa_review_artifacts import (
     CANDIDATE_OWNER,
     ROLE_TO_SEMANTIC_ROLE,
@@ -61,12 +62,7 @@ CANDIDATE_CAPTURE_POLL_SECONDS = 0.5
 
 
 def current_python() -> str:
-    venv = os.environ.get("VIRTUAL_ENV", "").strip()
-    if venv:
-        candidate = Path(venv).resolve() / "bin" / "python"
-        if candidate.is_file():
-            return str(candidate)
-    return str(Path(sys.executable).resolve())
+    return resolve_python_interpreter()
 
 
 def load_cleanroom_runtime_lease_module(skill_root: Path):

@@ -6,8 +6,14 @@ from __future__ import annotations
 import json
 import textwrap
 
+from openclaw_debate_common import resolve_python_interpreter
+
 
 DEFAULT_RUNTIME_ROOT = "~/.clawteam/debateclaw/bin"
+
+
+def runtime_python_prefix() -> str:
+    return resolve_python_interpreter()
 
 
 def slugify(value: str) -> str:
@@ -91,6 +97,7 @@ def _task_section(subject: str, owner: str) -> str:
 
 
 def _parallel_leader_task(runtime_root: str) -> str:
+    python = runtime_python_prefix()
     return textwrap.dedent(
         f"""
         You are the DebateClaw coordinator for an evidence-first parallel proposal debate.
@@ -100,9 +107,9 @@ def _parallel_leader_task(runtime_root: str) -> str:
         record and choose or synthesize the final answer for the user.
 
         Runtime commands:
-        - `{runtime_root}/debate_state.py status --team {{team_name}}`
-        - `{runtime_root}/debate_state.py advance --team {{team_name}} --agent {{agent_name}}`
-        - `{runtime_root}/debate_state.py summary --team {{team_name}}`
+        - `{python} {runtime_root}/debate_state.py status --team {{team_name}}`
+        - `{python} {runtime_root}/debate_state.py advance --team {{team_name}} --agent {{agent_name}}`
+        - `{python} {runtime_root}/debate_state.py summary --team {{team_name}}`
 
         Protocol:
         1. Keep your ClawTeam task in progress until the debate state reaches `done`.
@@ -125,6 +132,7 @@ def _parallel_leader_task(runtime_root: str) -> str:
 
 
 def _parallel_proposer_task(runtime_root: str) -> str:
+    python = runtime_python_prefix()
     return textwrap.dedent(
         f"""
         You are an evidence-first proposer in a DebateClaw parallel proposal workflow.
@@ -140,9 +148,9 @@ def _parallel_proposer_task(runtime_root: str) -> str:
         - The outer entry agent is the final judge. Your job is to produce the strongest proposal you can.
 
         Runtime commands:
-        - `{runtime_root}/debate_state.py status --team {{team_name}} --agent {{agent_name}}`
-        - `{runtime_root}/debate_state.py next-action --team {{team_name}} --agent {{agent_name}} --json`
-        - `{runtime_root}/debate_state.py submit-proposal --team {{team_name}} --agent {{agent_name}} --file proposal.md`
+        - `{python} {runtime_root}/debate_state.py status --team {{team_name}} --agent {{agent_name}}`
+        - `{python} {runtime_root}/debate_state.py next-action --team {{team_name}} --agent {{agent_name}} --json`
+        - `{python} {runtime_root}/debate_state.py submit-proposal --team {{team_name}} --agent {{agent_name}} --file proposal.md`
 
         Required procedure:
         1. Set your task to `in_progress`.
@@ -225,6 +233,7 @@ def build_parallel_judge_template(
 
 
 def _review_loop_leader_task(runtime_root: str) -> str:
+    python = runtime_python_prefix()
     return textwrap.dedent(
         f"""
         You are the DebateClaw protocol coordinator for an evidence-first review/rebuttal debate.
@@ -235,10 +244,10 @@ def _review_loop_leader_task(runtime_root: str) -> str:
         debate reaches `done`.
 
         Runtime commands:
-        - `{runtime_root}/debate_state.py next-action --team {{team_name}} --agent {{agent_name}} --json`
-        - `{runtime_root}/debate_state.py status --team {{team_name}} --json`
-        - `{runtime_root}/debate_state.py advance --team {{team_name}} --agent {{agent_name}}`
-        - `{runtime_root}/debate_state.py summary --team {{team_name}}`
+        - `{python} {runtime_root}/debate_state.py next-action --team {{team_name}} --agent {{agent_name}} --json`
+        - `{python} {runtime_root}/debate_state.py status --team {{team_name}} --json`
+        - `{python} {runtime_root}/debate_state.py advance --team {{team_name}} --agent {{agent_name}}`
+        - `{python} {runtime_root}/debate_state.py summary --team {{team_name}}`
 
         Protocol:
         1. Keep your task `in_progress` until the debate state reaches `done`.
@@ -261,6 +270,7 @@ def _review_loop_leader_task(runtime_root: str) -> str:
 
 
 def _review_loop_proposer_task(runtime_root: str) -> str:
+    python = runtime_python_prefix()
     return textwrap.dedent(
         f"""
         You are a DebateClaw proposer in an evidence-first review/rebuttal workflow.
@@ -283,12 +293,12 @@ def _review_loop_proposer_task(runtime_root: str) -> str:
           report the blocker to `debate-coordinator` instead of looping.
 
         Runtime commands:
-        - `{runtime_root}/debate_state.py status --team {{team_name}} --agent {{agent_name}}`
-        - `{runtime_root}/debate_state.py next-action --team {{team_name}} --agent {{agent_name}} --json`
-        - `{runtime_root}/debate_state.py submit-proposal --team {{team_name}} --agent {{agent_name}} --file proposal.md`
-        - `{runtime_root}/debate_state.py submit-review --team {{team_name}} --agent {{agent_name}} --target proposer-X --blocking yes|no --file review.md`
-        - `{runtime_root}/debate_state.py submit-rebuttal --team {{team_name}} --agent {{agent_name}} --file rebuttal.md`
-        - `{runtime_root}/debate_state.py submit-rebuttal --team {{team_name}} --agent {{agent_name}} --concede --file rebuttal.md`
+        - `{python} {runtime_root}/debate_state.py status --team {{team_name}} --agent {{agent_name}}`
+        - `{python} {runtime_root}/debate_state.py next-action --team {{team_name}} --agent {{agent_name}} --json`
+        - `{python} {runtime_root}/debate_state.py submit-proposal --team {{team_name}} --agent {{agent_name}} --file proposal.md`
+        - `{python} {runtime_root}/debate_state.py submit-review --team {{team_name}} --agent {{agent_name}} --target proposer-X --blocking yes|no --file review.md`
+        - `{python} {runtime_root}/debate_state.py submit-rebuttal --team {{team_name}} --agent {{agent_name}} --file rebuttal.md`
+        - `{python} {runtime_root}/debate_state.py submit-rebuttal --team {{team_name}} --agent {{agent_name}} --concede --file rebuttal.md`
 
         Operating loop:
         1. Set your task to `in_progress` once at the beginning and keep it there until `next-action`

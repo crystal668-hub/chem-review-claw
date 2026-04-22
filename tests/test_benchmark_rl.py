@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,22 @@ MATERIALIZE_SPEC.loader.exec_module(materialize_runplan)
 
 
 class BenchmarkRLModuleTests(unittest.TestCase):
+    def test_current_python_prefers_virtualenv_python(self) -> None:
+        original_virtual_env = os.environ.get("VIRTUAL_ENV")
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                venv_root = Path(tmpdir) / ".venv"
+                python_path = venv_root / "bin" / "python"
+                python_path.parent.mkdir(parents=True, exist_ok=True)
+                python_path.write_text("", encoding="utf-8")
+                os.environ["VIRTUAL_ENV"] = str(venv_root)
+                self.assertEqual(str(python_path), benchmark_rl.current_python())
+        finally:
+            if original_virtual_env is None:
+                os.environ.pop("VIRTUAL_ENV", None)
+            else:
+                os.environ["VIRTUAL_ENV"] = original_virtual_env
+
     def make_record(self, record_id: str = "demo-record") -> benchmark_rl.BenchmarkRecord:
         return benchmark_rl.BenchmarkRecord(
             record_id=record_id,
@@ -310,6 +327,84 @@ class BenchmarkRLModuleTests(unittest.TestCase):
         payload = benchmark_rl.ReviewLoopRunner._wait_for_done(runner, "demo-run")
         self.assertEqual("done", payload["status"])
         self.assertEqual("completed", payload["terminal_state"])
+
+    def test_summary_command_uses_current_python(self) -> None:
+        runner = benchmark_rl.ReviewLoopRunner.__new__(benchmark_rl.ReviewLoopRunner)
+        runner.debate_state_script = Path("/tmp/debate_state.py")
+        original_current_python = benchmark_rl.current_python
+        try:
+            benchmark_rl.current_python = lambda: "/tmp/fake-venv/bin/python"
+            command = benchmark_rl.ReviewLoopRunner._summary_command(runner, "demo-run")
+        finally:
+            benchmark_rl.current_python = original_current_python
+        self.assertEqual(
+            [
+                "/tmp/fake-venv/bin/python",
+                "/tmp/debate_state.py",
+                "summary",
+                "--team",
+                "demo-run",
+                "--json",
+                "--include-bodies",
+            ],
+            command,
+        )
+
+    def test_launch_uses_current_python_for_compile_and_materialize(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runner = benchmark_rl.ReviewLoopRunner.__new__(benchmark_rl.ReviewLoopRunner)
+            runner.config_path = root / "openclaw.json"
+            runner.config_path.write_text("{}", encoding="utf-8")
+            runner.debateclaw_root = root
+            runner.compile_script = root / "compile_runplan.py"
+            runner.materialize_script = root / "materialize_runplan.py"
+            runner.debate_state_script = root / "debate_state.py"
+            runner.runtime_helper_dir = root / "runtime"
+            runner.real_openclaw_env_file = root / ".env"
+            runner.real_openclaw_env_file.write_text("", encoding="utf-8")
+            runner.launch_home_dir = root / "launch-home"
+            runner.launch_openclaw_dir = runner.launch_home_dir / ".openclaw"
+            runner.launch_openclaw_config_path = runner.launch_openclaw_dir / "openclaw.json"
+            runner.template_output_dir = root / "templates"
+            runner.clawteam_data_dir = root / "clawteam-data"
+            runner.cleanup_output_root = root / "cleanup"
+            runner.model_profile = None
+            runner.proposer_count = None
+            runner.review_rounds = None
+            runner.rebuttal_rounds = None
+            runner._prepare_launch_home = lambda: None  # type: ignore[method-assign]
+
+            calls: list[list[str]] = []
+            original_current_python = benchmark_rl.current_python
+            original_run_subprocess = benchmark_rl.run_subprocess
+            try:
+                benchmark_rl.current_python = lambda: "/tmp/fake-venv/bin/python"
+
+                def fake_run_subprocess(command, **kwargs):
+                    calls.append(list(command))
+                    if len(calls) == 1:
+                        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"run_id": "demo-run", "launch_spec": {"backend": "subprocess"}}), stderr="")
+                    if len(calls) == 2:
+                        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"template_name": "demo-template"}), stderr="")
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+                benchmark_rl.run_subprocess = fake_run_subprocess
+                payload = benchmark_rl.ReviewLoopRunner._launch(
+                    runner,
+                    goal="goal",
+                    run_id="demo-run",
+                    additional_file_workspace=None,
+                    manifest_path=None,
+                )
+            finally:
+                benchmark_rl.current_python = original_current_python
+                benchmark_rl.run_subprocess = original_run_subprocess
+
+            self.assertEqual("/tmp/fake-venv/bin/python", calls[0][0])
+            self.assertEqual("/tmp/fake-venv/bin/python", calls[1][0])
+            self.assertEqual("clawteam", calls[2][0])
+            self.assertEqual("demo-run", payload["run_id"])
 
     def test_wait_for_done_accepts_done_failed(self) -> None:
         runner = benchmark_rl.ReviewLoopRunner.__new__(benchmark_rl.ReviewLoopRunner)

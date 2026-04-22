@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from bundle_common import resolve_skill_root
+from bundle_common import resolve_python_interpreter, resolve_skill_root
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,7 +36,7 @@ def main() -> int:
 
     snapshot = run_json(
         [
-            "python3",
+            resolve_python_interpreter(),
             str(snapshot_script),
             "--skill-root",
             str(skill_root),

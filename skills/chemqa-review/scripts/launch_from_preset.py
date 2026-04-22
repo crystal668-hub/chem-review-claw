@@ -5,10 +5,9 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
-from bundle_common import default_template_dir, resolve_skill_root, run_json
+from bundle_common import default_template_dir, resolve_python_interpreter, resolve_skill_root, run_json
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,12 +42,7 @@ def effective_template_dir(*, explicit: str | None, launch_mode: str) -> str | N
 
 
 def current_python() -> str:
-    venv = os.environ.get("VIRTUAL_ENV", "").strip()
-    if venv:
-        candidate = Path(venv).resolve() / "bin" / "python"
-        if candidate.is_file():
-            return str(candidate)
-    return str(Path(sys.executable).resolve())
+    return resolve_python_interpreter()
 
 
 def main() -> int:

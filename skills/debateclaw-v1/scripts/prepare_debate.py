@@ -156,7 +156,8 @@ def role_session_id(*, team: str, role: str) -> str:
 def command_uses_openclaw_wrapper(command: list[str]) -> bool:
     if not command:
         return False
-    return Path(command[0]).name in {"openclaw_debate_agent.py", "openclaw_debate_agent_session.py"}
+    candidates = command[:2]
+    return any(Path(token).name in {"openclaw_debate_agent.py", "openclaw_debate_agent_session.py"} for token in candidates)
 
 
 def ensure_openclaw_session_ids(agent_commands: dict[str, list[str]], *, team: str) -> dict[str, list[str]]:

@@ -78,6 +78,16 @@ CHEMQA_WORKSPACE_ROOTS = {
 }
 SLOT_SENTINEL_FILENAME = ".debateclaw-slot.json"
 SLOT_SENTINEL_KIND = "debateclaw-slot-workspace"
+
+
+def current_python() -> str:
+    venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    if venv:
+        venv_root = Path(venv).expanduser()
+        for candidate in (venv_root / "bin" / "python", venv_root / "Scripts" / "python.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return str(Path(sys.executable).expanduser())
 SLOT_SENTINEL_VERSION = 1
 SUBSET_ORDER = (
     "chembench",
@@ -436,7 +446,7 @@ def invoke_cleanroom_cleanup(
 ) -> dict[str, Any]:
     cleanup_script = cleanroom_skill_root() / "scripts" / "cleanup_benchmark_run.py"
     command = [
-        "python3",
+        current_python(),
         str(cleanup_script),
         "--manifest",
         str(manifest_path),
@@ -1682,7 +1692,7 @@ class ChemQARunner:
 
     def _collect_artifacts_from_source(self, *, source_dir: Path, output_dir: Path, env: dict[str, str]) -> None:
         command = [
-            "python3",
+            current_python(),
             str(self.collect_script),
             "--skill-root",
             str(self.chemqa_root),
@@ -1771,7 +1781,7 @@ class ChemQARunner:
         write_cleanup_manifest(manifest_path, initial_manifest)
         register_pending_cleanup_manifest(manifest_path)
         command = [
-            "python3",
+            current_python(),
             str(self.launch_script),
             "--root",
             str(self.chemqa_root),

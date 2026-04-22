@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from control_store import FileControlStore
+from openclaw_debate_common import resolve_python_interpreter
 
 CONTROL_UI_HOME_ENV = 'DEBATECLAW_CONTROL_UI_HOME'
 
@@ -297,7 +298,7 @@ def main() -> int:
 
     scripts_dir = root / 'scripts'
     compile_cmd = [
-        'python3',
+        resolve_python_interpreter(),
         str(scripts_dir / 'compile_runplan.py'),
         '--root',
         str(root),
@@ -321,7 +322,7 @@ def main() -> int:
     patched_run_plan = patch_run_plan_with_inline_config(store, run_id_value, config_id=args.config_id, config_payload=config_payload)
 
     materialize_cmd = [
-        'python3',
+        resolve_python_interpreter(),
         str(scripts_dir / 'materialize_runplan.py'),
         '--root',
         str(root),

@@ -49,6 +49,16 @@ def load_benchmark_test_module() -> Any:
 benchmark_test = load_benchmark_test_module()
 
 
+def current_python() -> str:
+    venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    if venv:
+        venv_root = Path(venv).expanduser()
+        for candidate in (venv_root / "bin" / "python", venv_root / "Scripts" / "python.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return str(Path(sys.executable).expanduser())
+
+
 class BenchmarkError(RuntimeError):
     pass
 
@@ -1204,7 +1214,7 @@ class ReviewLoopRunner:
 
     def _summary_command(self, run_id: str) -> list[str]:
         return [
-            "python3",
+            current_python(),
             str(self.debate_state_script),
             "summary",
             "--team",
@@ -1338,8 +1348,9 @@ class ReviewLoopRunner:
         return manifest_path
 
     def _launch(self, *, goal: str, run_id: str, additional_file_workspace: str | None, manifest_path: Path | None = None) -> dict[str, Any]:
+        python = current_python()
         compile_command = [
-            "python3",
+            python,
             str(self.compile_script),
             "--root",
             str(self.debateclaw_root),
@@ -1373,7 +1384,7 @@ class ReviewLoopRunner:
         compiled = parse_json_stdout(compile_result, compile_command)
 
         materialize_command = [
-            "python3",
+            python,
             str(self.materialize_script),
             "--root",
             str(self.debateclaw_root),

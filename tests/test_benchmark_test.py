@@ -4,6 +4,7 @@ import csv
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -30,11 +31,55 @@ class JudgeStub:
 
 
 class BenchmarkTestModuleTests(unittest.TestCase):
+    def test_current_python_prefers_virtualenv_python(self) -> None:
+        original_virtual_env = os.environ.get("VIRTUAL_ENV")
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                venv_root = Path(tmpdir) / ".venv"
+                python_path = venv_root / "bin" / "python"
+                python_path.parent.mkdir(parents=True, exist_ok=True)
+                python_path.write_text("", encoding="utf-8")
+                os.environ["VIRTUAL_ENV"] = str(venv_root)
+                self.assertEqual(str(python_path), benchmark_test.current_python())
+        finally:
+            if original_virtual_env is None:
+                os.environ.pop("VIRTUAL_ENV", None)
+            else:
+                os.environ["VIRTUAL_ENV"] = original_virtual_env
+
+    def test_invoke_cleanroom_cleanup_uses_current_python(self) -> None:
+        original_current_python = benchmark_test.current_python
+        original_run_subprocess = benchmark_test.run_subprocess
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                captured: dict[str, object] = {}
+                manifest_path = Path(tmpdir) / "demo.manifest.json"
+                manifest_path.write_text("{}", encoding="utf-8")
+
+                benchmark_test.current_python = lambda: "/tmp/fake-venv/bin/python"
+
+                def fake_run_subprocess(command, **kwargs):
+                    captured["command"] = list(command)
+                    return benchmark_test.subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=json.dumps({"success": True}),
+                        stderr="",
+                    )
+
+                benchmark_test.run_subprocess = fake_run_subprocess
+                payload = benchmark_test.invoke_cleanroom_cleanup(manifest_path=manifest_path)
+                self.assertTrue(payload["success"])
+                self.assertEqual("/tmp/fake-venv/bin/python", captured["command"][0])
+        finally:
+            benchmark_test.current_python = original_current_python
+            benchmark_test.run_subprocess = original_run_subprocess
+
     def test_cleanup_manifest_path_uses_cleanroom_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             output_root = Path(tmpdir)
             path = benchmark_test.cleanup_manifest_path(output_root, "demo-run")
-            self.assertEqual(output_root / "cleanroom" / "manifests" / "demo-run.manifest.json", path)
+            self.assertEqual((output_root / "cleanroom" / "manifests" / "demo-run.manifest.json").resolve(), path.resolve())
 
     def test_register_and_unregister_pending_cleanup_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -306,7 +351,7 @@ Points: 0.5, Item: Second criterion
             self.assertEqual("3-(trifluoromethyl)benzamide", short_text)
             self.assertIn("FINAL ANSWER: 3-(trifluoromethyl)benzamide", full_text)
             self.assertEqual("proposer-1-proposal", meta["fallback_source"])
-            self.assertEqual(str(proposal_path), meta["proposal_path"])
+            self.assertEqual(str(proposal_path.resolve()), str(Path(meta["proposal_path"]).resolve()))
 
     def test_candidate_protocol_dirs_include_new_benchmark_coordinator_workspace(self) -> None:
         runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
@@ -454,6 +499,10 @@ Points: 0.5, Item: Second criterion
                 )
             self.assertIn("optional `rdkit` dependency", str(exc.exception))
             return
+
+        hidden_path = benchmark_test.resolve_hidden_judge_spec_path(record.source_file, str(record.payload.get("hidden_judge_spec_ref") or ""))
+        if not hidden_path.is_file():
+            self.skipTest(f"Hidden judge spec fixture not present: {hidden_path}")
 
         result = benchmark_test.evaluate_answer(
             record,

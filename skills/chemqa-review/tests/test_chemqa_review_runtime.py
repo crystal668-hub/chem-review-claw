@@ -27,6 +27,7 @@ if str(DEBATECLAW_SCRIPTS_DIR) not in sys.path:
 
 DEBATE_STATE_PATH = Path.home() / ".clawteam" / "debateclaw" / "bin" / "debate_state.py"
 SNAPSHOT_PATH = SCRIPTS_DIR / "chemqa_review_state_snapshot.py"
+TEST_PYTHON = str((PROJECT_ROOT / ".venv" / "bin" / "python").expanduser())
 
 
 def load_module(path: Path, name: str):
@@ -928,6 +929,38 @@ class RecoverySlotMappingTest(unittest.TestCase):
             path = recover_run.RunRecoverer.workspace_for(recoverer, "proposer-2")
             self.assertEqual(Path(workspace_root) / "debateB-2", path)
 
+    def test_debate_state_commands_prefer_virtualenv_python(self) -> None:
+        original_virtual_env = os.environ.get("VIRTUAL_ENV")
+        original_run = recover_run.subprocess.run
+        with tempfile.TemporaryDirectory() as tmpdir:
+            venv_root = Path(tmpdir) / ".venv"
+            python_path = venv_root / "bin" / "python"
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.write_text("", encoding="utf-8")
+            recoverer = recover_run.RunRecoverer.__new__(recover_run.RunRecoverer)
+            recoverer.data_dir = ""
+            recoverer.debate_state_path = Path("/tmp/debate_state.py")
+            os.environ["VIRTUAL_ENV"] = str(venv_root)
+
+            calls: list[list[str]] = []
+
+            def fake_run(command, **kwargs):
+                calls.append(list(command))
+                return subprocess.CompletedProcess(command, 0, stdout="{}\n", stderr="")
+
+            recover_run.subprocess.run = fake_run
+            try:
+                payload = recover_run.RunRecoverer.debate_state_json(recoverer, "status", "--team", "demo", "--json")
+            finally:
+                recover_run.subprocess.run = original_run
+                if original_virtual_env is None:
+                    os.environ.pop("VIRTUAL_ENV", None)
+                else:
+                    os.environ["VIRTUAL_ENV"] = original_virtual_env
+
+            self.assertEqual({}, payload)
+            self.assertEqual([[str(python_path), "/tmp/debate_state.py", "status", "--team", "demo", "--json"]], calls)
+
 
 class RecoveryScriptTest(unittest.TestCase):
     def run_cmd(self, env: dict[str, str], *command: str) -> str:
@@ -970,11 +1003,11 @@ class RecoveryScriptTest(unittest.TestCase):
                     "proposal-1.md",
                     "# Candidate\n\n## Direct answer\n6\n\n## Submission trace\n- retrieval: skipped\n",
                 )
-                self.run_cmd(env, "python3", str(DEBATE_STATE_PATH), "submit-proposal", "--team", config.team_name, "--agent", "proposer-1", "--file", str(candidate_path))
+                self.run_cmd(env, TEST_PYTHON, str(DEBATE_STATE_PATH), "submit-proposal", "--team", config.team_name, "--agent", "proposer-1", "--file", str(candidate_path))
                 for role in ("proposer-2", "proposer-3", "proposer-4", "proposer-5"):
                     path = write_fixture(f"{role}.md", transport.render_placeholder_proposal(role))
-                    self.run_cmd(env, "python3", str(DEBATE_STATE_PATH), "submit-proposal", "--team", config.team_name, "--agent", role, "--file", str(path))
-                self.run_cmd(env, "python3", str(DEBATE_STATE_PATH), "advance", "--team", config.team_name, "--agent", "debate-coordinator")
+                    self.run_cmd(env, TEST_PYTHON, str(DEBATE_STATE_PATH), "submit-proposal", "--team", config.team_name, "--agent", role, "--file", str(path))
+                self.run_cmd(env, TEST_PYTHON, str(DEBATE_STATE_PATH), "advance", "--team", config.team_name, "--agent", "debate-coordinator")
 
                 workspaces = Path(workspace_root)
                 for slot in ("debate-1", "debate-2", "debate-3", "debate-4", "debate-5"):
@@ -1200,8 +1233,8 @@ class RecoveryScriptTest(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-                self.run_cmd(env, "python3", str(DEBATE_STATE_PATH), "submit-proposal", "--team", config.team_name, "--agent", "proposer-1", "--file", str(proposal_path))
-                self.run_cmd(env, "python3", str(DEBATE_STATE_PATH), "advance", "--team", config.team_name, "--agent", "debate-coordinator")
+                self.run_cmd(env, TEST_PYTHON, str(DEBATE_STATE_PATH), "submit-proposal", "--team", config.team_name, "--agent", "proposer-1", "--file", str(proposal_path))
+                self.run_cmd(env, TEST_PYTHON, str(DEBATE_STATE_PATH), "advance", "--team", config.team_name, "--agent", "debate-coordinator")
 
                 for role in ("proposer-2", "proposer-3", "proposer-4", "proposer-5"):
                     review_path = fixtures / f"review-{role}.yaml"
@@ -1226,7 +1259,7 @@ class RecoveryScriptTest(unittest.TestCase):
                     )
                     self.run_cmd(
                         env,
-                        "python3",
+                        TEST_PYTHON,
                         str(DEBATE_STATE_PATH),
                         "submit-review",
                         "--team",
@@ -1240,7 +1273,7 @@ class RecoveryScriptTest(unittest.TestCase):
                         "--file",
                         str(review_path),
                     )
-                self.run_cmd(env, "python3", str(DEBATE_STATE_PATH), "advance", "--team", config.team_name, "--agent", "debate-coordinator")
+                self.run_cmd(env, TEST_PYTHON, str(DEBATE_STATE_PATH), "advance", "--team", config.team_name, "--agent", "debate-coordinator")
 
                 workspaces = Path(workspace_root)
                 (workspaces / "debate-1").mkdir(parents=True, exist_ok=True)
@@ -1346,12 +1379,12 @@ class SnapshotScriptTest(unittest.TestCase):
                     "proposal-1.md",
                     "# Candidate\n\n## Direct answer\nA\n\n## Submission trace\n- retrieval: skipped\n",
                 )
-                self.run_cmd(env, "python3", str(DEBATE_STATE_PATH), "submit-proposal", "--team", config.team_name, "--agent", "proposer-1", "--file", str(candidate_path))
+                self.run_cmd(env, TEST_PYTHON, str(DEBATE_STATE_PATH), "submit-proposal", "--team", config.team_name, "--agent", "proposer-1", "--file", str(candidate_path))
 
                 snapshot = json.loads(
                     self.run_cmd(
                         env,
-                        "python3",
+                        TEST_PYTHON,
                         str(SNAPSHOT_PATH),
                         "--skill-root",
                         str(SKILL_ROOT),
@@ -1367,9 +1400,9 @@ class SnapshotScriptTest(unittest.TestCase):
 
                 for role in ("proposer-2", "proposer-3", "proposer-4", "proposer-5"):
                     path = write_file(f"{role}.md", transport.render_placeholder_proposal(role))
-                    self.run_cmd(env, "python3", str(DEBATE_STATE_PATH), "submit-proposal", "--team", config.team_name, "--agent", role, "--file", str(path))
+                    self.run_cmd(env, TEST_PYTHON, str(DEBATE_STATE_PATH), "submit-proposal", "--team", config.team_name, "--agent", role, "--file", str(path))
 
-                self.run_cmd(env, "python3", str(DEBATE_STATE_PATH), "advance", "--team", config.team_name, "--agent", "debate-coordinator")
+                self.run_cmd(env, TEST_PYTHON, str(DEBATE_STATE_PATH), "advance", "--team", config.team_name, "--agent", "debate-coordinator")
 
                 formal_review = write_file(
                     "review-proposer-1.md",
@@ -1391,7 +1424,7 @@ class SnapshotScriptTest(unittest.TestCase):
                 )
                 self.run_cmd(
                     env,
-                    "python3",
+                    TEST_PYTHON,
                     str(DEBATE_STATE_PATH),
                     "submit-review",
                     "--team",
@@ -1409,7 +1442,7 @@ class SnapshotScriptTest(unittest.TestCase):
                 snapshot = json.loads(
                     self.run_cmd(
                         env,
-                        "python3",
+                        TEST_PYTHON,
                         str(SNAPSHOT_PATH),
                         "--skill-root",
                         str(SKILL_ROOT),

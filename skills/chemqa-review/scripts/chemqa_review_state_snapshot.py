@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from bundle_common import default_runtime_dir, dump_json, load_json, resolve_skill_root
+from bundle_common import default_runtime_dir, dump_json, load_json, resolve_python_interpreter, resolve_skill_root
 from chemqa_review_artifacts import CANDIDATE_OWNER, REVIEWER_ROLES, liveness_summary, missing_proposer_submissions, missing_required_reviewer_lanes, qualifying_candidate_reviews
 from control_store import FileControlStore
 
@@ -160,6 +160,7 @@ def main() -> int:
 
     status_payload = run_json(
         [
+            resolve_python_interpreter(),
             str(debate_state),
             "status",
             "--team",
@@ -171,6 +172,7 @@ def main() -> int:
     )
     next_action_payload = run_json(
         [
+            resolve_python_interpreter(),
             str(debate_state),
             "next-action",
             "--team",
@@ -185,6 +187,7 @@ def main() -> int:
     if phase in {"review", "done"} and (status_payload.get("reviews") or status_payload.get("status") == "done"):
         analysis_payload = run_json(
             [
+                resolve_python_interpreter(),
                 str(debate_state),
                 "summary",
                 "--team",

@@ -6,12 +6,11 @@ import json
 import os
 import sqlite3
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from bundle_common import default_runtime_dir, resolve_skill_root
+from bundle_common import default_runtime_dir, resolve_python_interpreter, resolve_skill_root
 from control_store import FileControlStore
 from chemqa_review_artifacts import (
     CANDIDATE_OWNER,
@@ -240,7 +239,7 @@ class RunRecoverer:
         self.store.update_run_status(self.args.team, payload)
 
     def debate_state_json(self, *argv: str) -> dict[str, Any]:
-        command = [str(Path(sys.executable).resolve()), str(self.debate_state_path), *argv]
+        command = [resolve_python_interpreter(), str(self.debate_state_path), *argv]
         result = subprocess.run(command, env=self.env, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             raise RecoverError(
@@ -249,7 +248,7 @@ class RunRecoverer:
         return json.loads(result.stdout)
 
     def debate_state_text(self, *argv: str) -> str:
-        command = [str(Path(sys.executable).resolve()), str(self.debate_state_path), *argv]
+        command = [resolve_python_interpreter(), str(self.debate_state_path), *argv]
         result = subprocess.run(command, env=self.env, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             raise RecoverError(

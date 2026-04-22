@@ -16,6 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct test execution fallback
 DEBATE_STATE = str(runtime_paths.clawteam_home / "debateclaw" / "bin" / "debate_state.py")
 RECOVER_RUN = str(runtime_paths.skills_root / "chemqa-review" / "scripts" / "recover_run.py")
 SKILL_ROOT = str(runtime_paths.skills_root / "chemqa-review")
+TEST_PYTHON = str((runtime_paths.project_root / ".venv" / "bin" / "python").expanduser())
 
 PROPOSAL_BODY = """artifact_kind: candidate_submission
 artifact_contract_version: react-reviewed-v2
@@ -136,7 +137,7 @@ class TeamHarness:
     def init(self, *, max_epochs: int) -> None:
         run_cmd(
             [
-                "python3",
+                TEST_PYTHON,
                 DEBATE_STATE,
                 "init",
                 "--team",
@@ -167,25 +168,25 @@ class TeamHarness:
             self.review_files[reviewer] = path
 
     def status(self) -> dict:
-        return run_cmd(["python3", DEBATE_STATE, "status", "--team", self.team, "--json"], env=self.env, expect_json=True)
+        return run_cmd([TEST_PYTHON, DEBATE_STATE, "status", "--team", self.team, "--json"], env=self.env, expect_json=True)
 
     def next_action(self, agent: str) -> dict:
-        return run_cmd(["python3", DEBATE_STATE, "next-action", "--team", self.team, "--agent", agent, "--json"], env=self.env, expect_json=True)
+        return run_cmd([TEST_PYTHON, DEBATE_STATE, "next-action", "--team", self.team, "--agent", agent, "--json"], env=self.env, expect_json=True)
 
     def advance(self) -> dict:
-        return run_cmd(["python3", DEBATE_STATE, "advance", "--team", self.team, "--agent", "debate-coordinator", "--json"], env=self.env, expect_json=True)
+        return run_cmd([TEST_PYTHON, DEBATE_STATE, "advance", "--team", self.team, "--agent", "debate-coordinator", "--json"], env=self.env, expect_json=True)
 
     def submit_epoch_failure_cycle(self) -> None:
         self.cycle_index += 1
         proposal_body = PROPOSAL_BODY.replace("initial candidate", f"candidate epoch {self.cycle_index}")
         self.proposal_file.write_text(proposal_body, encoding="utf-8")
-        run_cmd(["python3", DEBATE_STATE, "submit-proposal", "--team", self.team, "--agent", "proposer-1", "--file", str(self.proposal_file)], env=self.env)
+        run_cmd([TEST_PYTHON, DEBATE_STATE, "submit-proposal", "--team", self.team, "--agent", "proposer-1", "--file", str(self.proposal_file)], env=self.env)
         adv = self.advance()
         assert adv["phase"] == "review", adv
         for reviewer, blocking in (("proposer-2", "no"), ("proposer-3", "yes"), ("proposer-4", "yes"), ("proposer-5", "yes")):
             run_cmd(
                 [
-                    "python3",
+                    TEST_PYTHON,
                     DEBATE_STATE,
                     "submit-review",
                     "--team",
@@ -205,7 +206,7 @@ class TeamHarness:
         assert adv["phase"] == "rebuttal", adv
         run_cmd(
             [
-                "python3",
+                TEST_PYTHON,
                 DEBATE_STATE,
                 "submit-rebuttal",
                 "--team",
@@ -271,7 +272,7 @@ def assert_invalid_review_guard_and_recover(tmpdir: str) -> None:
 
     recover_payload = run_cmd(
         [
-            "python3",
+            TEST_PYTHON,
             RECOVER_RUN,
             "--skill-root",
             SKILL_ROOT,

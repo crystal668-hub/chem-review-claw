@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -232,3 +233,15 @@ def default_template_dir() -> Path:
 
 def openclaw_env_file() -> str:
     return os.environ.get("OPENCLAW_ENV_FILE", str(Path.home() / ".openclaw" / ".env"))
+
+
+def resolve_python_interpreter(*, fallback: str | Path | None = None) -> str:
+    venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    if venv:
+        venv_root = Path(venv).expanduser()
+        for candidate in (venv_root / "bin" / "python", venv_root / "Scripts" / "python.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    if fallback:
+        return str(Path(fallback).expanduser())
+    return str(Path(sys.executable).expanduser())

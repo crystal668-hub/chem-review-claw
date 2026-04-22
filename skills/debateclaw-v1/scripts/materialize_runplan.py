@@ -9,6 +9,7 @@ from pathlib import Path
 
 from control_store import FileControlStore
 from debate_templates import default_task_bundle
+from openclaw_debate_common import resolve_python_interpreter
 
 
 WORKFLOW_MAP = {
@@ -139,9 +140,11 @@ def role_name_for_slot(slot_id: str, proposer_slots: list[str]) -> str:
 def build_command_map(run_plan: dict, *, wrapper_path: Path, env_file: str) -> dict[str, list[str]]:
     proposer_slots = run_plan["launch_spec"]["proposer_slots"]
     command_map: dict[str, list[str]] = {}
+    python = resolve_python_interpreter()
     for slot_id, session_id in run_plan["session_assignments"].items():
         role_name = role_name_for_slot(slot_id, proposer_slots)
         command = [
+            python,
             str(wrapper_path),
             "--slot",
             slot_id,
@@ -219,7 +222,7 @@ def main() -> int:
     request = run_plan["request_snapshot"]
     defaults = run_plan["protocol_defaults"]
     prepare_cmd = [
-        "python3",
+        resolve_python_interpreter(),
         str(prepare_script),
         "--workflow",
         workflow_name,

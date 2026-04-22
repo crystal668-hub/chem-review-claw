@@ -6,6 +6,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from openclaw_debate_common import resolve_python_interpreter
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Re-materialize one persisted DebateClaw V1 run.')
@@ -22,7 +24,7 @@ def main() -> int:
     args = parse_args()
     root = Path(args.root).resolve()
     command = [
-        'python3',
+        resolve_python_interpreter(),
         str(root / 'scripts' / 'materialize_runplan.py'),
         '--root',
         str(root),

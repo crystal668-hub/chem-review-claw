@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from openclaw_debate_common import resolve_python_interpreter
+
 
 DEFAULT_CLAWTEAM_TEMPLATE_DIR = Path.home() / ".clawteam" / "templates"
 
@@ -80,7 +82,7 @@ def main() -> int:
     scripts_dir = root / "scripts"
 
     compile_cmd = [
-        "python3",
+        resolve_python_interpreter(),
         str(scripts_dir / "compile_runplan.py"),
         "--root",
         str(root),
@@ -108,7 +110,7 @@ def main() -> int:
     run_id = compiled["run_id"]
 
     materialize_cmd = [
-        "python3",
+        resolve_python_interpreter(),
         str(scripts_dir / "materialize_runplan.py"),
         "--root",
         str(root),

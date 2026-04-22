@@ -6,7 +6,6 @@ import json
 import os
 import shlex
 import subprocess
-import sys
 from pathlib import Path
 
 from bundle_common import (
@@ -17,6 +16,7 @@ from bundle_common import (
     load_json,
     openclaw_env_file,
     read_text,
+    resolve_python_interpreter,
     resolve_skill_root,
 )
 from control_store import FileControlStore
@@ -24,15 +24,6 @@ from control_store import FileControlStore
 
 def openclaw_config_path() -> Path:
     return (Path.home() / ".openclaw" / "openclaw.json").resolve()
-
-
-def current_python() -> str:
-    venv = os.environ.get("VIRTUAL_ENV", "").strip()
-    if venv:
-        candidate = Path(venv).resolve() / "bin" / "python"
-        if candidate.is_file():
-            return str(candidate)
-    return str(Path(sys.executable).resolve())
 
 
 def model_ref_from_definition(model_def: dict) -> str:
@@ -121,6 +112,10 @@ def parse_prepare_output(stdout: str) -> dict[str, str]:
     return parsed
 
 
+def current_python() -> str:
+    return resolve_python_interpreter()
+
+
 def build_command_map(
     run_plan: dict,
     *,
@@ -135,10 +130,11 @@ def build_command_map(
     slot_assignments = dict(run_plan.get("slot_assignments") or {})
     role_slots = dict(run_plan.get("launch_spec", {}).get("role_slots") or {})
     driver_path = skill_root / "scripts" / "chemqa_review_openclaw_driver.py"
+    python = current_python()
     for role_name, slot_id in role_slots.items():
         session_id = run_plan["session_assignments"][slot_id]
         command = [
-            current_python(),
+            python,
             str(driver_path),
             "--skill-root",
             str(skill_root),
@@ -178,8 +174,9 @@ def render_role_prompt(
     assembly = dict(run_plan["prompt_assembly"][role_name])
     semantic_role = str(assembly["semantic_role"])
     additional_workspace = run_plan.get("runtime_context", {}).get("additional_file_workspace") or "none"
+    python = current_python()
     state_snapshot_cmd = (
-        f"python3 {root / 'scripts' / 'chemqa_review_state_snapshot.py'} "
+        f"{python} {root / 'scripts' / 'chemqa_review_state_snapshot.py'} "
         f"--skill-root {root} --team {{team_name}} --agent {{agent_name}}"
     )
     role_intro = [
@@ -192,9 +189,9 @@ def render_role_prompt(
         f"- `{state_snapshot_cmd}`",
         "",
         "Fallback runtime commands (use only when the compact snapshot is insufficient):",
-        f"- `{runtime_root}/debate_state.py status --team {{team_name}} --agent {{agent_name}} --json`",
-        f"- `{runtime_root}/debate_state.py next-action --team {{team_name}} --agent {{agent_name}} --json`",
-        f"- `{runtime_root}/debate_state.py advance --team {{team_name}} --agent {{agent_name}}`",
+        f"- `{python} {runtime_root}/debate_state.py status --team {{team_name}} --agent {{agent_name}} --json`",
+        f"- `{python} {runtime_root}/debate_state.py next-action --team {{team_name}} --agent {{agent_name}} --json`",
+        f"- `{python} {runtime_root}/debate_state.py advance --team {{team_name}} --agent {{agent_name}}`",
         "",
         "Sibling skill roots are available under the same skills directory as this bundle.",
         f"Additional file workspace: {additional_workspace}",
