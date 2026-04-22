@@ -1,0 +1,47 @@
+id: conformabench-0001
+source_dataset: conformabench
+subject: chemistry
+track: research
+eval_kind: conformabench_constructive
+question_type: open_constructive
+task_family: forcefield_geometry_design
+
+problem: |
+  <copy public_record.problem here verbatim>
+
+answer: |
+  Points: 1.0, Item: Submitted a chemically valid molecule in parseable SMILES form.
+  Points: 1.0, Item: The explanation invokes a relevant literature-backed design principle.
+  Points: 1.0, Item: The explanation links that principle to the target geometry.
+  Points: 1.0, Item: The response explains why the proposed structure should satisfy the target condition.
+  Points: 1.0, Item: The response acknowledges at least one limitation of force-field-based evidence.
+
+authoring_schema_version: conformabench-v2
+
+public_spec:
+  benchmark_name: ConformaBench
+  final_answer_kind: single_smiles
+  solution_arity: 1
+  reasoning_required: true
+  websearch_expected: true
+  anchors:
+    mechanism_anchor: <copy from public_record>
+    molecule_family_anchor: <copy from public_record>
+    observable_anchor: <copy from public_record>
+    design_goal_anchor: <copy from public_record>
+  answer_constraints:
+    allowed_elements: [C, H, N, O, F, S, P, Si, B, Cl, Br, I]
+    max_heavy_atoms: <int>
+    formal_charge: 0
+    single_fragment_only: true
+  exclusion_constraints:
+    forbid_salts: true
+    forbid_mixtures: true
+    forbid_obvious_named_examples: true
+
+hidden_judge_spec_ref: conformabench-0001
+
+metadata:
+  benchmark_name: ConformaBench
+  expected_solver_behavior: literature_plus_chemical_reasoning
+  answer_type: smiles

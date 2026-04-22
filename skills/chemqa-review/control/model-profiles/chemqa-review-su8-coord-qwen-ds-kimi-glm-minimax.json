@@ -1,0 +1,30 @@
+{
+  "id": "chemqa-review-su8-coord-qwen-ds-kimi-glm-minimax",
+  "description": "ChemQA fixed-slot benchmark profile: coordinator and proposer-1 through proposer-5 all on Qwen3.5-Plus, thinking all high.",
+  "slot_models": {
+    "debate-coordinator": {
+      "model_ref": "dashscope-qwen3.5-plus",
+      "thinking": "high"
+    },
+    "debate-1": {
+      "model_ref": "dashscope-qwen3.5-plus",
+      "thinking": "high"
+    },
+    "debate-2": {
+      "model_ref": "dashscope-qwen3.5-plus",
+      "thinking": "high"
+    },
+    "debate-3": {
+      "model_ref": "dashscope-qwen3.5-plus",
+      "thinking": "high"
+    },
+    "debate-4": {
+      "model_ref": "dashscope-qwen3.5-plus",
+      "thinking": "high"
+    },
+    "debate-5": {
+      "model_ref": "dashscope-qwen3.5-plus",
+      "thinking": "high"
+    }
+  }
+}

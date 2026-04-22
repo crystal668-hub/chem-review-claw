@@ -1,0 +1,85 @@
+{
+  "id": "chemqa-review",
+  "version": 1,
+  "workflow_ref": "chemqa-review@1",
+  "engine_preset_ref": "chemqa-review@1",
+  "defaults": {
+    "proposer_count": 5,
+    "review_rounds": 3,
+    "rebuttal_rounds": 2,
+    "max_epochs": 3,
+    "model_profile": "chemqa-review-default",
+    "evidence_mode": "strict",
+    "backend": "subprocess",
+    "final_decider": "outer-entry-agent"
+  },
+  "overrides": {
+    "review_rounds": {
+      "exposure": "tunable",
+      "min": 0,
+      "max": 6
+    },
+    "rebuttal_rounds": {
+      "exposure": "tunable",
+      "min": 0,
+      "max": 6
+    },
+    "max_epochs": {
+      "exposure": "tunable",
+      "min": 1,
+      "max": 6
+    },
+    "model_profile": {
+      "exposure": "tunable"
+    },
+    "evidence_mode": {
+      "exposure": "tunable"
+    }
+  },
+  "prompt_pack": {
+    "role_contracts": {
+      "debate-coordinator": [
+        "prompts/contracts/coordinator.md"
+      ],
+      "proposer-1": [
+        "prompts/contracts/proposer-main.md"
+      ],
+      "proposer-2": [
+        "prompts/contracts/reviewer-search-coverage.md"
+      ],
+      "proposer-3": [
+        "prompts/contracts/reviewer-evidence-trace.md"
+      ],
+      "proposer-4": [
+        "prompts/contracts/reviewer-reasoning-consistency.md"
+      ],
+      "proposer-5": [
+        "prompts/contracts/reviewer-counterevidence.md"
+      ]
+    },
+    "shared_modules": [
+      "prompts/modules/policies/evidence-strict.md",
+      "prompts/modules/policies/react-reviewed-acceptance.md",
+      "prompts/modules/policies/chemqa-native-workflow.md",
+      "prompts/modules/context/required-skills.md",
+      "prompts/modules/output/artifact-contract.md",
+      "prompts/modules/output/pure-yaml-artifacts.md",
+      "prompts/modules/policies/state-query-discipline.md"
+    ],
+    "role_modules": {
+      "proposer-1": [
+        "prompts/modules/policies/evidence-strict.md",
+        "prompts/modules/context/proposer-on-demand-reading.md",
+        "prompts/modules/output/pure-yaml-artifacts.md",
+        "prompts/modules/policies/state-query-discipline.md"
+      ]
+    }
+  },
+  "allowed_model_profiles": [
+    "chemqa-review-default",
+    "chemqa-review-su8-packy-qwen-minimax",
+    "chemqa-review-su8-packy-all-high",
+    "chemqa-review-su8-coord-packy-reviewers",
+    "chemqa-review-su8-coord-qwen-ds-kimi-glm-minimax"
+  ]
+}

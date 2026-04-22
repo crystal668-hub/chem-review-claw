@@ -1,0 +1,108 @@
+judge_schema_version: conformabench-v2
+record_id: conformabench-0001
+
+answer_parser:
+  final_answer_prefix: "FINAL ANSWER:"
+  accepted_formats: [single_smiles]
+  allow_inline_whitespace: true
+  canonicalize_before_scoring: true
+
+normalization:
+  strip_atom_mapping: true
+  largest_fragment_only: true
+  reject_disconnected_graphs: true
+  reject_invalid_valence: true
+  reject_radicals_unless_allowed: true
+  allowed_formal_charge: [0]
+
+rdkit_protocol:
+  sanitize: true
+
+  force_field_policy:
+    preferred_order: [MMFF94s, MMFF94, UFF]
+    require_parameter_coverage: true
+    fallback_allowed: true
+    fail_if_no_supported_force_field: true
+
+  embedding:
+    method: ETKDGv3
+    num_confs: 50
+    random_seeds: [7, 11, 19]
+    prune_rms_thresh: 0.2
+    use_random_coords: false
+
+  optimization:
+    max_iters: 1000
+    energy_window_kcal_mol: 3.0
+    reference_conformer: lowest_energy
+
+  robustness:
+    require_same_pass_result_across_all_seeds: true
+
+target_observables:
+  - observable_id: obs1
+    kind: distance_from_smarts_match
+    description: <what is measured>
+    smarts: "<SMARTS with mapped atoms like [O:1]...[N:2]>"
+    atom_map_numbers: [1, 2]
+    aggregation: min
+  - observable_id: obs2
+    kind: max_heavy_atom_distance
+    description: <secondary observable, optional>
+
+acceptance_predicates:
+  all_of:
+    - predicate_id: valid_smiles
+      kind: molecule_valid
+    - predicate_id: allowed_elements
+      kind: element_subset
+      allowed: [C, H, N, O, F, S, P, Si, B, Cl, Br, I]
+    - predicate_id: heavy_atom_limit
+      kind: max_heavy_atoms
+      value: <int>
+    - predicate_id: single_fragment
+      kind: single_fragment
+    - predicate_id: neutral
+      kind: formal_charge_equals
+      value: 0
+    - predicate_id: target_geometry
+      kind: geometry_lowest_conformer
+      observable: obs1
+      operator: < <= | >= | in_range >
+      value: <number or [lower, upper]>
+
+rejection_predicates:
+  any_of:
+    - predicate_id: blacklisted_named_example
+      kind: canonical_smiles_in
+      values: []
+    - predicate_id: unsupported_force_field_case
+      kind: no_supported_force_field
+
+hidden_literature_basis:
+  principle_summary: >-
+    Internal author note describing the literature-backed design principle and
+    why the hidden predicate should represent a defensible target.
+  references:
+    - citation_key: ref-1
+      role: primary
+    - citation_key: ref-2
+      role: support_or_counterexample
+
+rubric_items:
+  - points: 1.0
+    item: Submitted a chemically valid molecule in parseable SMILES form.
+  - points: 1.0
+    item: The explanation invokes a relevant literature-backed design principle.
+  - points: 1.0
+    item: The explanation links that principle to the target geometry.
+  - points: 1.0
+    item: The response explains why the proposed structure should satisfy the target condition.
+  - points: 1.0
+    item: The response acknowledges at least one limitation of force-field-based evidence.
+
+pass_rule:
+  require_rdkit_gate: true
+  require_valid_final_answer_line: true
+  rubric_scoring_mode: additive
+  hard_fail_if_any_rejection_predicate_matches: true

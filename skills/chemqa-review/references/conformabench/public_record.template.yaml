@@ -1,0 +1,88 @@
+authoring_schema_version: conformabench-v2
+
+id: conformabench-0001
+source_dataset: conformabench
+subject: chemistry
+track: research
+eval_kind: conformabench_constructive
+question_type: open_constructive
+task_family: forcefield_geometry_design
+
+title: <short title>
+
+problem: |
+  Design one molecule that is consistent with the literature on
+  <mechanism or design principle> and whose lowest-energy force-field-optimized
+  geometry is expected to satisfy the target condition below.
+
+  Target condition:
+  - <geometry condition 1>
+  - <geometry condition 2, optional>
+
+  Answer constraints:
+  - give one chemically valid molecule as a SMILES string
+  - justify the design chemically
+  - do not rely on brute-force enumeration
+
+  Literature guidance:
+  - use external literature if helpful
+  - choose the search direction yourself
+  - your answer should be justified by a recognized conformational,
+    stereoelectronic, or preorganization principle
+
+  Structural constraints:
+  - <constraint 1>
+  - <constraint 2>
+  - <constraint 3>
+
+  Exclusions:
+  - <exclusion 1>
+  - <exclusion 2>
+
+  Output format:
+  - brief justification
+  - FINAL ANSWER: <SMILES>
+
+public_spec:
+  benchmark_name: ConformaBench
+  final_answer_kind: single_smiles
+  solution_arity: 1
+  reasoning_required: true
+  websearch_expected: true
+
+  anchors:
+    mechanism_anchor: <mechanism phrase>
+    molecule_family_anchor: <family phrase>
+    observable_anchor: <geometry observable phrase>
+    design_goal_anchor: <design goal phrase>
+
+  answer_constraints:
+    allowed_elements: [C, H, N, O, F, S, P, Si, B, Cl, Br, I]
+    max_heavy_atoms: <int>
+    formal_charge: 0
+    single_fragment_only: true
+
+  exclusion_constraints:
+    forbid_salts: true
+    forbid_mixtures: true
+    forbid_obvious_named_examples: true
+
+rubric_items:
+  - points: 1.0
+    item: Submitted a chemically valid molecule in parseable SMILES form.
+  - points: 1.0
+    item: The explanation invokes a relevant literature-backed design principle.
+  - points: 1.0
+    item: The explanation links that principle to the target geometry.
+  - points: 1.0
+    item: The response explains why the proposed structure should satisfy the target condition.
+  - points: 1.0
+    item: The response acknowledges at least one limitation of force-field-based evidence.
+
+metadata:
+  difficulty: hard
+  answer_type: smiles
+  expected_solver_behavior: literature_plus_chemical_reasoning
+  author_notes: >-
+    Keep the prompt natural. Do not include author names, years, journal names,
+    DOI, or directly identifying famous example molecules in the public text.
