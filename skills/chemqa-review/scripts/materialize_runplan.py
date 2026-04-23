@@ -129,6 +129,7 @@ def build_command_map(
     command_map: dict[str, list[str]] = {}
     slot_assignments = dict(run_plan.get("slot_assignments") or {})
     role_slots = dict(run_plan.get("launch_spec", {}).get("role_slots") or {})
+    stop_loss = dict((((run_plan.get("runtime_context") or {}).get("chemqa_review") or {}).get("stop_loss") or {}))
     driver_path = skill_root / "scripts" / "chemqa_review_openclaw_driver.py"
     python = current_python()
     for role_name, slot_id in role_slots.items():
@@ -155,6 +156,19 @@ def build_command_map(
             "--data-dir",
             clawteam_data_dir,
         ]
+        option_map = (
+            ("stale_timeout_seconds", "--stale-timeout-seconds"),
+            ("respawn_cooldown_seconds", "--respawn-cooldown-seconds"),
+            ("max_model_attempts", "--max-model-attempts"),
+            ("lane_retry_budget", "--lane-retry-budget"),
+            ("phase_repair_budget", "--phase-repair-budget"),
+            ("max_respawns_per_role_phase_signature", "--max-respawns-per-role-phase-signature"),
+        )
+        for key, flag in option_map:
+            value = stop_loss.get(key)
+            if value is None:
+                continue
+            command.extend([flag, str(value)])
         thinking = dict(slot_assignments.get(slot_id) or {}).get("thinking")
         if thinking:
             command.extend(["--thinking", str(thinking)])

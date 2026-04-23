@@ -46,16 +46,17 @@ from chemqa_review_artifacts import (
 from control_store import FileControlStore
 
 POLL_SECONDS_DEFAULT = 20
-STALE_TIMEOUT_SECONDS_DEFAULT = 600
-MODEL_ATTEMPTS_DEFAULT = 2
+STALE_TIMEOUT_SECONDS_DEFAULT = 300
+MODEL_ATTEMPTS_DEFAULT = 1
 CANDIDATE_MODEL_TIMEOUT_SECONDS_DEFAULT = 240
 REVIEW_MODEL_TIMEOUT_SECONDS_DEFAULT = 420
 REBUTTAL_MODEL_TIMEOUT_SECONDS_DEFAULT = 300
 COORDINATOR_MODEL_TIMEOUT_SECONDS_DEFAULT = 300
 SUBPROCESS_TIMEOUT_GRACE_SECONDS_DEFAULT = 30
-RESPAWN_COOLDOWN_SECONDS_DEFAULT = 60
+RESPAWN_COOLDOWN_SECONDS_DEFAULT = 120
 LANE_RETRY_BUDGET_DEFAULT = 2
-PHASE_REPAIR_BUDGET_DEFAULT = 2
+PHASE_REPAIR_BUDGET_DEFAULT = 1
+MAX_RESPAWNS_PER_ROLE_PHASE_SIGNATURE_DEFAULT = 1
 BLOCKER_FILENAME = "chemqa_review_blocker.json"
 CANDIDATE_CAPTURE_FILENAME = "proposal.captured.yaml"
 CANDIDATE_CAPTURE_POLL_SECONDS = 0.5
@@ -113,6 +114,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--respawn-cooldown-seconds", type=int, default=RESPAWN_COOLDOWN_SECONDS_DEFAULT)
     parser.add_argument("--lane-retry-budget", type=int, default=LANE_RETRY_BUDGET_DEFAULT)
     parser.add_argument("--phase-repair-budget", type=int, default=PHASE_REPAIR_BUDGET_DEFAULT)
+    parser.add_argument(
+        "--max-respawns-per-role-phase-signature",
+        type=int,
+        default=MAX_RESPAWNS_PER_ROLE_PHASE_SIGNATURE_DEFAULT,
+    )
     return parser.parse_args()
 
 
@@ -719,6 +725,44 @@ class ChemQAReviewDriver:
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     @staticmethod
+    def _budget_state_from_registry(registry: dict[str, Any]) -> dict[str, Any]:
+        payload = registry.get("_budget_state") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        role_counts = payload.get("respawns_by_role") or {}
+        if not isinstance(role_counts, dict):
+            role_counts = {}
+        return {
+            "phase_signature": str(payload.get("phase_signature") or ""),
+            "respawns_by_role": {
+                str(role): int(count or 0)
+                for role, count in role_counts.items()
+            },
+        }
+
+    def current_phase_signature(self) -> str:
+        try:
+            status_payload = self.status()
+        except Exception:
+            return ""
+        summary = liveness_summary(
+            status_payload,
+            coordinator_task_status=str((self.current_task() or {}).get("status") or ""),
+        )
+        return str(summary.get("phase_signature") or "")
+
+    def _prepare_respawn_budget_state(self, registry: dict[str, Any], *, phase_signature: str) -> tuple[dict[str, Any], bool]:
+        budget_state = self._budget_state_from_registry(registry)
+        changed = False
+        if budget_state["phase_signature"] != phase_signature:
+            budget_state = {
+                "phase_signature": phase_signature,
+                "respawns_by_role": {},
+            }
+            changed = True
+        return budget_state, changed
+
+    @staticmethod
     def _slot_from_registry_entry(entry: dict[str, Any] | None) -> str:
         if not isinstance(entry, dict):
             return ""
@@ -833,8 +877,13 @@ class ChemQAReviewDriver:
             registry = self.load_spawn_registry()
         except DriverError:
             return
+        phase_signature = self.current_phase_signature()
+        budget_state, budget_changed = self._prepare_respawn_budget_state(registry, phase_signature=phase_signature)
+        max_respawns = max(0, int(getattr(self.args, "max_respawns_per_role_phase_signature", 0)))
         exited_reviewers = set(self.reviewer_exit_state())
-        for role, entry in registry.items():
+        for role, entry in list(registry.items()):
+            if role == "_budget_state":
+                continue
             if role == "debate-coordinator" or role in exited_reviewers:
                 continue
             task = tasks_by_owner.get(role) or {}
@@ -848,7 +897,16 @@ class ChemQAReviewDriver:
                 continue
             if self.role_process_is_running(role, entry):
                 continue
+            if max_respawns >= 0 and int(budget_state["respawns_by_role"].get(role) or 0) >= max_respawns:
+                continue
+            budget_state["respawns_by_role"][role] = int(budget_state["respawns_by_role"].get(role) or 0) + 1
+            registry["_budget_state"] = budget_state
+            self.save_spawn_registry(registry)
             self.respawn_role_from_registry(role, entry, reason="missing_or_dead_role_process")
+            budget_changed = False
+        if budget_changed:
+            registry["_budget_state"] = budget_state
+            self.save_spawn_registry(registry)
 
     def maybe_salvage_timed_out_artifact(self, *, file_path: Path, checker: Callable[[str], Any], artifact_kind: str) -> tuple[bool, list[str]]:
         if not file_path.is_file():
@@ -1099,7 +1157,9 @@ class ChemQAReviewDriver:
             "--workspace-root",
             str(self.workspace_root),
             "--max-steps",
-            "8",
+            "1",
+            "--max-respawns-per-role-phase-signature",
+            str(getattr(self.args, "max_respawns_per_role_phase_signature", MAX_RESPAWNS_PER_ROLE_PHASE_SIGNATURE_DEFAULT)),
             "--json",
         ]
         result = subprocess.run(command, env=self.env, check=False, capture_output=True, text=True)

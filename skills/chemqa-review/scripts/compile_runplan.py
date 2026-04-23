@@ -191,8 +191,12 @@ def main() -> int:
                 "max_epochs": resolved.get("max_epochs"),
                 "react_reviewed_config_snapshot": config_snapshot,
                 "stop_loss": {
+                    "stale_timeout_seconds": 300,
+                    "respawn_cooldown_seconds": 120,
+                    "max_model_attempts": 1,
                     "lane_retry_budget": 2,
-                    "phase_repair_budget": 2,
+                    "phase_repair_budget": 1,
+                    "max_respawns_per_role_phase_signature": 1,
                     "stagnation_basis": "phase_signature",
                     "terminal_failure_artifact": "chemqa_review_failure.yaml"
                 },

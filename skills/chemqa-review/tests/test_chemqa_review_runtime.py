@@ -412,6 +412,18 @@ class MaterializeRunplanTest(unittest.TestCase):
                     "proposer-5": "debate-5",
                 }
             },
+            "runtime_context": {
+                "chemqa_review": {
+                    "stop_loss": {
+                        "stale_timeout_seconds": 300,
+                        "respawn_cooldown_seconds": 120,
+                        "max_model_attempts": 1,
+                        "lane_retry_budget": 2,
+                        "phase_repair_budget": 1,
+                        "max_respawns_per_role_phase_signature": 1,
+                    }
+                }
+            },
         }
         command_map = materialize_runplan.build_command_map(
             run_plan,
@@ -432,6 +444,14 @@ class MaterializeRunplanTest(unittest.TestCase):
         self.assertIn("/runtime", command)
         self.assertIn("--data-dir", command)
         self.assertIn("/tmp/clawteam-data", command)
+        self.assertIn("--stale-timeout-seconds", command)
+        self.assertIn("300", command)
+        self.assertIn("--respawn-cooldown-seconds", command)
+        self.assertIn("120", command)
+        self.assertIn("--max-model-attempts", command)
+        self.assertIn("--lane-retry-budget", command)
+        self.assertIn("--phase-repair-budget", command)
+        self.assertIn("--max-respawns-per-role-phase-signature", command)
 
 
 class NativeWorkflowStateTest(unittest.TestCase):
@@ -654,28 +674,60 @@ class WorkerTimeoutSalvageTest(unittest.TestCase):
 class DriverRespawnTest(unittest.TestCase):
     def test_ensure_required_lanes_running_respawns_dead_actionable_reviewers(self) -> None:
         driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
-        driver.args = argparse.Namespace(team="chemqa-review-test-run")
+        driver.args = argparse.Namespace(team="chemqa-review-test-run", max_respawns_per_role_phase_signature=1)
         driver.last_respawn_events = []
         driver.last_respawn_attempt_at = {}
         driver.all_tasks = lambda: [
             {"owner": "proposer-2", "status": "pending"},
             {"owner": "proposer-3", "status": "completed"},
         ]
-        driver.load_spawn_registry = lambda: {
+        registry = {
             "debate-coordinator": {"pid": 123},
             "proposer-2": {"pid": 0, "command": ["python3", "worker.py"]},
             "proposer-3": {"pid": 0, "command": ["python3", "worker.py"]},
         }
+        driver.load_spawn_registry = lambda: registry
+        saved_payloads: list[dict[str, object]] = []
+        driver.save_spawn_registry = lambda payload: saved_payloads.append(payload)
         driver.next_action_for_agent = lambda role: (
             {"action": "review", "phase": "review"} if role == "proposer-2" else {"action": "stop", "phase": "done"}
         )
         driver.role_process_is_running = lambda role, entry: False
+        driver.current_phase_signature = lambda: "review-round-1"
         respawned: list[tuple[str, str]] = []
         driver.respawn_role_from_registry = lambda role, entry, reason: respawned.append((role, reason)) or True
 
         driver_module.ChemQAReviewDriver.ensure_required_lanes_running(driver)
 
         self.assertEqual([("proposer-2", "missing_or_dead_role_process")], respawned)
+        self.assertTrue(saved_payloads)
+
+    def test_ensure_required_lanes_running_does_not_respawn_same_role_after_phase_budget_exhausted(self) -> None:
+        driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+        driver.args = argparse.Namespace(team="chemqa-review-test-run", max_respawns_per_role_phase_signature=1)
+        driver.last_respawn_events = []
+        driver.last_respawn_attempt_at = {}
+        driver.all_tasks = lambda: [{"owner": "proposer-2", "status": "pending"}]
+        registry = {
+            "_budget_state": {
+                "phase_signature": "review-round-1",
+                "respawns_by_role": {"proposer-2": 1},
+            },
+            "proposer-2": {"pid": 0, "command": ["python3", "worker.py"]},
+        }
+        driver.load_spawn_registry = lambda: registry
+        saved_payloads: list[dict[str, object]] = []
+        driver.save_spawn_registry = lambda payload: saved_payloads.append(payload)
+        driver.next_action_for_agent = lambda _role: {"action": "review", "phase": "review"}
+        driver.role_process_is_running = lambda role, entry: False
+        driver.current_phase_signature = lambda: "review-round-1"
+        respawned: list[tuple[str, str]] = []
+        driver.respawn_role_from_registry = lambda role, entry, reason: respawned.append((role, reason)) or True
+
+        driver_module.ChemQAReviewDriver.ensure_required_lanes_running(driver)
+
+        self.assertEqual([], respawned)
+        self.assertEqual([], saved_payloads)
 
     def test_slot_from_registry_entry_prefers_explicit_slot_or_command_flag(self) -> None:
         self.assertEqual(
@@ -862,6 +914,66 @@ class RunStatusShapeTest(unittest.TestCase):
             self.assertEqual("failed", payload["terminal_state"])
             self.assertEqual("terminal_failure", payload["terminal_reason_code"])
             self.assertEqual("phase stagnation", payload["terminal_reason"])
+
+
+class RecoveryRespawnBudgetTest(unittest.TestCase):
+    def test_respawn_actionable_roles_does_not_respawn_same_role_after_phase_budget_exhausted(self) -> None:
+        recoverer = recover_run.RunRecoverer.__new__(recover_run.RunRecoverer)
+        recoverer.args = argparse.Namespace(team="chemqa-review-test-run", max_respawns_per_role_phase_signature=1)
+        recoverer.actions = []
+        recoverer.blockers = []
+        recoverer.data_dir = ""
+        recoverer.team_dir = lambda: Path("/tmp/team-dir")
+        recoverer.workspace_for = lambda _role: Path("/tmp/workspace")
+        recoverer.current_phase_signature = lambda: "review-round-1"
+        registry = {
+            "_budget_state": {
+                "phase_signature": "review-round-1",
+                "respawns_by_role": {"proposer-2": 1},
+            },
+            "proposer-2": {"pid": 0, "command": ["python3", "worker.py"]},
+        }
+        recoverer.load_spawn_registry = lambda: registry
+        saved_payloads: list[dict[str, object]] = []
+        recoverer.save_spawn_registry = lambda payload: saved_payloads.append(payload)
+        recoverer.next_action = lambda _role: {"action": "review", "phase": "review"}
+        recoverer.role_process_is_running = lambda role, entry: False
+
+        changed = recover_run.RunRecoverer.respawn_actionable_roles(recoverer)
+
+        self.assertFalse(changed)
+        self.assertEqual([], saved_payloads)
+
+
+class RecoveryInvocationTest(unittest.TestCase):
+    def test_run_recovery_cycle_uses_single_step_and_passes_respawn_budget(self) -> None:
+        driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+        driver.args = argparse.Namespace(team="chemqa-review-test-run", max_respawns_per_role_phase_signature=1)
+        driver.skill_root = SKILL_ROOT
+        driver.runtime_root = Path("/tmp/runtime")
+        driver.workspace_root = Path("/tmp/workspaces")
+        driver.data_dir = ""
+        driver.last_recovery_payload = {}
+
+        original_subprocess_run = driver_module.subprocess.run
+        captured: dict[str, object] = {}
+        try:
+            def fake_run(command, env=None, check=False, capture_output=False, text=False):
+                captured["command"] = list(command)
+                return subprocess.CompletedProcess(command, 0, stdout='{"status":"running","blockers":[]}', stderr="")
+
+            driver_module.subprocess.run = fake_run
+            payload = driver_module.ChemQAReviewDriver.run_recovery_cycle(driver)
+        finally:
+            driver_module.subprocess.run = original_subprocess_run
+
+        self.assertEqual({"status": "running", "blockers": []}, payload)
+        command = captured["command"]
+        assert isinstance(command, list)
+        self.assertIn("--max-steps", command)
+        self.assertEqual("1", command[command.index("--max-steps") + 1])
+        self.assertIn("--max-respawns-per-role-phase-signature", command)
+        self.assertEqual("1", command[command.index("--max-respawns-per-role-phase-signature") + 1])
 
     def test_finalize_protocol_payload_writes_completed_with_artifact_collection_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

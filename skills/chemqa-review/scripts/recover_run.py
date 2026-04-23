@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runtime-dir", help="Path to deployed DebateClaw runtime helpers")
     parser.add_argument("--workspace-root", default=str(Path.home() / ".openclaw" / "debateclaw" / "workspaces"))
     parser.add_argument("--max-steps", type=int, default=40, help="Maximum reconcile/advance iterations")
+    parser.add_argument("--max-respawns-per-role-phase-signature", type=int, default=1)
     parser.add_argument("--json", action="store_true", help="Print final JSON summary")
     return parser.parse_args()
 
@@ -141,6 +142,39 @@ class RunRecoverer:
             return
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
+    @staticmethod
+    def _budget_state_from_registry(registry: dict[str, Any]) -> dict[str, Any]:
+        payload = registry.get("_budget_state") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        role_counts = payload.get("respawns_by_role") or {}
+        if not isinstance(role_counts, dict):
+            role_counts = {}
+        return {
+            "phase_signature": str(payload.get("phase_signature") or ""),
+            "respawns_by_role": {
+                str(role): int(count or 0)
+                for role, count in role_counts.items()
+            },
+        }
+
+    def current_phase_signature(self) -> str:
+        try:
+            return self._phase_signature(self.status())
+        except Exception:
+            return ""
+
+    def _prepare_respawn_budget_state(self, registry: dict[str, Any], *, phase_signature: str) -> tuple[dict[str, Any], bool]:
+        budget_state = self._budget_state_from_registry(registry)
+        changed = False
+        if budget_state["phase_signature"] != phase_signature:
+            budget_state = {
+                "phase_signature": phase_signature,
+                "respawns_by_role": {},
+            }
+            changed = True
+        return budget_state, changed
+
     def role_process_is_running(self, role: str, entry: dict[str, Any]) -> bool:
         pid = int(entry.get("pid") or 0)
         if pid <= 0:
@@ -163,7 +197,12 @@ class RunRecoverer:
         team_dir = self.team_dir()
         if not registry or team_dir is None:
             return False
+        phase_signature = self.current_phase_signature()
+        budget_state, budget_changed = self._prepare_respawn_budget_state(registry, phase_signature=phase_signature)
+        max_respawns = max(0, int(getattr(self.args, "max_respawns_per_role_phase_signature", 0)))
         for role, entry in registry.items():
+            if role == "_budget_state":
+                continue
             if role == "debate-coordinator":
                 continue
             payload = self.next_action(role)
@@ -174,6 +213,8 @@ class RunRecoverer:
                 continue
             command = list(entry.get("command") or [])
             if not command:
+                continue
+            if max_respawns >= 0 and int(budget_state["respawns_by_role"].get(role) or 0) >= max_respawns:
                 continue
             log_path = team_dir / "spawn-logs" / f"{role}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,9 +237,14 @@ class RunRecoverer:
             updated["last_respawn_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             updated["last_respawn_reason"] = "recover_run_actionable_role"
             registry[role] = updated
+            budget_state["respawns_by_role"][role] = int(budget_state["respawns_by_role"].get(role) or 0) + 1
+            registry["_budget_state"] = budget_state
             self.actions.append(f"respawn-role {role} pid={proc.pid}")
             changed = True
         if changed:
+            self.save_spawn_registry(registry)
+        elif budget_changed:
+            registry["_budget_state"] = budget_state
             self.save_spawn_registry(registry)
         return changed
 
@@ -515,8 +561,7 @@ class RunRecoverer:
                 self.advance()
                 changed = True
 
-            if self.respawn_actionable_roles():
-                changed = True
+            self.respawn_actionable_roles()
 
             if changed:
                 progress_made = True
