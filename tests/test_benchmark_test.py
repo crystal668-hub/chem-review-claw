@@ -8,8 +8,10 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from contextlib import redirect_stdout
 from pathlib import Path
+from typing import Iterator
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "benchmark_test.py"
@@ -18,6 +20,30 @@ benchmark_test = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = benchmark_test
 SPEC.loader.exec_module(benchmark_test)
+
+
+@contextmanager
+def patched_benchmark_runtime_paths() -> Iterator[None]:
+    original_baseline_root = benchmark_test.BASELINE_WORKSPACE_ROOT
+    original_chemqa_roots = benchmark_test.CHEMQA_WORKSPACE_ROOTS
+    original_agents_root = benchmark_test.runtime_paths.agents_root
+    original_load_slot_agents_template = benchmark_test.load_slot_agents_template
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        benchmark_test.BASELINE_WORKSPACE_ROOT = root / "benchmark-runtime"
+        benchmark_test.CHEMQA_WORKSPACE_ROOTS = {
+            "A": benchmark_test.BASELINE_WORKSPACE_ROOT / "chemqa_web_on",
+            "B": benchmark_test.BASELINE_WORKSPACE_ROOT / "chemqa_web_off",
+        }
+        benchmark_test.runtime_paths.agents_root = root / "agents"
+        benchmark_test.load_slot_agents_template = lambda: "# test slot template\n"
+        try:
+            yield
+        finally:
+            benchmark_test.BASELINE_WORKSPACE_ROOT = original_baseline_root
+            benchmark_test.CHEMQA_WORKSPACE_ROOTS = original_chemqa_roots
+            benchmark_test.runtime_paths.agents_root = original_agents_root
+            benchmark_test.load_slot_agents_template = original_load_slot_agents_template
 
 
 class JudgeStub:
@@ -194,12 +220,13 @@ Points: 0.5, Item: Second criterion
             "plugins": {"entries": {"duckduckgo": {"enabled": False, "config": {}}}},
         }
         group = benchmark_test.EXPERIMENT_GROUPS["single_llm_web_on"]
-        payload = benchmark_test.build_run_scoped_config_payload(
-            base,
-            group=group,
-            single_agent_model="qwen3.5-plus",
-            judge_model="su8/gpt-5.4",
-        )
+        with patched_benchmark_runtime_paths():
+            payload = benchmark_test.build_run_scoped_config_payload(
+                base,
+                group=group,
+                single_agent_model="qwen3.5-plus",
+                judge_model="su8/gpt-5.4",
+            )
         agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
         self.assertEqual("qwen3.5-plus", agents["benchmark-single-web-on"]["model"])
         self.assertEqual("su8/gpt-5.4", agents["benchmark-judge"]["model"])
@@ -218,12 +245,13 @@ Points: 0.5, Item: Second criterion
             runner="single_llm",
             websearch=False,
         )
-        payload = benchmark_test.build_run_scoped_config_payload(
-            base,
-            group=group,
-            single_agent_model="qwen3.5-plus",
-            judge_model="su8/gpt-5.4",
-        )
+        with patched_benchmark_runtime_paths():
+            payload = benchmark_test.build_run_scoped_config_payload(
+                base,
+                group=group,
+                single_agent_model="qwen3.5-plus",
+                judge_model="su8/gpt-5.4",
+            )
         agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
         self.assertEqual("su8/gpt-5.4", agents["benchmark-judge"]["model"])
         self.assertNotIn("thinking", agents["benchmark-judge"])
@@ -235,12 +263,13 @@ Points: 0.5, Item: Second criterion
             "plugins": {"entries": {"duckduckgo": {"enabled": False, "config": {}}}},
         }
         group = benchmark_test.EXPERIMENT_GROUPS["chemqa_web_off"]
-        payload = benchmark_test.build_run_scoped_config_payload(
-            base,
-            group=group,
-            single_agent_model="qwen3.5-plus",
-            judge_model="su8/gpt-5.4",
-        )
+        with patched_benchmark_runtime_paths():
+            payload = benchmark_test.build_run_scoped_config_payload(
+                base,
+                group=group,
+                single_agent_model="qwen3.5-plus",
+                judge_model="su8/gpt-5.4",
+            )
         agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
         self.assertEqual("su8/gpt-5.4", agents["benchmark-judge"]["model"])
         self.assertEqual("qwen3.5-plus", agents["debateB-coordinator"]["model"])
@@ -256,16 +285,34 @@ Points: 0.5, Item: Second criterion
             "plugins": {"entries": {"duckduckgo": {"enabled": False, "config": {}}}},
         }
         group = benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"]
-        payload = benchmark_test.build_run_scoped_config_payload(
-            base,
-            group=group,
-            single_agent_model="qwen3.5-plus",
-            judge_model="su8/gpt-5.4",
-        )
+        with patched_benchmark_runtime_paths():
+            payload = benchmark_test.build_run_scoped_config_payload(
+                base,
+                group=group,
+                single_agent_model="qwen3.5-plus",
+                judge_model="su8/gpt-5.4",
+            )
+            expected_root = benchmark_test.BASELINE_WORKSPACE_ROOT / "chemqa_web_on"
         agents = {entry["id"]: entry for entry in payload["agents"]["list"]}
-        expected_root = benchmark_test.BASELINE_WORKSPACE_ROOT / "chemqa_web_on"
         self.assertEqual(str((expected_root / "debateA-coordinator").resolve()), agents["debateA-coordinator"]["workspace"])
         self.assertEqual(str((expected_root / "debateA-1").resolve()), agents["debateA-1"]["workspace"])
+
+    def test_build_run_scoped_config_payload_raises_benchmark_error_when_agents_list_invalid(self) -> None:
+        base = {
+            "agents": {"list": {}},
+            "tools": {"web": {"search": {"enabled": False}}},
+            "plugins": {"entries": {"duckduckgo": {"enabled": False, "config": {}}}},
+        }
+        group = benchmark_test.EXPERIMENT_GROUPS["single_llm_web_on"]
+
+        with patched_benchmark_runtime_paths():
+            with self.assertRaises(benchmark_test.BenchmarkError):
+                benchmark_test.build_run_scoped_config_payload(
+                    base,
+                    group=group,
+                    single_agent_model="qwen3.5-plus",
+                    judge_model="su8/gpt-5.4",
+                )
 
     def test_normalize_chemqa_run_status_maps_completed_with_artifact_errors(self) -> None:
         payload = benchmark_test.normalize_chemqa_run_status({"status": "completed_with_artifact_errors"})

@@ -29,6 +29,27 @@ from typing import Any, Iterable
 import yaml
 
 try:
+    from benchmarking.config_renderer import ConfigRenderError, render_run_config
+    from benchmarking.experiments import ExperimentSpec
+    from benchmarking.provisioning import (
+        ProvisionedAgent,
+        ProvisionedExperiment,
+        ensure_basic_agent_dirs,
+        provision_slot_workspace,
+    )
+except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fallback
+    if exc.name != "benchmarking":
+        raise
+    from workspace.benchmarking.config_renderer import ConfigRenderError, render_run_config
+    from workspace.benchmarking.experiments import ExperimentSpec
+    from workspace.benchmarking.provisioning import (
+        ProvisionedAgent,
+        ProvisionedExperiment,
+        ensure_basic_agent_dirs,
+        provision_slot_workspace,
+    )
+
+try:
     from workspace import runtime_paths
     from workspace.conformabench_judge import (
         ConformaBenchDependencyError,
@@ -76,8 +97,6 @@ CHEMQA_WORKSPACE_ROOTS = {
     "A": BASELINE_WORKSPACE_ROOT / "chemqa_web_on",
     "B": BASELINE_WORKSPACE_ROOT / "chemqa_web_off",
 }
-SLOT_SENTINEL_FILENAME = ".debateclaw-slot.json"
-SLOT_SENTINEL_KIND = "debateclaw-slot-workspace"
 
 
 def current_python() -> str:
@@ -88,7 +107,6 @@ def current_python() -> str:
             if candidate.is_file():
                 return str(candidate)
     return str(Path(sys.executable).expanduser())
-SLOT_SENTINEL_VERSION = 1
 SUBSET_ORDER = (
     "chembench",
     "conformabench",
@@ -529,61 +547,24 @@ def load_slot_agents_template() -> str:
     return path.read_text(encoding="utf-8").rstrip() + "\n"
 
 
-def write_slot_sentinel(workspace: Path, *, slot_id: str, workspace_root: Path, last_session_id: str = "") -> None:
-    payload = {
-        "kind": SLOT_SENTINEL_KIND,
-        "version": SLOT_SENTINEL_VERSION,
-        "slot": slot_id,
-        "workspace": str(workspace.resolve()),
-        "workspace_root": str(workspace_root.resolve()),
-        "last_session_id": last_session_id,
-        "managed_by": "debateclaw",
-    }
-    (workspace / SLOT_SENTINEL_FILENAME).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-
-def ensure_slot_workspace(workspace: Path, *, slot_id: str, workspace_root: Path) -> None:
-    workspace_root.mkdir(parents=True, exist_ok=True)
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "AGENTS.md").write_text(load_slot_agents_template(), encoding="utf-8")
-    write_slot_sentinel(workspace, slot_id=slot_id, workspace_root=workspace_root)
-
-
-def ensure_basic_agent_dirs(*paths: Path) -> None:
-    for path in paths:
-        path.mkdir(parents=True, exist_ok=True)
-
-
-def upsert_agent_entry(
-    payload: dict[str, Any],
+def _render_run_config_or_raise(
     *,
-    agent_id: str,
-    workspace: Path,
-    agent_dir: Path,
-    model: str,
-) -> None:
-    agents = payload.setdefault("agents", {})
-    entries = agents.setdefault("list", [])
-    if not isinstance(entries, list):
-        raise BenchmarkError("OpenClaw config agents.list is not a list")
-    normalized_workspace = str(workspace.resolve())
-    normalized_agent_dir = str(agent_dir.resolve())
-    for entry in entries:
-        if isinstance(entry, dict) and str(entry.get("id", "")) == agent_id:
-            entry["name"] = agent_id
-            entry["workspace"] = normalized_workspace
-            entry["agentDir"] = normalized_agent_dir
-            entry["model"] = model
-            entry.pop("thinking", None)
-            return
-    row = {
-        "id": agent_id,
-        "name": agent_id,
-        "workspace": normalized_workspace,
-        "agentDir": normalized_agent_dir,
-        "model": model,
-    }
-    entries.append(row)
+    base_payload: dict[str, Any],
+    spec: ExperimentSpec,
+    provisioned: ProvisionedExperiment,
+    judge_model: str,
+    runner_model: str,
+) -> dict[str, Any]:
+    try:
+        return render_run_config(
+            base_payload=base_payload,
+            spec=spec,
+            provisioned=provisioned,
+            judge_model=judge_model,
+            runner_model=runner_model,
+        )
+    except ConfigRenderError as exc:
+        raise BenchmarkError(str(exc)) from exc
 
 
 def build_run_scoped_config_payload(
@@ -593,34 +574,57 @@ def build_run_scoped_config_payload(
     single_agent_model: str,
     judge_model: str,
 ) -> dict[str, Any]:
-    payload = build_temp_openclaw_config_payload(base_payload, enable_websearch=group.websearch)
     judge_workspace = BASELINE_WORKSPACE_ROOT / JUDGE_AGENT_ID
     judge_agent_dir = runtime_paths.agents_root / JUDGE_AGENT_ID / "agent"
     ensure_basic_agent_dirs(judge_workspace, judge_agent_dir)
-    upsert_agent_entry(
-        payload,
+    judge = ProvisionedAgent(
         agent_id=JUDGE_AGENT_ID,
         workspace=judge_workspace,
         agent_dir=judge_agent_dir,
-        model=judge_model,
+    )
+    runner_agents: list[ProvisionedAgent] = []
+    spec = ExperimentSpec(
+        id=group.id,
+        label=group.label,
+        runner_kind=group.runner,
+        websearch_enabled=group.websearch,
     )
 
     if group.id == "benchmark-judge-runtime":
-        return payload
+        return _render_run_config_or_raise(
+            base_payload=base_payload,
+            spec=spec,
+            provisioned=ProvisionedExperiment(judge=judge, runner_agents=()),
+            judge_model=judge_model,
+            runner_model=single_agent_model,
+        )
 
     if group.runner == "single_llm":
         agent_id = BASELINE_AGENT_IDS.get(group.id, JUDGE_AGENT_ID)
         workspace = BASELINE_WORKSPACE_ROOT / agent_id
         agent_dir = runtime_paths.agents_root / agent_id / "agent"
         ensure_basic_agent_dirs(workspace, agent_dir)
-        upsert_agent_entry(
-            payload,
-            agent_id=agent_id,
-            workspace=workspace,
-            agent_dir=agent_dir,
-            model=single_agent_model,
+        runner_agents.append(
+            ProvisionedAgent(
+                agent_id=agent_id,
+                workspace=workspace,
+                agent_dir=agent_dir,
+            )
         )
-        return payload
+        single_spec = ExperimentSpec(
+            id=group.id,
+            label=group.label,
+            runner_kind=group.runner,
+            websearch_enabled=group.websearch,
+            single_agent_id=agent_id,
+        )
+        return _render_run_config_or_raise(
+            base_payload=base_payload,
+            spec=single_spec,
+            provisioned=ProvisionedExperiment(judge=judge, runner_agents=tuple(runner_agents)),
+            judge_model=judge_model,
+            runner_model=single_agent_model,
+        )
 
     slot_set = CHEMQA_SLOT_SETS[group.id]
     workspace_root = CHEMQA_WORKSPACE_ROOTS[slot_set]
@@ -629,15 +633,33 @@ def build_run_scoped_config_payload(
         workspace = workspace_root / actual_slot_id
         agent_dir = runtime_paths.agents_root / actual_slot_id / "agent"
         ensure_basic_agent_dirs(agent_dir)
-        ensure_slot_workspace(workspace, slot_id=actual_slot_id, workspace_root=workspace_root)
-        upsert_agent_entry(
-            payload,
-            agent_id=actual_slot_id,
+        provision_slot_workspace(
             workspace=workspace,
-            agent_dir=agent_dir,
-            model=single_agent_model,
+            workspace_root=workspace_root,
+            slot_id=actual_slot_id,
+            agents_template_text=load_slot_agents_template(),
         )
-    return payload
+        runner_agents.append(
+            ProvisionedAgent(
+                agent_id=actual_slot_id,
+                workspace=workspace,
+                agent_dir=agent_dir,
+            )
+        )
+    chemqa_spec = ExperimentSpec(
+        id=group.id,
+        label=group.label,
+        runner_kind=group.runner,
+        websearch_enabled=group.websearch,
+        slot_set=slot_set,
+    )
+    return _render_run_config_or_raise(
+        base_payload=base_payload,
+        spec=chemqa_spec,
+        provisioned=ProvisionedExperiment(judge=judge, runner_agents=tuple(runner_agents)),
+        judge_model=judge_model,
+        runner_model=single_agent_model,
+    )
 
 
 def run_subprocess(

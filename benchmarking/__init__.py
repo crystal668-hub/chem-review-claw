@@ -1,11 +1,11 @@
-from benchmarking.contracts import (
+from .contracts import (
     AnswerPayload,
     FailureInfo,
     RecoveryInfo,
     RunStatus,
     RunnerResult,
 )
-from benchmarking.experiments import ExperimentSpec
+from .experiments import ExperimentSpec
 
 __all__ = [
     "AnswerPayload",
