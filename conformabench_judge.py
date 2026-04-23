@@ -15,6 +15,10 @@ class ConformaBenchDependencyError(ConformaBenchJudgeError):
     pass
 
 
+def ensure_rdkit_available() -> None:
+    _import_rdkit()
+
+
 def resolve_hidden_judge_spec_path(record_source_file: str | Path, hidden_judge_spec_ref: str) -> Path:
     if not hidden_judge_spec_ref:
         raise ConformaBenchJudgeError("ConformaBench record is missing `hidden_judge_spec_ref`.")

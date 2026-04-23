@@ -770,6 +770,32 @@ Points: 0.5, Item: Second criterion
         self.assertIn("topology_predicates", result.details)
         self.assertIn("seed_runs", result.details)
 
+    def test_evaluate_conformabench_constructive_invokes_submission_once(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="conformabench-0002",
+            dataset="conformabench",
+            source_file="/tmp/conformabench/data/conformabench_pool.jsonl",
+            eval_kind="conformabench_constructive",
+            prompt="Design one molecule.",
+            reference_answer="Points: 1.0, Item: Submitted a chemically valid molecule in parseable SMILES form.",
+            payload={"hidden_judge_spec_ref": "conformabench-0002"},
+        )
+        hidden_path = Path("/tmp/conformabench/items/conformabench-0002/hidden_judge_spec.yaml")
+        gate_payload = {"passed": False, "canonical_smiles": "c1ccccc1"}
+        with mock.patch.object(benchmark_test, "ensure_rdkit_available", return_value=None), \
+            mock.patch.object(benchmark_test, "resolve_hidden_judge_spec_path", return_value=hidden_path), \
+            mock.patch.object(benchmark_test, "load_hidden_judge_spec", return_value={"normalization": {}}), \
+            mock.patch.object(benchmark_test, "evaluate_conformabench_submission", return_value=gate_payload) as evaluate_mock:
+            result = benchmark_test.evaluate_answer(
+                record,
+                short_answer_text="c1ccccc1",
+                full_response_text="Reasoning\nFINAL ANSWER: c1ccccc1",
+                judge=JudgeStub({}),
+            )
+
+        evaluate_mock.assert_called_once_with(final_answer_smiles="c1ccccc1", hidden_spec={"normalization": {}})
+        self.assertFalse(result.passed)
+
     def test_sample_records_per_subset_draws_requested_count(self) -> None:
         records = []
         for idx in range(3):

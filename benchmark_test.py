@@ -100,6 +100,7 @@ try:
     from workspace.conformabench_judge import (
         ConformaBenchDependencyError,
         ConformaBenchJudgeError,
+        ensure_rdkit_available,
         evaluate_submission as evaluate_conformabench_submission,
         load_hidden_judge_spec,
         resolve_hidden_judge_spec_path,
@@ -109,6 +110,7 @@ except ModuleNotFoundError:  # pragma: no cover - script entry fallback
     from conformabench_judge import (
         ConformaBenchDependencyError,
         ConformaBenchJudgeError,
+        ensure_rdkit_available,
         evaluate_submission as evaluate_conformabench_submission,
         load_hidden_judge_spec,
         resolve_hidden_judge_spec_path,
@@ -1872,9 +1874,10 @@ def evaluate_conformabench_constructive(
     hidden_ref = str(record.grading.config.get("hidden_judge_spec_ref") or record.payload.get("hidden_judge_spec_ref") or "").strip()
     if not hidden_ref:
         raise BenchmarkError(f"ConformaBench record is missing hidden_judge_spec_ref: {record.record_id}")
-    hidden_path = resolve_hidden_judge_spec_path(record.source_file, hidden_ref)
-    hidden_spec = load_hidden_judge_spec(hidden_path)
     try:
+        ensure_rdkit_available()
+        hidden_path = resolve_hidden_judge_spec_path(record.source_file, hidden_ref)
+        hidden_spec = load_hidden_judge_spec(hidden_path)
         gate_details = evaluate_conformabench_submission(final_answer_smiles=final_answer, hidden_spec=hidden_spec)
     except ConformaBenchDependencyError as exc:
         raise BenchmarkError(str(exc)) from exc
