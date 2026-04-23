@@ -21,6 +21,13 @@ assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = benchmark_test
 SPEC.loader.exec_module(benchmark_test)
 
+try:
+    from benchmarking.contracts import AnswerPayload, RecoveryInfo, RunnerResult, RunStatus
+except ModuleNotFoundError as exc:
+    if exc.name != "benchmarking":
+        raise
+    from workspace.benchmarking.contracts import AnswerPayload, RecoveryInfo, RunnerResult, RunStatus
+
 
 @contextmanager
 def patched_benchmark_runtime_paths() -> Iterator[None]:
@@ -358,6 +365,22 @@ Points: 0.5, Item: Second criterion
         self.assertEqual("done", payload["status"])
         self.assertEqual("failed", payload["terminal_state"])
         self.assertEqual("terminal_failure", payload["legacy_status"])
+
+    def test_chemqa_wait_for_terminal_status_timeout_on_half_initialized_runner_raises_benchmark_error(self) -> None:
+        runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner.chemqa_root = Path(tmpdir)
+            original_time = benchmark_test.time.time
+            original_sleep = benchmark_test.time.sleep
+            times = iter([100.0, 99.0, 101.5])
+            try:
+                benchmark_test.time.time = lambda: next(times)
+                benchmark_test.time.sleep = lambda _seconds: None
+                with self.assertRaises(benchmark_test.BenchmarkError):
+                    benchmark_test.ChemQARunner._wait_for_terminal_status(runner, "demo-run", timeout_seconds=1)
+            finally:
+                benchmark_test.time.time = original_time
+                benchmark_test.time.sleep = original_sleep
 
     def test_build_chemqa_response_from_submission_uses_direct_answer(self) -> None:
         short_text, full_text = benchmark_test.build_chemqa_response_from_submission(
@@ -1250,6 +1273,245 @@ Points: 0.5, Item: Second criterion
                 self.assertTrue((Path(tmpdir) / "per-record" / "single_llm_web_off" / "r2.json").exists())
         finally:
             benchmark_test.SingleLLMRunner = original_runner
+
+    def test_run_group_marks_unscored_recovery_as_execution_error(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="recovered-record",
+            dataset="chembench",
+            source_file="/tmp/demo.jsonl",
+            eval_kind="chembench_open_ended",
+            prompt="Q",
+            reference_answer="A",
+            payload={},
+        )
+        recovered_result = RunnerResult(
+            status=RunStatus.RECOVERED,
+            answer=AnswerPayload(
+                short_answer_text="fallback-answer",
+                full_response_text="FINAL ANSWER: fallback-answer",
+            ),
+            raw={"run_status": {"status": "done", "terminal_state": "failed"}},
+            runner_meta={
+                "run_id": "demo-run",
+                "fallback_used": True,
+                "fallback_source": "proposer-1-proposal",
+                "error": "ChemQA run `demo-run` terminated as failed (reason=stalled)",
+            },
+            recovery=RecoveryInfo(
+                source="proposer-1-proposal",
+                scored=False,
+                details={"reason": "stalled_review"},
+            ),
+        )
+
+        class StubRunner:
+            def run(self, record: object, group: object) -> RunnerResult:
+                self.called_with = (record, group)
+                return recovered_result
+
+        stub_runner = StubRunner()
+        original_build_runner = getattr(benchmark_test, "build_runner", None)
+        original_evaluate_answer = benchmark_test.evaluate_answer
+        try:
+            benchmark_test.build_runner = lambda **kwargs: stub_runner
+
+            def fail_evaluate_answer(*args, **kwargs):
+                raise AssertionError("evaluate_answer should not be called for unscored recovery")
+
+            benchmark_test.evaluate_answer = fail_evaluate_answer
+            with tempfile.TemporaryDirectory() as tmpdir:
+                results = benchmark_test.run_group(
+                    group=benchmark_test.EXPERIMENT_GROUPS["chemqa_web_off"],
+                    records=[record],
+                    output_root=Path(tmpdir),
+                    single_timeout=10,
+                    chemqa_timeout=10,
+                    judge=object(),
+                    config_path=Path(tmpdir) / "cfg.json",
+                    single_agent="benchmark-single-web-off",
+                    chemqa_root=Path(tmpdir),
+                    chemqa_model_profile="unused",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                )
+            self.assertEqual(1, len(results))
+            entry = results[0]
+            self.assertEqual("execution_error", entry.evaluation["primary_metric"])
+            self.assertFalse(entry.evaluation["passed"])
+            self.assertEqual("fallback-answer", entry.short_answer_text)
+            self.assertEqual("FINAL ANSWER: fallback-answer", entry.full_response_text)
+            self.assertEqual("FINAL ANSWER: fallback-answer", entry.answer_text)
+            self.assertEqual("demo-run", entry.runner_meta["run_id"])
+            self.assertEqual("proposer-1-proposal", entry.runner_meta["fallback_source"])
+            self.assertEqual({"status": "done", "terminal_state": "failed"}, entry.raw["run_status"])
+            self.assertEqual("ChemQA run `demo-run` terminated as failed (reason=stalled)", entry.error)
+        finally:
+            if original_build_runner is None:
+                delattr(benchmark_test, "build_runner")
+            else:
+                benchmark_test.build_runner = original_build_runner
+            benchmark_test.evaluate_answer = original_evaluate_answer
+
+    def test_run_group_accepts_structural_result_object_for_unscored_recovery(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="structural-recovery-record",
+            dataset="chembench",
+            source_file="/tmp/demo.jsonl",
+            eval_kind="chembench_open_ended",
+            prompt="Q",
+            reference_answer="A",
+            payload={},
+        )
+
+        class FakeAnswer:
+            short_answer_text = "fallback-answer"
+            full_response_text = "FINAL ANSWER: fallback-answer"
+
+        class FakeStatus:
+            value = "recovered"
+
+        class FakeResult:
+            status = FakeStatus()
+            answer = FakeAnswer()
+            raw = {"run_status": {"status": "done", "terminal_state": "failed"}}
+            runner_meta = {
+                "run_id": "demo-run",
+                "fallback_used": True,
+                "fallback_source": "test-double",
+                "error": "ChemQA run `demo-run` terminated as failed (reason=stalled)",
+            }
+            failure = None
+
+            def should_score(self) -> bool:
+                return False
+
+        class StubRunner:
+            def run(self, record: object, group: object) -> object:
+                self.called_with = (record, group)
+                return FakeResult()
+
+        stub_runner = StubRunner()
+        original_build_runner = getattr(benchmark_test, "build_runner", None)
+        original_evaluate_answer = benchmark_test.evaluate_answer
+        try:
+            benchmark_test.build_runner = lambda **kwargs: stub_runner
+
+            def fail_evaluate_answer(*args, **kwargs):
+                raise AssertionError("evaluate_answer should not be called for unscored recovery")
+
+            benchmark_test.evaluate_answer = fail_evaluate_answer
+            with tempfile.TemporaryDirectory() as tmpdir:
+                results = benchmark_test.run_group(
+                    group=benchmark_test.EXPERIMENT_GROUPS["chemqa_web_off"],
+                    records=[record],
+                    output_root=Path(tmpdir),
+                    single_timeout=10,
+                    chemqa_timeout=10,
+                    judge=object(),
+                    config_path=Path(tmpdir) / "cfg.json",
+                    single_agent="benchmark-single-web-off",
+                    chemqa_root=Path(tmpdir),
+                    chemqa_model_profile="unused",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                )
+            self.assertEqual(1, len(results))
+            entry = results[0]
+            self.assertEqual("execution_error", entry.evaluation["primary_metric"])
+            self.assertFalse(entry.evaluation["passed"])
+            self.assertEqual("fallback-answer", entry.short_answer_text)
+            self.assertEqual("FINAL ANSWER: fallback-answer", entry.full_response_text)
+            self.assertEqual("FINAL ANSWER: fallback-answer", entry.answer_text)
+            self.assertEqual("demo-run", entry.runner_meta["run_id"])
+            self.assertEqual("test-double", entry.runner_meta["fallback_source"])
+            self.assertEqual({"status": "done", "terminal_state": "failed"}, entry.raw["run_status"])
+            self.assertEqual("ChemQA run `demo-run` terminated as failed (reason=stalled)", entry.error)
+        finally:
+            if original_build_runner is None:
+                delattr(benchmark_test, "build_runner")
+            else:
+                benchmark_test.build_runner = original_build_runner
+            benchmark_test.evaluate_answer = original_evaluate_answer
+
+    def test_run_group_structural_unscored_recovery_without_failure_attr_uses_runner_meta_error(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="structural-omitted-failure-record",
+            dataset="chembench",
+            source_file="/tmp/demo.jsonl",
+            eval_kind="chembench_open_ended",
+            prompt="Q",
+            reference_answer="A",
+            payload={},
+        )
+
+        class FakeAnswer:
+            short_answer_text = "fallback-answer"
+            full_response_text = "FINAL ANSWER: fallback-answer"
+
+        class FakeStatus:
+            value = "recovered"
+
+        class FakeResult:
+            status = FakeStatus()
+            answer = FakeAnswer()
+            raw = {"run_status": {"status": "done", "terminal_state": "failed"}}
+            runner_meta = {
+                "run_id": "demo-run",
+                "fallback_used": True,
+                "fallback_source": "test-double",
+                "error": "ChemQA run `demo-run` terminated as failed (reason=stalled)",
+            }
+
+            def should_score(self) -> bool:
+                return False
+
+        class StubRunner:
+            def run(self, record: object, group: object) -> object:
+                self.called_with = (record, group)
+                return FakeResult()
+
+        stub_runner = StubRunner()
+        original_build_runner = getattr(benchmark_test, "build_runner", None)
+        original_evaluate_answer = benchmark_test.evaluate_answer
+        try:
+            benchmark_test.build_runner = lambda **kwargs: stub_runner
+
+            def fail_evaluate_answer(*args, **kwargs):
+                raise AssertionError("evaluate_answer should not be called for unscored recovery")
+
+            benchmark_test.evaluate_answer = fail_evaluate_answer
+            with tempfile.TemporaryDirectory() as tmpdir:
+                results = benchmark_test.run_group(
+                    group=benchmark_test.EXPERIMENT_GROUPS["chemqa_web_off"],
+                    records=[record],
+                    output_root=Path(tmpdir),
+                    single_timeout=10,
+                    chemqa_timeout=10,
+                    judge=object(),
+                    config_path=Path(tmpdir) / "cfg.json",
+                    single_agent="benchmark-single-web-off",
+                    chemqa_root=Path(tmpdir),
+                    chemqa_model_profile="unused",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                )
+            self.assertEqual(1, len(results))
+            entry = results[0]
+            self.assertEqual("execution_error", entry.evaluation["primary_metric"])
+            self.assertFalse(entry.evaluation["passed"])
+            self.assertEqual("fallback-answer", entry.short_answer_text)
+            self.assertEqual("FINAL ANSWER: fallback-answer", entry.full_response_text)
+            self.assertEqual("FINAL ANSWER: fallback-answer", entry.answer_text)
+            self.assertEqual("demo-run", entry.runner_meta["run_id"])
+            self.assertEqual("test-double", entry.runner_meta["fallback_source"])
+            self.assertEqual({"status": "done", "terminal_state": "failed"}, entry.raw["run_status"])
+            self.assertEqual("ChemQA run `demo-run` terminated as failed (reason=stalled)", entry.error)
+        finally:
+            if original_build_runner is None:
+                delattr(benchmark_test, "build_runner")
+            else:
+                benchmark_test.build_runner = original_build_runner
+            benchmark_test.evaluate_answer = original_evaluate_answer
 
     def test_materialize_group_failure_results_writes_error_entries(self) -> None:
         records = [

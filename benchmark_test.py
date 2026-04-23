@@ -29,6 +29,7 @@ from typing import Any, Iterable
 import yaml
 
 try:
+    from benchmarking.contracts import AnswerPayload, FailureInfo, RecoveryInfo, RunStatus, RunnerResult
     from benchmarking.config_renderer import ConfigRenderError, render_run_config
     from benchmarking.datasets import (
         BenchmarkRecord,
@@ -41,6 +42,9 @@ try:
     )
     from benchmarking.evaluation import evaluate_record, register_evaluator
     from benchmarking.experiments import ExperimentSpec
+    from benchmarking.runners import build_runner
+    from benchmarking.runners import ChemQARunner as _BenchmarkingChemQARunner
+    from benchmarking.runners import SingleLLMRunner as _BenchmarkingSingleLLMRunner
     from benchmarking.provisioning import (
         ProvisionedAgent,
         ProvisionedExperiment,
@@ -50,6 +54,7 @@ try:
 except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fallback
     if exc.name != "benchmarking":
         raise
+    from workspace.benchmarking.contracts import AnswerPayload, FailureInfo, RecoveryInfo, RunStatus, RunnerResult
     from workspace.benchmarking.config_renderer import ConfigRenderError, render_run_config
     from workspace.benchmarking.datasets import (
         BenchmarkRecord,
@@ -62,12 +67,17 @@ except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fa
     )
     from workspace.benchmarking.evaluation import evaluate_record, register_evaluator
     from workspace.benchmarking.experiments import ExperimentSpec
+    from workspace.benchmarking.runners import build_runner
+    from workspace.benchmarking.runners import ChemQARunner as _BenchmarkingChemQARunner
+    from workspace.benchmarking.runners import SingleLLMRunner as _BenchmarkingSingleLLMRunner
     from workspace.benchmarking.provisioning import (
         ProvisionedAgent,
         ProvisionedExperiment,
         ensure_basic_agent_dirs,
         provision_slot_workspace,
     )
+
+_runner_factory = build_runner
 
 try:
     from workspace import runtime_paths
@@ -117,6 +127,24 @@ CHEMQA_WORKSPACE_ROOTS = {
     "A": BASELINE_WORKSPACE_ROOT / "chemqa_web_on",
     "B": BASELINE_WORKSPACE_ROOT / "chemqa_web_off",
 }
+
+
+def RunOutput(
+    *,
+    short_answer_text: str,
+    full_response_text: str,
+    raw: dict[str, Any],
+    runner_meta: dict[str, Any],
+) -> RunnerResult:
+    return RunnerResult(
+        status=RunStatus.COMPLETED,
+        answer=AnswerPayload(
+            short_answer_text=short_answer_text,
+            full_response_text=full_response_text,
+        ),
+        raw=raw,
+        runner_meta=runner_meta,
+    )
 
 
 def current_python() -> str:
@@ -196,14 +224,6 @@ EXPERIMENT_GROUPS: dict[str, ExperimentGroup] = {
         websearch=False,
     ),
 }
-
-
-@dataclass
-class RunOutput:
-    short_answer_text: str
-    full_response_text: str
-    raw: dict[str, Any]
-    runner_meta: dict[str, Any]
 
 
 @dataclass
@@ -1496,7 +1516,7 @@ class JudgeClient:
         return parsed
 
 
-class SingleLLMRunner:
+class SingleLLMRunner(_BenchmarkingSingleLLMRunner):
     def __init__(
         self,
         *,
@@ -1505,51 +1525,24 @@ class SingleLLMRunner:
         config_path: Path,
         runtime_bundle_root: Path,
     ) -> None:
-        self.agent_id = agent_id
-        self.timeout_seconds = timeout_seconds
-        self.config_path = config_path
-        self.runtime_bundle_root = runtime_bundle_root
-
-    def run(self, record: BenchmarkRecord, group: ExperimentGroup) -> RunOutput:
-        input_bundle = ensure_runtime_bundle(record, bundle_root=self.runtime_bundle_root)
-        prompt = build_single_llm_prompt(record, websearch_enabled=group.websearch, input_bundle=input_bundle)
-        session_id = f"benchmark-{group.id}-{slugify(record.record_id, limit=40)}-{uuid.uuid4().hex[:8]}"
-        command = [
-            "openclaw",
-            "agent",
-            "--local",
-            "--agent",
-            self.agent_id,
-            "--session-id",
-            session_id,
-            "--message",
-            prompt,
-            "--thinking",
-            BENCHMARK_AGENT_THINKING,
-            "--timeout",
-            str(self.timeout_seconds),
-            "--json",
-        ]
-        env = os.environ.copy()
-        env["OPENCLAW_CONFIG_PATH"] = str(self.config_path)
-        result = run_subprocess(command, env=env, timeout=self.timeout_seconds + 30)
-        payload = parse_json_stdout(result, command)
-        result_payload = unwrap_agent_payload(payload)
-        payloads = list((result_payload.get("payloads") or []))
-        full_response_text = summarize_payloads(payloads)
-        short_answer_text, full_response_text = normalize_answer_tracks(full_response_text=full_response_text)
-        runner_meta = deep_copy_jsonish(result_payload.get("meta") or {})
-        if input_bundle is not None:
-            runner_meta["runtime_bundle"] = input_bundle.to_meta()
-        return RunOutput(
-            short_answer_text=short_answer_text,
-            full_response_text=full_response_text,
-            raw=payload,
-            runner_meta=runner_meta,
+        super().__init__(
+            agent_id=agent_id,
+            timeout_seconds=timeout_seconds,
+            config_path=config_path,
+            runtime_bundle_root=runtime_bundle_root,
+            run_subprocess=run_subprocess,
+            parse_json_stdout=parse_json_stdout,
+            unwrap_agent_payload=unwrap_agent_payload,
+            summarize_payloads=summarize_payloads,
+            normalize_answer_tracks=normalize_answer_tracks,
+            ensure_runtime_bundle=ensure_runtime_bundle,
+            build_single_llm_prompt=build_single_llm_prompt,
+            slugify=slugify,
+            benchmark_agent_thinking=BENCHMARK_AGENT_THINKING,
         )
 
 
-class ChemQARunner:
+class ChemQARunner(_BenchmarkingChemQARunner):
     def __init__(
         self,
         *,
@@ -1563,364 +1556,83 @@ class ChemQARunner:
         runtime_bundle_root: Path,
         launch_workspace_root: Path,
     ) -> None:
-        self.chemqa_root = chemqa_root
-        self.timeout_seconds = timeout_seconds
-        self.config_path = config_path
-        self.slot_set = slot_set
-        self.review_rounds = review_rounds
-        self.rebuttal_rounds = rebuttal_rounds
-        self.model_profile = model_profile
-        self.launch_script = chemqa_root / "scripts" / "launch_from_preset.py"
-        self.collect_script = chemqa_root / "scripts" / "collect_artifacts.py"
-        self.runtime_dir = chemqa_root.parent / "debateclaw-v1" / "scripts"
-        self.runtime_bundle_root = runtime_bundle_root
-        self.launch_workspace_root = launch_workspace_root
-
-    def _status_path(self, run_id: str) -> Path:
-        return self.chemqa_root / "control" / "run-status" / f"{run_id}.json"
-
-    def _read_run_status(self, run_id: str) -> dict[str, Any]:
-        status_path = self._status_path(run_id)
-        if not status_path.is_file():
-            return {}
-        return normalize_chemqa_run_status(json.loads(status_path.read_text(encoding="utf-8")))
+        super().__init__(
+            chemqa_root=chemqa_root,
+            timeout_seconds=timeout_seconds,
+            config_path=config_path,
+            slot_set=slot_set,
+            review_rounds=review_rounds,
+            rebuttal_rounds=rebuttal_rounds,
+            model_profile=model_profile,
+            runtime_bundle_root=runtime_bundle_root,
+            launch_workspace_root=launch_workspace_root,
+            launch_script=chemqa_root / "scripts" / "launch_from_preset.py",
+            collect_script=chemqa_root / "scripts" / "collect_artifacts.py",
+            runtime_dir=chemqa_root.parent / "debateclaw-v1" / "scripts",
+            current_python=current_python,
+            run_subprocess=run_subprocess,
+            parse_json_stdout=parse_json_stdout,
+            deep_copy_jsonish=deep_copy_jsonish,
+            ensure_runtime_bundle=ensure_runtime_bundle,
+            build_chemqa_goal=build_chemqa_goal,
+            cleanup_manifest_path=cleanup_manifest_path,
+            build_cleanup_manifest_payload=build_cleanup_manifest_payload,
+            write_cleanup_manifest=write_cleanup_manifest,
+            register_pending_cleanup_manifest=register_pending_cleanup_manifest,
+            update_cleanup_manifest=update_cleanup_manifest,
+            invoke_cleanroom_cleanup=invoke_cleanroom_cleanup,
+            unregister_pending_cleanup_manifest=unregister_pending_cleanup_manifest,
+            now_stamp=now_stamp,
+            slugify=slugify,
+            default_chemqa_preset=DEFAULT_CHEMQA_PRESET,
+            default_openclaw_env_file=DEFAULT_OPENCLAW_ENV_FILE,
+            actual_slot_ids=actual_slot_ids,
+            chemqa_workspace_roots=CHEMQA_WORKSPACE_ROOTS,
+            normalize_chemqa_run_status=normalize_chemqa_run_status,
+            is_chemqa_terminal_status=is_chemqa_terminal_status,
+            is_chemqa_success_status=is_chemqa_success_status,
+            build_chemqa_full_response=build_chemqa_full_response,
+            build_chemqa_response_from_submission=build_chemqa_response_from_submission,
+            load_yaml_mapping=load_yaml_mapping,
+            normalize_space=normalize_space,
+            benchmark_error_factory=BenchmarkError,
+            cleanup_error_factory=CleanupFatalError,
+            benchmark_agent_thinking=BENCHMARK_AGENT_THINKING,
+        )
 
     def _wait_for_terminal_status(self, run_id: str, *, timeout_seconds: int) -> dict[str, Any]:
-        deadline = time.time() + timeout_seconds
-        last_status: dict[str, Any] = {}
-        while time.time() < deadline:
-            last_status = self._read_run_status(run_id)
-            if is_chemqa_terminal_status(last_status):
-                return last_status
-            time.sleep(30)
-        raise BenchmarkError(
-            f"ChemQA run `{run_id}` did not reach a terminal state within {timeout_seconds}s. Last status: {last_status}"
-        )
+        if not hasattr(self, "_is_chemqa_terminal_status"):
+            self._is_chemqa_terminal_status = is_chemqa_terminal_status
+        if not hasattr(self, "_normalize_chemqa_run_status"):
+            self._normalize_chemqa_run_status = normalize_chemqa_run_status
+        if not hasattr(self, "_benchmark_error_factory"):
+            self._benchmark_error_factory = BenchmarkError
+        return super()._wait_for_terminal_status(run_id, timeout_seconds=timeout_seconds)
 
     def _candidate_protocol_dirs(self, run_id: str, run_status: dict[str, Any]) -> list[Path]:
-        candidates: list[Path] = []
-        explicit_protocol = str(run_status.get("protocol_path") or "").strip()
-        explicit_workspace_protocol = str(run_status.get("workspace_protocol_path") or "").strip()
-        if explicit_protocol:
-            candidates.append(Path(explicit_protocol).expanduser().resolve().parent)
-        if explicit_workspace_protocol:
-            candidates.append(Path(explicit_workspace_protocol).expanduser().resolve().parent)
-
-        protocol_dir = self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id
-        candidates.append(protocol_dir)
-        coordinator_slot = actual_slot_ids(self.slot_set)["debate-coordinator"]
-        coordinator_workspace = CHEMQA_WORKSPACE_ROOTS[self.slot_set] / coordinator_slot
-        candidates.append(coordinator_workspace)
-
-        deduped: list[Path] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            key = str(candidate.resolve()) if candidate.exists() else str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(candidate)
-        return deduped
-
-    def _resolve_existing_qa_result(self, run_id: str, run_status: dict[str, Any]) -> Path | None:
-        explicit_output_dir = str(run_status.get("artifacts_output_dir") or "").strip()
-        candidate_dirs = []
-        if explicit_output_dir:
-            candidate_dirs.append(Path(explicit_output_dir).expanduser().resolve())
-        candidate_dirs.append(self.chemqa_root / "generated" / "artifacts" / run_id)
-        for directory in candidate_dirs:
-            path = directory / "qa_result.json"
-            if path.is_file():
-                return path
-        return None
-
-    def _candidate_submission_paths(self, run_id: str, run_status: dict[str, Any]) -> list[Path]:
-        candidates: list[Path] = []
-        for root in self._candidate_protocol_dirs(run_id, run_status):
-            if not root.exists():
-                continue
-            for path in root.rglob("proposer-1.md"):
-                if "proposals" not in path.parts:
-                    continue
-                candidates.append(path.resolve())
-
-        deduped: list[Path] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(candidate)
-
-        def sort_key(path: Path) -> tuple[int, float, str]:
-            match = re.search(r"epoch-(\d+)", str(path))
-            epoch = int(match.group(1)) if match else -1
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                mtime = 0.0
-            return (epoch, mtime, str(path))
-
-        return sorted(deduped, key=sort_key, reverse=True)
+        if not hasattr(self, "_actual_slot_ids"):
+            self._actual_slot_ids = actual_slot_ids
+        if not hasattr(self, "_chemqa_workspace_roots"):
+            self._chemqa_workspace_roots = CHEMQA_WORKSPACE_ROOTS
+        return super()._candidate_protocol_dirs(run_id, run_status)
 
     def _build_candidate_submission_fallback(self, run_id: str, run_status: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
-        for proposal_path in self._candidate_submission_paths(run_id, run_status):
-            proposal_payload = load_yaml_mapping(proposal_path)
-            if not proposal_payload:
-                continue
-            short_answer_text, full_response_text = build_chemqa_response_from_submission(final_submission=proposal_payload)
-            if short_answer_text:
-                return short_answer_text, full_response_text, {
-                    "fallback_source": "proposer-1-proposal",
-                    "proposal_path": str(proposal_path),
-                    "proposal_payload": proposal_payload,
-                }
+        if not hasattr(self, "_load_yaml_mapping"):
+            self._load_yaml_mapping = load_yaml_mapping
+        if not hasattr(self, "_build_chemqa_response_from_submission"):
+            self._build_chemqa_response_from_submission = build_chemqa_response_from_submission
+        if not hasattr(self, "_normalize_space"):
+            self._normalize_space = normalize_space
+        return super()._build_candidate_submission_fallback(run_id, run_status)
 
-        preview = normalize_space(str(run_status.get("final_answer_preview") or ""))
-        if preview:
-            return preview, f"FINAL ANSWER: {preview}", {
-                "fallback_source": "run-status-final-answer-preview",
-            }
-        return None
 
-    def _collect_artifacts_from_source(self, *, source_dir: Path, output_dir: Path, env: dict[str, str]) -> None:
-        command = [
-            current_python(),
-            str(self.collect_script),
-            "--skill-root",
-            str(self.chemqa_root),
-            "--source-dir",
-            str(source_dir),
-            "--output-dir",
-            str(output_dir),
-        ]
-        result = run_subprocess(command, env=env, cwd=self.chemqa_root, timeout=120)
-        parse_json_stdout(result, command)
-
-    def _ensure_artifacts(
-        self,
-        run_id: str,
-        *,
-        env: dict[str, str],
-        run_status: dict[str, Any],
-        wait_seconds: int = 120,
-        poll_seconds: int = 5,
-    ) -> Path:
-        deadline = time.time() + wait_seconds
-        last_seen_status = run_status
-        checked_sources: list[str] = []
-        while time.time() < deadline:
-            last_seen_status = self._read_run_status(run_id) or last_seen_status
-            qa_result_path = self._resolve_existing_qa_result(run_id, last_seen_status)
-            if qa_result_path is not None:
-                return qa_result_path
-
-            output_dir = Path(
-                str(last_seen_status.get("artifacts_output_dir") or (self.chemqa_root / "generated" / "artifacts" / run_id))
-            ).expanduser().resolve()
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            for source_dir in self._candidate_protocol_dirs(run_id, last_seen_status):
-                checked_sources.append(str(source_dir))
-                if (source_dir / "chemqa_review_protocol.yaml").is_file() or (source_dir / "chemqa_review_protocol.yml").is_file():
-                    self._collect_artifacts_from_source(source_dir=source_dir, output_dir=output_dir, env=env)
-                    qa_result_path = output_dir / "qa_result.json"
-                    if qa_result_path.is_file():
-                        return qa_result_path
-            time.sleep(poll_seconds)
-
-        raise BenchmarkError(
-            f"ChemQA run `{run_id}` reached terminal state but artifacts were not resolved within {wait_seconds}s. "
-            f"Last run status: {last_seen_status}. Checked sources: {checked_sources}"
-        )
-
-    def run(self, record: BenchmarkRecord, group: ExperimentGroup) -> RunOutput:
-        run_id = f"benchmark-{group.id}-{slugify(record.record_id, limit=40)}-{now_stamp()}"
-        input_bundle = ensure_runtime_bundle(record, bundle_root=self.runtime_bundle_root)
-        goal = build_chemqa_goal(record, websearch_enabled=group.websearch, input_bundle=input_bundle)
-        launch_root = self.launch_workspace_root / group.id / slugify(record.record_id, limit=80)
-        launch_home = launch_root / "home"
-        template_dir = launch_home / ".clawteam" / "templates"
-        command_map_dir = launch_root / "command-maps"
-        ensure_dir(template_dir)
-        ensure_dir(command_map_dir)
-        manifest_path = cleanup_manifest_path(self.launch_workspace_root.parent, run_id)
-        initial_manifest = build_cleanup_manifest_payload(
-            run_id=run_id,
-            benchmark_kind="chemqa",
-            group_id=group.id,
-            output_root=self.launch_workspace_root.parent,
-            launch_home=launch_home,
-            control_roots=[
-                self.chemqa_root / "control" / "runplans" / f"{run_id}.json",
-                self.chemqa_root / "control" / "run-status" / f"{run_id}.json",
-            ],
-            generated_roots=[
-                self.chemqa_root / "generated" / "command-maps" / f"{run_id}-command-map.json",
-                self.chemqa_root / "generated" / "prompt-bundles" / f"{run_id}-prompts.json",
-                self.chemqa_root / "generated" / "runtime-context" / f"{run_id}-context.json",
-            ],
-            artifact_roots=[
-                self.chemqa_root / "generated" / "artifacts" / run_id,
-                self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id,
-                launch_root,
-            ],
-            extra={
-                "record_id": record.record_id,
-                "template_dir": str(template_dir),
-                "command_map_dir": str(command_map_dir),
-            },
-        )
-        write_cleanup_manifest(manifest_path, initial_manifest)
-        register_pending_cleanup_manifest(manifest_path)
-        command = [
-            current_python(),
-            str(self.launch_script),
-            "--root",
-            str(self.chemqa_root),
-            "--preset",
-            DEFAULT_CHEMQA_PRESET,
-            "--goal",
-            goal,
-            "--run-id",
-            run_id,
-            "--model-profile",
-            self.model_profile,
-            "--slot-set",
-            self.slot_set,
-            "--openclaw-config",
-            str(self.config_path),
-            "--template-dir",
-            str(template_dir),
-            "--command-map-dir",
-            str(command_map_dir),
-            "--runtime-dir",
-            str(self.runtime_dir),
-            "--launch-mode",
-            "run",
-        ]
-        if input_bundle is not None:
-            command.extend(["--additional-file-workspace", str(input_bundle.bundle_dir)])
-        if self.review_rounds is not None:
-            command.extend(["--review-rounds", str(self.review_rounds)])
-        if self.rebuttal_rounds is not None:
-            command.extend(["--rebuttal-rounds", str(self.rebuttal_rounds)])
-
-        env = os.environ.copy()
-        env["HOME"] = str(launch_home)
-        env["OPENCLAW_CONFIG_PATH"] = str(self.config_path)
-        env["OPENCLAW_ENV_FILE"] = str(DEFAULT_OPENCLAW_ENV_FILE)
-        env["OPENCLAW_DEBATE_TRUSTED_PLUGINS"] = "duckduckgo" if group.websearch else "__none__"
-        env["BENCHMARK_CLEANROOM_RUN_ID"] = run_id
-        env["BENCHMARK_CLEANROOM_LEASE_DIR"] = str((self.launch_workspace_root.parent / "cleanroom" / "leases").resolve())
-        payload: dict[str, Any] = {}
-        try:
-            result = run_subprocess(command, env=env, cwd=self.chemqa_root, timeout=self.timeout_seconds)
-            payload = parse_json_stdout(result, command)
-            materialize = deep_copy_jsonish((payload.get("materialize") or {}))
-            update_cleanup_manifest(
-                manifest_path,
-                {
-                    "launch_home": str(launch_home.resolve()),
-                    "clawteam_data_dir": str(
-                        Path(str(materialize.get("clawteam_data_dir") or (self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id)))
-                        .expanduser()
-                        .resolve()
-                    ),
-                    "session_assignments": deep_copy_jsonish(((payload.get("compile") or {}).get("session_assignments") or {})),
-                    "control_roots": [
-                        str(self.chemqa_root / "control" / "runplans" / f"{run_id}.json"),
-                        str(self.chemqa_root / "control" / "run-status" / f"{run_id}.json"),
-                    ],
-                    "generated_roots": [
-                        str((command_map_dir / f"{run_id}-command-map.json").resolve()),
-                        str(self.chemqa_root / "generated" / "prompt-bundles" / f"{run_id}-prompts.json"),
-                        str(self.chemqa_root / "generated" / "runtime-context" / f"{run_id}-context.json"),
-                        str(template_dir),
-                    ],
-                    "artifact_roots": [
-                        str(self.chemqa_root / "generated" / "artifacts" / run_id),
-                        str(self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id),
-                        str(launch_root.resolve()),
-                    ],
-                    "launch_payload": deep_copy_jsonish(payload),
-                },
-            )
-            run_status = self._wait_for_terminal_status(run_id, timeout_seconds=self.timeout_seconds)
-            terminal_state = str(run_status.get("terminal_state") or "")
-            terminal_reason_code = str(run_status.get("terminal_reason_code") or "")
-            legacy_status = str(run_status.get("legacy_status") or "")
-            artifact_collection = deep_copy_jsonish(run_status.get("artifact_collection") or {})
-            if not is_chemqa_success_status(run_status):
-                runner_meta = {
-                    "run_id": run_id,
-                    "launch": payload,
-                    "acceptance_status": None,
-                    "terminal_state": terminal_state or "unknown",
-                    "terminal_reason_code": terminal_reason_code or "",
-                    "artifact_collection": artifact_collection,
-                    "run_status": run_status,
-                    "non_success_terminal_status": legacy_status or terminal_state or "unknown",
-                    "missing_reviewer_lanes": list(((run_status.get("phase_progress") or {}).get("missing_reviewer_lanes") or [])),
-                    "error": (
-                        f"ChemQA run ended with non-success status: "
-                        f"{terminal_state or legacy_status or 'unknown'}"
-                    ),
-                }
-                if legacy_status:
-                    runner_meta["legacy_status"] = legacy_status
-                fallback_payload = self._build_candidate_submission_fallback(run_id, run_status)
-                if input_bundle is not None:
-                    runner_meta["runtime_bundle"] = input_bundle.to_meta()
-                if fallback_payload is not None:
-                    short_answer_text, full_response_text, fallback_meta = fallback_payload
-                    runner_meta.update(
-                        {
-                            "fallback_used": True,
-                            **fallback_meta,
-                        }
-                    )
-                    return RunOutput(
-                        short_answer_text=short_answer_text,
-                        full_response_text=full_response_text,
-                        raw={"run_status": run_status, "fallback": fallback_meta},
-                        runner_meta=runner_meta,
-                    )
-                return RunOutput(short_answer_text="", full_response_text="", raw={"run_status": run_status}, runner_meta=runner_meta)
-            qa_result_path = self._ensure_artifacts(run_id, env=env, run_status=run_status)
-            qa_result = json.loads(qa_result_path.read_text(encoding="utf-8"))
-            short_answer_text, full_response_text = build_chemqa_full_response(qa_result=qa_result)
-            runner_meta = {
-                "run_id": run_id,
-                "launch": payload,
-                "qa_result_path": str(qa_result_path),
-                "acceptance_status": qa_result.get("acceptance_status"),
-                "terminal_state": terminal_state or qa_result.get("terminal_state"),
-                "terminal_reason_code": terminal_reason_code or "",
-                "artifact_collection": artifact_collection,
-                "run_status": run_status,
-            }
-            if legacy_status:
-                runner_meta["legacy_status"] = legacy_status
-            if input_bundle is not None:
-                runner_meta["runtime_bundle"] = input_bundle.to_meta()
-            return RunOutput(
-                short_answer_text=short_answer_text,
-                full_response_text=full_response_text,
-                raw=qa_result,
-                runner_meta=runner_meta,
-            )
-        finally:
-            try:
-                cleanup_report = invoke_cleanroom_cleanup(manifest_path=manifest_path)
-            except Exception as exc:
-                unregister_pending_cleanup_manifest(manifest_path)
-                raise CleanupFatalError(f"ChemQA cleanup failed for run `{run_id}`: {exc}") from exc
-            else:
-                unregister_pending_cleanup_manifest(manifest_path)
-                if payload:
-                    payload.setdefault("cleanup_report", cleanup_report)
+def build_runner(*, runner_kind: str, **kwargs):
+    return _runner_factory(
+        runner_kind=runner_kind,
+        chemqa_runner_cls=ChemQARunner,
+        single_llm_runner_cls=SingleLLMRunner,
+        **kwargs,
+    )
 
 
 def evaluate_chembench_open_ended(
@@ -2842,10 +2554,45 @@ def run_group(
     review_rounds: int | None,
     rebuttal_rounds: int | None,
 ) -> list[GroupRecordResult]:
+    def ensure_compatible_runner_result(run_result: Any) -> None:
+        missing: list[str] = []
+        should_score = getattr(run_result, "should_score", None)
+        if not callable(should_score):
+            missing.append("callable should_score()")
+        answer = getattr(run_result, "answer", None)
+        if answer is None:
+            missing.append("answer")
+        else:
+            if not hasattr(answer, "short_answer_text"):
+                missing.append("answer.short_answer_text")
+            if not hasattr(answer, "full_response_text"):
+                missing.append("answer.full_response_text")
+        if not isinstance(getattr(run_result, "runner_meta", None), dict):
+            missing.append("runner_meta: dict")
+        if not isinstance(getattr(run_result, "raw", None), dict):
+            missing.append("raw: dict")
+        if not hasattr(run_result, "status"):
+            missing.append("status")
+        failure = getattr(run_result, "failure", None)
+        if failure is not None and not hasattr(failure, "message"):
+            missing.append("failure.message")
+        if missing:
+            raise BenchmarkError(
+                f"Runner `{group.runner}` returned incompatible result object `{type(run_result).__name__}`; "
+                f"missing/invalid fields: {', '.join(missing)}"
+            )
+
+    def status_label(run_result: Any) -> str:
+        status = getattr(run_result, "status", None)
+        if status is None:
+            return "unknown"
+        return str(getattr(status, "value", status))
+
     runtime_bundle_root = output_root / "input-bundles"
     try:
         if group.runner == "chemqa":
-            runner = ChemQARunner(
+            runner = build_runner(
+                runner_kind=group.runner,
                 chemqa_root=chemqa_root,
                 timeout_seconds=chemqa_timeout,
                 config_path=config_path,
@@ -2857,7 +2604,8 @@ def run_group(
                 launch_workspace_root=output_root / "chemqa-launch",
             )
         else:
-            runner = SingleLLMRunner(
+            runner = build_runner(
+                runner_kind=group.runner,
                 agent_id=single_agent,
                 timeout_seconds=single_timeout,
                 config_path=config_path,
@@ -2877,36 +2625,56 @@ def run_group(
     for record in records:
         started = time.time()
         try:
-            run_output = runner.run(record, group)
-            evaluation = evaluate_answer(
-                record,
-                short_answer_text=run_output.short_answer_text,
-                full_response_text=run_output.full_response_text,
-                judge=judge,
-            )
-            elapsed = time.time() - started
-            answer_text = run_output.full_response_text or run_output.short_answer_text
-            entry = GroupRecordResult(
-                group_id=group.id,
-                group_label=group.label,
-                runner=group.runner,
-                websearch=group.websearch,
-                record_id=record.record_id,
-                subset=classify_subset(record),
-                dataset=record.dataset,
-                source_file=record.source_file,
-                eval_kind=record.eval_kind,
-                prompt=record.prompt,
-                reference_answer=record.reference_answer,
-                answer_text=answer_text,
-                evaluation=asdict(evaluation),
-                runner_meta=run_output.runner_meta,
-                raw=run_output.raw,
-                elapsed_seconds=elapsed,
-                error=None,
-                short_answer_text=run_output.short_answer_text,
-                full_response_text=run_output.full_response_text,
-            )
+            run_result = runner.run(record, group)
+            ensure_compatible_runner_result(run_result)
+            if run_result.should_score():
+                evaluation = evaluate_answer(
+                    record,
+                    short_answer_text=run_result.answer.short_answer_text,
+                    full_response_text=run_result.answer.full_response_text,
+                    judge=judge,
+                )
+                answer_text = run_result.answer.full_response_text or run_result.answer.short_answer_text
+                entry = GroupRecordResult(
+                    group_id=group.id,
+                    group_label=group.label,
+                    runner=group.runner,
+                    websearch=group.websearch,
+                    record_id=record.record_id,
+                    subset=classify_subset(record),
+                    dataset=record.dataset,
+                    source_file=record.source_file,
+                    eval_kind=record.eval_kind,
+                    prompt=record.prompt,
+                    reference_answer=record.reference_answer,
+                    answer_text=answer_text,
+                    evaluation=asdict(evaluation),
+                    runner_meta=run_result.runner_meta,
+                    raw=run_result.raw,
+                    elapsed_seconds=time.time() - started,
+                    error=None,
+                    short_answer_text=run_result.answer.short_answer_text,
+                    full_response_text=run_result.answer.full_response_text,
+                )
+            else:
+                runner_meta_error = str((run_result.runner_meta or {}).get("error") or "").strip()
+                failure = getattr(run_result, "failure", None)
+                failure_message = str(getattr(failure, "message", "") or "").strip()
+                error_message = (
+                    runner_meta_error
+                    or failure_message
+                    or f"Record `{record.record_id}` finished in non-success terminal status `{status_label(run_result)}`"
+                )
+                entry = build_error_group_record_result(
+                    group=group,
+                    record=record,
+                    error_message=error_message,
+                    elapsed_seconds=time.time() - started,
+                    short_answer_text=run_result.answer.short_answer_text,
+                    full_response_text=run_result.answer.full_response_text,
+                    runner_meta=run_result.runner_meta,
+                    raw=run_result.raw,
+                )
         except Exception as exc:
             elapsed = time.time() - started
             error_message = f"Record `{record.record_id}` failed in group `{group.id}`: {exc}"

@@ -42,3 +42,11 @@ class RunnerResult:
         if self.status is RunStatus.COMPLETED:
             return True
         return self.status is RunStatus.RECOVERED and self.recovery is not None and self.recovery.scored
+
+    @property
+    def short_answer_text(self) -> str:
+        return self.answer.short_answer_text
+
+    @property
+    def full_response_text(self) -> str:
+        return self.answer.full_response_text
