@@ -362,8 +362,38 @@ def apply_offset_limit(records: list[BenchmarkRecord], *, offset: int = 0, limit
     return benchmark_test.apply_offset_limit(records, offset=offset, limit=limit)
 
 
+def adapt_record_for_benchmark_test(record: BenchmarkRecord) -> Any:
+    grading = benchmark_test.GradingSpec(
+        kind=record.eval_kind,
+        reference_answer=record.reference_answer,
+        subset="",
+        config=benchmark_test.deep_copy_jsonish(
+            {
+                "preferred_score": record.payload.get("preferred_score"),
+                "relative_tolerance": record.payload.get("relative_tolerance"),
+                "track": record.payload.get("track"),
+                "options": record.payload.get("options"),
+                "reference_reasoning": record.payload.get("reference_reasoning"),
+                "hidden_judge_spec_ref": record.payload.get("hidden_judge_spec_ref"),
+                "modality": record.payload.get("modality"),
+                "source_uuid": record.payload.get("source_uuid"),
+            }
+        ),
+    )
+    return benchmark_test.BenchmarkRecord(
+        record_id=record.record_id,
+        dataset=record.dataset,
+        source_file=record.source_file,
+        prompt=record.prompt,
+        grading=grading,
+        raw_payload=benchmark_test.deep_copy_jsonish(record.payload),
+        eval_kind=record.eval_kind,
+        reference_answer=record.reference_answer,
+    )
+
+
 def classify_subset(record: BenchmarkRecord) -> str:
-    return benchmark_test.classify_subset(record)  # type: ignore[arg-type]
+    return benchmark_test.classify_subset(adapt_record_for_benchmark_test(record))
 
 
 def print_dataset_listing(paths: list[Path]) -> None:
@@ -1007,7 +1037,7 @@ def evaluate_answer(
     judge: JudgeClient,
 ) -> Any:
     return benchmark_test.evaluate_answer(
-        record,
+        adapt_record_for_benchmark_test(record),
         short_answer_text=short_answer_text,
         full_response_text=full_response_text,
         judge=judge,
@@ -1015,7 +1045,10 @@ def evaluate_answer(
 
 
 def ensure_runtime_bundle(record: BenchmarkRecord, *, bundle_root: Path) -> Any:
-    return benchmark_test.ensure_runtime_bundle(record, bundle_root=bundle_root)  # type: ignore[arg-type]
+    return benchmark_test.ensure_runtime_bundle(
+        adapt_record_for_benchmark_test(record),
+        bundle_root=bundle_root,
+    )
 
 
 def build_review_loop_goal(

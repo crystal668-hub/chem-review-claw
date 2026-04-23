@@ -58,6 +58,23 @@ class BenchmarkRLModuleTests(unittest.TestCase):
             payload={"id": record_id},
         )
 
+    def make_frontierscience_record(
+        self,
+        *,
+        eval_kind: str = "frontierscience_olympiad",
+        track: str = "olympiad",
+        record_id: str = "fs-demo",
+    ) -> benchmark_rl.BenchmarkRecord:
+        return benchmark_rl.BenchmarkRecord(
+            record_id=record_id,
+            dataset="frontierscience",
+            source_file="/tmp/frontierscience.jsonl",
+            eval_kind=eval_kind,
+            prompt="Question?",
+            reference_answer="42",
+            payload={"id": record_id, "track": track},
+        )
+
     def make_result(self, record: benchmark_rl.BenchmarkRecord, *, error: str | None = None) -> benchmark_rl.GroupRecordResult:
         return benchmark_rl.GroupRecordResult(
             group_id="review_loop_web_off",
@@ -177,6 +194,24 @@ class BenchmarkRLModuleTests(unittest.TestCase):
             self.assertEqual(1, len(records))
             self.assertEqual("Solve me", records[0].prompt)
             self.assertEqual("42", records[0].reference_answer)
+
+    def test_classify_subset_accepts_legacy_rl_record(self) -> None:
+        self.assertEqual("chembench", benchmark_rl.classify_subset(self.make_record()))
+        self.assertEqual(
+            "frontierscience_Olympiad",
+            benchmark_rl.classify_subset(self.make_frontierscience_record()),
+        )
+
+    def test_evaluate_answer_accepts_legacy_rl_record(self) -> None:
+        result = benchmark_rl.evaluate_answer(
+            self.make_record(),
+            short_answer_text="42",
+            full_response_text="FINAL ANSWER: 42",
+            judge=object(),
+        )
+
+        self.assertTrue(result.passed)
+        self.assertEqual("exact_str_match", result.primary_metric)
 
     def test_build_review_loop_goal_includes_superchem_bundle_instructions(self) -> None:
         record = benchmark_rl.BenchmarkRecord(

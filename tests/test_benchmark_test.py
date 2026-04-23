@@ -430,6 +430,99 @@ Points: 0.5, Item: Second criterion
         self.assertEqual(1.0, result.normalized_score)
         self.assertEqual(0.0, result.details["mae"])
 
+    def test_load_records_uses_problem_field_for_frontierscience(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "frontierscience" / "data" / "frontierscience_chemistry_pool.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "id": "fs-demo",
+                        "problem": "Solve me",
+                        "answer": "42",
+                        "eval_kind": "frontierscience_olympiad",
+                        "track": "olympiad",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            records = benchmark_test.load_records([path])
+            self.assertEqual(1, len(records))
+            self.assertEqual("Solve me", records[0].prompt)
+            self.assertEqual("42", records[0].reference_answer)
+
+    def test_evaluate_frontierscience_olympiad_heuristic_match(self) -> None:
+        judge = JudgeStub({"correct": False})
+        record = benchmark_test.BenchmarkRecord(
+            record_id="fs-demo",
+            dataset="frontierscience",
+            source_file="/tmp/frontierscience.jsonl",
+            eval_kind="frontierscience_olympiad",
+            prompt="What is 6 x 7?",
+            reference_answer="42",
+            payload={"track": "olympiad"},
+        )
+        result = benchmark_test.evaluate_frontierscience_olympiad(
+            record,
+            short_answer_text="42",
+            full_response_text="FINAL ANSWER: 42",
+            judge=judge,
+        )
+        self.assertTrue(result.passed)
+        self.assertEqual("heuristic", result.details["method"])
+        self.assertEqual([], judge.prompts)
+
+    def test_evaluate_answer_uses_generic_semantic_fallback(self) -> None:
+        judge = JudgeStub({"correct": False})
+        record = benchmark_test.BenchmarkRecord(
+            record_id="generic-demo",
+            dataset="customset",
+            source_file="/tmp/custom.jsonl",
+            eval_kind="custom_eval_kind",
+            prompt="Name the molecule.",
+            reference_answer="benzene",
+            payload={},
+        )
+        result = benchmark_test.evaluate_answer(
+            record,
+            short_answer_text="benzene",
+            full_response_text="FINAL ANSWER: benzene",
+            judge=judge,
+        )
+        self.assertTrue(result.passed)
+        self.assertEqual("semantic_match", result.primary_metric)
+        self.assertEqual("heuristic", result.details["method"])
+        self.assertEqual([], judge.prompts)
+
+    def test_load_records_malformed_json_propagates_decode_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "chembench" / "data" / "broken.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"id":"broken","prompt":"Q"\n', encoding="utf-8")
+
+            with self.assertRaises(json.JSONDecodeError):
+                benchmark_test.load_records([path])
+
+    def test_superchem_valid_options_uses_grading_config_before_payload(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="superchem-demo",
+            dataset="superchem",
+            source_file="/tmp/superchem.jsonl",
+            prompt="Q",
+            grading=benchmark_test.GradingSpec(
+                kind="superchem_multiple_choice_rpf",
+                reference_answer="A",
+                subset="superchem_multimodal",
+                config={"options": {"A": "x", "C": "y"}},
+            ),
+            raw_payload={},
+        )
+        self.assertEqual(("A", "C"), benchmark_test.superchem_valid_options(record))
+
     def test_classify_subset(self) -> None:
         chembench_record = benchmark_test.BenchmarkRecord(
             record_id="c1",

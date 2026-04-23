@@ -30,6 +30,16 @@ import yaml
 
 try:
     from benchmarking.config_renderer import ConfigRenderError, render_run_config
+    from benchmarking.datasets import (
+        BenchmarkRecord,
+        GradingSpec,
+        RecordValidationError,
+        classify_subset as classify_record_subset,
+        dataset_name_from_file as dataset_name_from_record_file,
+        load_records as load_benchmark_records,
+        source_pair_key as record_source_pair_key,
+    )
+    from benchmarking.evaluation import evaluate_record, register_evaluator
     from benchmarking.experiments import ExperimentSpec
     from benchmarking.provisioning import (
         ProvisionedAgent,
@@ -41,6 +51,16 @@ except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fa
     if exc.name != "benchmarking":
         raise
     from workspace.benchmarking.config_renderer import ConfigRenderError, render_run_config
+    from workspace.benchmarking.datasets import (
+        BenchmarkRecord,
+        GradingSpec,
+        RecordValidationError,
+        classify_subset as classify_record_subset,
+        dataset_name_from_file as dataset_name_from_record_file,
+        load_records as load_benchmark_records,
+        source_pair_key as record_source_pair_key,
+    )
+    from workspace.benchmarking.evaluation import evaluate_record, register_evaluator
     from workspace.benchmarking.experiments import ExperimentSpec
     from workspace.benchmarking.provisioning import (
         ProvisionedAgent,
@@ -176,17 +196,6 @@ EXPERIMENT_GROUPS: dict[str, ExperimentGroup] = {
         websearch=False,
     ),
 }
-
-
-@dataclass
-class BenchmarkRecord:
-    record_id: str
-    dataset: str
-    source_file: str
-    eval_kind: str
-    prompt: str
-    reference_answer: str
-    payload: dict[str, Any]
 
 
 @dataclass
@@ -810,59 +819,22 @@ def discover_dataset_files(root: Path) -> list[Path]:
 
 
 def dataset_name_from_file(path: Path) -> str:
-    return path.parent.parent.name
+    return dataset_name_from_record_file(path)
 
 
 def load_records(paths: Iterable[Path]) -> list[BenchmarkRecord]:
-    records: list[BenchmarkRecord] = []
-    for path in paths:
-        dataset = dataset_name_from_file(path)
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                payload = json.loads(line)
-                record_id = str(payload.get("id") or f"{dataset}-{len(records)}")
-                prompt = str(payload.get("prompt") or payload.get("problem") or payload.get("input") or payload.get("question") or "").strip()
-                if not prompt:
-                    raise BenchmarkError(f"Missing prompt/problem field in record: {record_id}")
-                reference_answer = str(payload.get("answer") or payload.get("target") or "").strip()
-                if not reference_answer:
-                    raise BenchmarkError(f"Missing answer/target field in record: {record_id}")
-                eval_kind = str(payload.get("eval_kind") or "generic_semantic").strip() or "generic_semantic"
-                records.append(
-                    BenchmarkRecord(
-                        record_id=record_id,
-                        dataset=dataset,
-                        source_file=str(path),
-                        eval_kind=eval_kind,
-                        prompt=prompt,
-                        reference_answer=reference_answer,
-                        payload=payload,
-                    )
-                )
-    return records
+    try:
+        return load_benchmark_records(paths)
+    except RecordValidationError as exc:
+        raise BenchmarkError(str(exc)) from exc
 
 
 def classify_subset(record: BenchmarkRecord) -> str:
-    if record.dataset == "chembench":
-        return "chembench"
-    if record.dataset == "conformabench":
-        return "conformabench"
-    if record.dataset == "frontierscience":
-        track = str(record.payload.get("track") or "").strip().lower()
-        if track == "olympiad" or record.eval_kind == "frontierscience_olympiad":
-            return "frontierscience_Olympiad"
-        if track == "research" or record.eval_kind == "frontierscience_research":
-            return "frontierscience_Research"
-    if record.dataset == "superchem":
-        return "superchem_multimodal"
-    return f"{record.dataset}:{record.eval_kind}"
+    return classify_record_subset(record)
 
 
 def source_pair_key(record: BenchmarkRecord) -> str:
-    return str(record.payload.get("source_uuid") or record.record_id).strip() or record.record_id
+    return record_source_pair_key(record)
 
 
 def sample_superchem_pairs(
@@ -1138,7 +1110,7 @@ def maybe_json_loads(text: str) -> Any | None:
 
 
 def superchem_valid_options(record: BenchmarkRecord) -> tuple[str, ...]:
-    options = record.payload.get("options") or {}
+    options = record.grading.config.get("options") or record.payload.get("options") or {}
     if isinstance(options, dict):
         letters = [str(key).strip().upper() for key in options.keys() if str(key).strip()]
         if letters:
@@ -1956,8 +1928,10 @@ def evaluate_chembench_open_ended(
     *,
     short_answer_text: str,
     full_response_text: str,
+    judge: JudgeClient | None = None,
 ) -> EvaluationResult:
-    expected = str(record.payload.get("target") or record.reference_answer)
+    _ = judge
+    expected = str(record.grading.reference_answer or record.payload.get("target") or record.reference_answer)
     predicted_short, _ = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
     expected_norm = normalize_loose(expected)
     predicted_norm = normalize_loose(predicted_short)
@@ -1965,7 +1939,7 @@ def evaluate_chembench_open_ended(
     expected_num = parse_numeric_scalar(expected)
     predicted_num = parse_numeric_scalar(predicted_short)
     exact_match = predicted_norm == expected_norm
-    relative_tolerance = record.payload.get("relative_tolerance")
+    relative_tolerance = record.grading.config.get("relative_tolerance")
     mae = None
     mse = None
     within_relative_tolerance = None
@@ -1980,7 +1954,7 @@ def evaluate_chembench_open_ended(
         if within_relative_tolerance:
             exact_match = True
 
-    preferred = str(record.payload.get("preferred_score") or "exact_str_match")
+    preferred = str(record.grading.config.get("preferred_score") or "exact_str_match")
     if preferred == "mae" and mae is not None:
         score = mae
         normalized_score = 1.0 / (1.0 + mae)
@@ -2044,7 +2018,7 @@ def evaluate_frontierscience_olympiad(
     full_response_text: str,
     judge: JudgeClient,
 ) -> EvaluationResult:
-    expected = record.reference_answer
+    expected = record.grading.reference_answer
     predicted, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
     heuristic = heuristic_semantic_match(expected, predicted)
     if heuristic is not None:
@@ -2144,7 +2118,7 @@ def evaluate_conformabench_constructive(
 ) -> EvaluationResult:
     short_text, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
     final_answer = extract_final_answer_line(full_text) or short_text
-    hidden_ref = str(record.payload.get("hidden_judge_spec_ref") or "").strip()
+    hidden_ref = str(record.grading.config.get("hidden_judge_spec_ref") or record.payload.get("hidden_judge_spec_ref") or "").strip()
     if not hidden_ref:
         raise BenchmarkError(f"ConformaBench record is missing hidden_judge_spec_ref: {record.record_id}")
     hidden_path = resolve_hidden_judge_spec_path(record.source_file, hidden_ref)
@@ -2165,7 +2139,7 @@ def evaluate_conformabench_constructive(
         **gate_details,
     }
 
-    rubric_items = parse_frontierscience_research_rubric(record.reference_answer)
+    rubric_items = parse_frontierscience_research_rubric(record.grading.reference_answer)
     if passed and rubric_items:
         rubric_lines = [f"{idx + 1}. [{item['points']} points] {item['description']}" for idx, item in enumerate(rubric_items)]
         max_score = float(sum(item["points"] for item in rubric_items))
@@ -2219,7 +2193,7 @@ def evaluate_frontierscience_research(
     full_response_text: str,
     judge: JudgeClient,
 ) -> EvaluationResult:
-    rubric_items = parse_frontierscience_research_rubric(record.reference_answer)
+    rubric_items = parse_frontierscience_research_rubric(record.grading.reference_answer)
     if not rubric_items:
         raise BenchmarkError(f"No rubric items parsed for record: {record.record_id}")
     rubric_lines = [f"{idx + 1}. [{item['points']} points] {item['description']}" for idx, item in enumerate(rubric_items)]
@@ -2312,11 +2286,11 @@ def evaluate_superchem_multiple_choice_rpf(
 ) -> EvaluationResult:
     valid_options = superchem_valid_options(record)
     short_text, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
-    expected = parse_superchem_option_answer(record.reference_answer, valid_options=valid_options) or record.reference_answer
+    expected = parse_superchem_option_answer(record.grading.reference_answer, valid_options=valid_options) or record.reference_answer
     predicted = parse_superchem_option_answer(short_text, valid_options=valid_options)
     answer_accuracy = 1.0 if predicted and predicted == expected else 0.0
 
-    checkpoints = parse_superchem_checkpoints(str(record.payload.get("reference_reasoning") or ""))
+    checkpoints = parse_superchem_checkpoints(str(record.grading.config.get("reference_reasoning") or record.payload.get("reference_reasoning") or ""))
     if not checkpoints:
         raise BenchmarkError(f"No SUPERChem checkpoints parsed for record: {record.record_id}")
 
@@ -2397,7 +2371,7 @@ def evaluate_generic_semantic(
     full_response_text: str,
     judge: JudgeClient,
 ) -> EvaluationResult:
-    expected = record.reference_answer
+    expected = record.grading.reference_answer
     predicted, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
     heuristic = heuristic_semantic_match(expected, predicted)
     if heuristic is not None:
@@ -2458,17 +2432,20 @@ def evaluate_answer(
     full_response_text: str,
     judge: JudgeClient,
 ) -> EvaluationResult:
-    if record.eval_kind == "chembench_open_ended":
-        return evaluate_chembench_open_ended(record, short_answer_text=short_answer_text, full_response_text=full_response_text)
-    if record.eval_kind == "conformabench_constructive":
-        return evaluate_conformabench_constructive(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
-    if record.eval_kind == "frontierscience_olympiad":
-        return evaluate_frontierscience_olympiad(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
-    if record.eval_kind == "frontierscience_research":
-        return evaluate_frontierscience_research(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
-    if record.eval_kind == "superchem_multiple_choice_rpf":
-        return evaluate_superchem_multiple_choice_rpf(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
-    return evaluate_generic_semantic(record, short_answer_text=short_answer_text, full_response_text=full_response_text, judge=judge)
+    return evaluate_record(
+        record,
+        short_answer_text=short_answer_text,
+        full_response_text=full_response_text,
+        judge=judge,
+    )
+
+
+register_evaluator("chembench_open_ended", evaluate_chembench_open_ended)
+register_evaluator("conformabench_constructive", evaluate_conformabench_constructive)
+register_evaluator("frontierscience_olympiad", evaluate_frontierscience_olympiad)
+register_evaluator("frontierscience_research", evaluate_frontierscience_research)
+register_evaluator("superchem_multiple_choice_rpf", evaluate_superchem_multiple_choice_rpf)
+register_evaluator("generic_semantic", evaluate_generic_semantic)
 
 
 def average_optional_metric(items: list[GroupRecordResult], key: str) -> float | None:
