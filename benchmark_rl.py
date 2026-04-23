@@ -36,6 +36,11 @@ try:
         load_records,
     )
     from benchmarking.evaluation import evaluate_record as evaluate_answer
+    from benchmarking.reporting import (
+        GroupRecordResult as _SharedGroupRecordResult,
+        aggregate_results,
+        build_error_group_record_result as _shared_build_error_group_record_result,
+    )
 except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fallback
     if exc.name != "benchmarking":
         raise
@@ -46,6 +51,11 @@ except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fa
         load_records,
     )
     from workspace.benchmarking.evaluation import evaluate_record as evaluate_answer
+    from workspace.benchmarking.reporting import (
+        GroupRecordResult as _SharedGroupRecordResult,
+        aggregate_results,
+        build_error_group_record_result as _shared_build_error_group_record_result,
+    )
 
 
 WORKSPACE_ROOT = runtime_paths.project_root
@@ -145,27 +155,8 @@ class RunOutput:
     runner_meta: dict[str, Any]
 
 
-@dataclass
-class GroupRecordResult:
-    group_id: str
-    group_label: str
-    runner: str
-    websearch: bool
-    record_id: str
-    subset: str
-    dataset: str
-    source_file: str
-    eval_kind: str
-    prompt: str
-    reference_answer: str
-    answer_text: str
-    evaluation: dict[str, Any]
-    runner_meta: dict[str, Any]
-    raw: dict[str, Any]
-    elapsed_seconds: float
-    error: str | None = None
-    short_answer_text: str = ""
-    full_response_text: str = ""
+class GroupRecordResult(_SharedGroupRecordResult):
+    pass
 
 
 @dataclass
@@ -939,37 +930,22 @@ def build_error_group_record_result(
     runner_meta: dict[str, Any] | None = None,
     raw: dict[str, Any] | None = None,
 ) -> GroupRecordResult:
-    evaluation = build_execution_error_evaluation(record, error_message=error_message)
-    meta = deep_copy_jsonish(runner_meta or {})
-    meta.setdefault("error", error_message)
-    payload = deep_copy_jsonish(raw or {"error": error_message})
-    short_text, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
-    compatible_answer_text = answer_text or full_text or short_text
-    return GroupRecordResult(
-        group_id=group.id,
-        group_label=group.label,
-        runner=group.runner,
-        websearch=group.websearch,
-        record_id=record.record_id,
-        subset=classify_subset(record),
-        dataset=record.dataset,
-        source_file=record.source_file,
-        eval_kind=record.eval_kind,
-        prompt=record.prompt,
-        reference_answer=record.reference_answer,
-        answer_text=compatible_answer_text,
-        evaluation=asdict(evaluation),
-        runner_meta=meta,
-        raw=payload,
+    entry = _shared_build_error_group_record_result(
+        group=group,
+        record=record,
+        error_message=error_message,
         elapsed_seconds=elapsed_seconds,
-        error=error_message,
-        short_answer_text=short_text,
-        full_response_text=full_text,
+        answer_text=answer_text,
+        short_answer_text=short_answer_text,
+        full_response_text=full_response_text,
+        runner_meta=runner_meta,
+        raw=raw,
+        classify_subset_fn=classify_subset,
+        normalize_answer_tracks_fn=normalize_answer_tracks,
+        build_execution_error_evaluation_fn=build_execution_error_evaluation,
+        deep_copy_jsonish_fn=deep_copy_jsonish,
     )
-
-
-def aggregate_results(results: list[GroupRecordResult]) -> dict[str, Any]:
-    return benchmark_test.aggregate_results(results)  # type: ignore[arg-type]
+    return GroupRecordResult(**asdict(entry))
 
 
 def ensure_runtime_bundle(record: BenchmarkRecord, *, bundle_root: Path) -> Any:

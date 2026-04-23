@@ -24,10 +24,12 @@ SPEC.loader.exec_module(benchmark_test)
 
 try:
     from benchmarking.contracts import AnswerPayload, RecoveryInfo, RunnerResult, RunStatus
+    from benchmarking.reporting import build_error_group_record_result as shared_build_error_group_record_result
 except ModuleNotFoundError as exc:
     if exc.name != "benchmarking":
         raise
     from workspace.benchmarking.contracts import AnswerPayload, RecoveryInfo, RunnerResult, RunStatus
+    from workspace.benchmarking.reporting import build_error_group_record_result as shared_build_error_group_record_result
 
 
 @contextmanager
@@ -1079,6 +1081,71 @@ Points: 0.5, Item: Second criterion
         self.assertEqual(1.0, summary["groups"]["g1"]["avg_answer_accuracy"])
         self.assertEqual(0.75, summary["groups"]["g1"]["avg_rpf"])
 
+    def test_results_json_keeps_legacy_top_level_shape(self) -> None:
+        sample = [
+            benchmark_test.GroupRecordResult(
+                group_id="g1",
+                group_label="Group 1",
+                runner="single_llm",
+                websearch=False,
+                record_id="r1",
+                subset="chembench",
+                dataset="d1",
+                source_file="/tmp/a.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="Q1",
+                reference_answer="1",
+                answer_text="1",
+                evaluation={
+                    "eval_kind": "chembench_open_ended",
+                    "score": 1.0,
+                    "max_score": 1.0,
+                    "normalized_score": 1.0,
+                    "passed": True,
+                    "primary_metric": "exact_str_match",
+                    "primary_metric_direction": "higher_is_better",
+                    "details": {},
+                },
+                runner_meta={},
+                raw={},
+                elapsed_seconds=2.0,
+            ),
+            benchmark_test.GroupRecordResult(
+                group_id="g1",
+                group_label="Group 1",
+                runner="single_llm",
+                websearch=False,
+                record_id="r2",
+                subset="chembench",
+                dataset="d1",
+                source_file="/tmp/a.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="Q2",
+                reference_answer="2",
+                answer_text="3",
+                evaluation={
+                    "eval_kind": "chembench_open_ended",
+                    "score": 0.0,
+                    "max_score": 1.0,
+                    "normalized_score": 0.0,
+                    "passed": False,
+                    "primary_metric": "exact_str_match",
+                    "primary_metric_direction": "higher_is_better",
+                    "details": {},
+                },
+                runner_meta={},
+                raw={},
+                elapsed_seconds=4.0,
+            ),
+        ]
+        summary = benchmark_test.aggregate_results(sample)
+        self.assertEqual("benchmark_test", benchmark_test.GroupRecordResult.__module__)
+        self.assertEqual("benchmarking.reporting", benchmark_test.aggregate_results.__module__)
+        self.assertEqual(["group_order", "groups", "group_subset"], list(summary.keys()))
+        self.assertEqual(["g1"], summary["group_order"])
+        self.assertIn("g1", summary["groups"])
+        self.assertIn("g1::chembench", summary["group_subset"])
+
     def test_export_csv_reports_writes_summary_files(self) -> None:
         summary = {
             "groups": {
@@ -1634,6 +1701,48 @@ Points: 0.5, Item: Second criterion
             self.assertTrue(all(item.error == "group crashed" for item in results))
             self.assertTrue((Path(tmpdir) / "per-record" / "chemqa_web_off" / "r1.json").exists())
             self.assertTrue((Path(tmpdir) / "per-record" / "chemqa_web_off" / "r2.json").exists())
+
+    def test_benchmark_test_build_error_group_record_result_preserves_legacy_compatibility(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="demo-record",
+            dataset="frontierscience",
+            source_file="/tmp/frontier.jsonl",
+            prompt="Question?",
+            grading=benchmark_test.GradingSpec(
+                kind="frontierscience_research",
+                reference_answer="42",
+                subset="frontierscience_Research",
+                config={"track": "research"},
+            ),
+            raw_payload={"track": "research"},
+        )
+        entry = benchmark_test.build_error_group_record_result(
+            group=benchmark_test.EXPERIMENT_GROUPS["single_llm_web_off"],
+            record=record,
+            error_message="boom",
+            full_response_text="Reasoning\nFinal conclusion",
+        )
+        self.assertEqual("frontierscience_Research", entry.subset)
+        self.assertEqual("Final conclusion", entry.short_answer_text)
+        self.assertEqual("Reasoning\nFinal conclusion", entry.full_response_text)
+        self.assertEqual("Reasoning\nFinal conclusion", entry.answer_text)
+
+    def test_shared_reporting_build_error_group_record_result_requires_explicit_dependencies(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="demo-record",
+            dataset="chembench",
+            source_file="/tmp/demo.jsonl",
+            eval_kind="chembench_open_ended",
+            prompt="Q",
+            reference_answer="A",
+            payload={},
+        )
+        with self.assertRaises(TypeError):
+            shared_build_error_group_record_result(
+                group=benchmark_test.EXPERIMENT_GROUPS["single_llm_web_off"],
+                record=record,
+                error_message="group crashed",
+            )
 
 
 if __name__ == "__main__":

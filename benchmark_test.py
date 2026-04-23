@@ -51,6 +51,14 @@ try:
         ensure_basic_agent_dirs,
         provision_slot_workspace,
     )
+    from benchmarking.reporting import (
+        GroupRecordResult as _SharedGroupRecordResult,
+        aggregate_bucket,
+        aggregate_results,
+        average_optional_metric,
+        build_error_group_record_result as _shared_build_error_group_record_result,
+        materialize_group_failure_results as _shared_materialize_group_failure_results,
+    )
 except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fallback
     if exc.name != "benchmarking":
         raise
@@ -75,6 +83,14 @@ except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fa
         ProvisionedExperiment,
         ensure_basic_agent_dirs,
         provision_slot_workspace,
+    )
+    from workspace.benchmarking.reporting import (
+        GroupRecordResult as _SharedGroupRecordResult,
+        aggregate_bucket,
+        aggregate_results,
+        average_optional_metric,
+        build_error_group_record_result as _shared_build_error_group_record_result,
+        materialize_group_failure_results as _shared_materialize_group_failure_results,
     )
 
 _runner_factory = build_runner
@@ -282,27 +298,8 @@ class EvaluationResult:
     details: dict[str, Any]
 
 
-@dataclass
-class GroupRecordResult:
-    group_id: str
-    group_label: str
-    runner: str
-    websearch: bool
-    record_id: str
-    subset: str
-    dataset: str
-    source_file: str
-    eval_kind: str
-    prompt: str
-    reference_answer: str
-    answer_text: str
-    evaluation: dict[str, Any]
-    runner_meta: dict[str, Any]
-    raw: dict[str, Any]
-    elapsed_seconds: float
-    error: str | None = None
-    short_answer_text: str = ""
-    full_response_text: str = ""
+class GroupRecordResult(_SharedGroupRecordResult):
+    pass
 
 
 def format_timestamp(epoch: float | None = None) -> str:
@@ -2202,99 +2199,6 @@ register_evaluator("superchem_multiple_choice_rpf", evaluate_superchem_multiple_
 register_evaluator("generic_semantic", evaluate_generic_semantic)
 
 
-def average_optional_metric(items: list[GroupRecordResult], key: str) -> float | None:
-    values: list[float] = []
-    for item in items:
-        details = item.evaluation.get("details") or {}
-        value = details.get(key)
-        if isinstance(value, (int, float)):
-            values.append(float(value))
-    if not values:
-        return None
-    return sum(values) / len(values)
-
-
-def aggregate_bucket(items: list[GroupRecordResult]) -> dict[str, Any]:
-    return {
-        "count": len(items),
-        "pass_count": sum(1 for item in items if item.evaluation["passed"]),
-        "avg_score": sum(float(item.evaluation["score"]) for item in items) / len(items),
-        "avg_normalized_score": sum(float(item.evaluation["normalized_score"]) for item in items) / len(items),
-        "avg_elapsed_seconds": sum(float(item.elapsed_seconds) for item in items) / len(items),
-        "avg_answer_accuracy": average_optional_metric(items, "answer_accuracy"),
-        "avg_rpf": average_optional_metric(items, "rpf"),
-    }
-
-
-
-def materialize_group_failure_results(
-    *,
-    group: ExperimentGroup,
-    records: list[BenchmarkRecord],
-    output_root: Path,
-    error_message: str,
-) -> list[GroupRecordResult]:
-    group_results = [
-        build_error_group_record_result(group=group, record=record, error_message=error_message)
-        for record in records
-    ]
-    for entry in group_results:
-        save_json(output_root / "per-record" / group.id / f"{slugify(entry.record_id)}.json", asdict(entry))
-    return group_results
-
-
-
-def aggregate_results(results: list[GroupRecordResult]) -> dict[str, Any]:
-    grouped: dict[str, list[GroupRecordResult]] = {}
-    for item in results:
-        grouped.setdefault(item.group_id, []).append(item)
-
-    summary_groups: dict[str, Any] = {}
-    summary_group_subset: dict[str, dict[str, Any]] = {}
-    for group_id, items in grouped.items():
-        by_eval_kind: dict[str, list[GroupRecordResult]] = {}
-        by_subset: dict[str, list[GroupRecordResult]] = {}
-        for item in items:
-            by_eval_kind.setdefault(item.eval_kind, []).append(item)
-            by_subset.setdefault(item.subset, []).append(item)
-        bucket = aggregate_bucket(items)
-        summary_groups[group_id] = {
-            "group_label": items[0].group_label,
-            "runner": items[0].runner,
-            "websearch": items[0].websearch,
-            **bucket,
-            "by_eval_kind": {
-                eval_kind: {
-                    key: value
-                    for key, value in aggregate_bucket(eval_items).items()
-                }
-                for eval_kind, eval_items in by_eval_kind.items()
-            },
-            "by_subset": {
-                subset: {
-                    key: value
-                    for key, value in aggregate_bucket(subset_items).items()
-                }
-                for subset, subset_items in by_subset.items()
-            },
-        }
-        for subset, subset_items in by_subset.items():
-            summary_group_subset[f"{group_id}::{subset}"] = {
-                "group_id": group_id,
-                "group_label": items[0].group_label,
-                "runner": items[0].runner,
-                "websearch": items[0].websearch,
-                "subset": subset,
-                **aggregate_bucket(subset_items),
-            }
-
-    return {
-        "group_order": list(grouped.keys()),
-        "groups": summary_groups,
-        "group_subset": summary_group_subset,
-    }
-
-
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2538,7 +2442,6 @@ def build_execution_error_evaluation(record: BenchmarkRecord, *, error_message: 
     )
 
 
-
 def build_error_group_record_result(
     *,
     group: ExperimentGroup,
@@ -2551,33 +2454,44 @@ def build_error_group_record_result(
     runner_meta: dict[str, Any] | None = None,
     raw: dict[str, Any] | None = None,
 ) -> GroupRecordResult:
-    evaluation = build_execution_error_evaluation(record, error_message=error_message)
-    meta = deep_copy_jsonish(runner_meta or {})
-    meta.setdefault("error", error_message)
-    payload = deep_copy_jsonish(raw or {"error": error_message})
-    short_text, full_text = normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
-    compatible_answer_text = answer_text or full_text or short_text
-    return GroupRecordResult(
-        group_id=group.id,
-        group_label=group.label,
-        runner=group.runner,
-        websearch=group.websearch,
-        record_id=record.record_id,
-        subset=classify_subset(record),
-        dataset=record.dataset,
-        source_file=record.source_file,
-        eval_kind=record.eval_kind,
-        prompt=record.prompt,
-        reference_answer=record.reference_answer,
-        answer_text=compatible_answer_text,
-        evaluation=asdict(evaluation),
-        runner_meta=meta,
-        raw=payload,
+    entry = _shared_build_error_group_record_result(
+        group=group,
+        record=record,
+        error_message=error_message,
         elapsed_seconds=elapsed_seconds,
-        error=error_message,
-        short_answer_text=short_text,
-        full_response_text=full_text,
+        answer_text=answer_text,
+        short_answer_text=short_answer_text,
+        full_response_text=full_response_text,
+        runner_meta=runner_meta,
+        raw=raw,
+        classify_subset_fn=classify_subset,
+        normalize_answer_tracks_fn=normalize_answer_tracks,
+        build_execution_error_evaluation_fn=build_execution_error_evaluation,
+        deep_copy_jsonish_fn=deep_copy_jsonish,
     )
+    return GroupRecordResult(**asdict(entry))
+
+
+def materialize_group_failure_results(
+    *,
+    group: ExperimentGroup,
+    records: list[BenchmarkRecord],
+    output_root: Path,
+    error_message: str,
+) -> list[GroupRecordResult]:
+    entries = _shared_materialize_group_failure_results(
+        group=group,
+        records=records,
+        output_root=output_root,
+        error_message=error_message,
+        save_json_fn=save_json,
+        slugify_fn=slugify,
+        classify_subset_fn=classify_subset,
+        normalize_answer_tracks_fn=normalize_answer_tracks,
+        build_execution_error_evaluation_fn=build_execution_error_evaluation,
+        deep_copy_jsonish_fn=deep_copy_jsonish,
+    )
+    return [GroupRecordResult(**asdict(entry)) for entry in entries]
 
 
 
@@ -2656,7 +2570,11 @@ def run_group(
     except Exception as exc:
         error_message = f"Failed to initialize runner for group `{group.id}`: {exc}"
         group_results = [
-            build_error_group_record_result(group=group, record=record, error_message=error_message)
+            build_error_group_record_result(
+                group=group,
+                record=record,
+                error_message=error_message,
+            )
             for record in records
         ]
         for entry in group_results:

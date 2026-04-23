@@ -190,6 +190,24 @@ class BenchmarkRLModuleTests(unittest.TestCase):
             full_response_text="FINAL ANSWER: 42",
         )
 
+    def test_group_record_result_preserves_error_and_runner_meta_fields(self) -> None:
+        record = self.make_record()
+        group = benchmark_rl.EXPERIMENT_GROUPS["review_loop_web_off"]
+        entry = benchmark_rl.build_error_group_record_result(
+            group=group,
+            record=record,
+            error_message="runner exploded",
+            runner_meta={"run_id": "run-123"},
+            raw={"raw_error": "runner exploded"},
+        )
+        payload = asdict(entry)
+        self.assertEqual("benchmark_rl", benchmark_rl.GroupRecordResult.__module__)
+        self.assertEqual("benchmark_rl", benchmark_rl.build_error_group_record_result.__module__)
+        self.assertEqual("runner exploded", payload["error"])
+        self.assertEqual("run-123", payload["runner_meta"]["run_id"])
+        self.assertEqual("runner exploded", payload["runner_meta"]["error"])
+        self.assertEqual("runner exploded", payload["evaluation"]["details"]["error"])
+
     def make_runtime_context(self, root: Path, record: benchmark_rl.BenchmarkRecord) -> benchmark_rl.RuntimeContext:
         group = benchmark_rl.EXPERIMENT_GROUPS["review_loop_web_off"]
         return benchmark_rl.RuntimeContext(
