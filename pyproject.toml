@@ -93,3 +93,8 @@ full = [
     "chemqa[analysis]",
     "chemqa[web-ui]",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
