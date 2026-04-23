@@ -31,6 +31,89 @@ MATERIALIZE_SPEC.loader.exec_module(materialize_runplan)
 
 
 class BenchmarkRLModuleTests(unittest.TestCase):
+    def test_file_path_import_outside_repo_root_uses_workspace_benchmark_test_fallback(self) -> None:
+        import benchmarking.datasets  # noqa: F401
+        import benchmarking.evaluation  # noqa: F401
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            workspace_dir = tmp_path / "workspace"
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            (workspace_dir / "__init__.py").write_text("", encoding="utf-8")
+            (workspace_dir / "runtime_paths.py").write_text(
+                "\n".join(
+                    [
+                        "from pathlib import Path",
+                        f"project_root = Path({str(MODULE_PATH.parent)!r})",
+                        "temp_benchmarks_root = project_root / 'tmp'",
+                        "project_state_root = project_root / '.state'",
+                        "openclaw_config = project_root / 'openclaw.json'",
+                        "skills_root = project_root / 'skills'",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (workspace_dir / "benchmark_test.py").write_text(
+                "\n".join(
+                    [
+                        "from dataclasses import dataclass",
+                        "",
+                        "@dataclass",
+                        "class RuntimeBundle:",
+                        "    bundle_dir: object",
+                        "    question_markdown: object",
+                        "    image_files: list[object]",
+                        "",
+                        "def slugify(value: str, *, limit: int = 64) -> str:",
+                        "    return value[:limit]",
+                        "",
+                        "def normalize_space(text: str) -> str:",
+                        "    return ' '.join(text.split())",
+                        "",
+                        "def deep_copy_jsonish(value):",
+                        "    return value",
+                        "",
+                        "def unwrap_agent_payload(payload):",
+                        "    return payload",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            previous_cwd = Path.cwd()
+            previous_sys_path = list(sys.path)
+            previous_benchmark_test = sys.modules.pop("benchmark_test", None)
+            for name in ("workspace", "workspace.runtime_paths", "workspace.benchmark_test"):
+                sys.modules.pop(name, None)
+            try:
+                os.chdir(tmp_path)
+                sys.path = [p for p in previous_sys_path if Path(p or ".").resolve() != MODULE_PATH.parent]
+                sys.path.insert(0, str(tmp_path))
+                spec = importlib.util.spec_from_file_location("benchmark_rl_file_path_regression", MODULE_PATH)
+                self.assertIsNotNone(spec)
+                self.assertIsNotNone(spec.loader)
+                module = importlib.util.module_from_spec(spec)
+                assert spec is not None and spec.loader is not None
+                sys.modules[spec.name] = module
+                spec.loader.exec_module(module)
+                self.assertEqual("workspace.benchmark_test", module.RuntimeBundle.__module__)
+            finally:
+                os.chdir(previous_cwd)
+                sys.path = previous_sys_path
+                sys.modules.pop("benchmark_rl_file_path_regression", None)
+                for name in ("workspace", "workspace.runtime_paths", "workspace.benchmark_test"):
+                    sys.modules.pop(name, None)
+                if previous_benchmark_test is not None:
+                    sys.modules["benchmark_test"] = previous_benchmark_test
+
+    def test_load_records_uses_shared_benchmarking_dataset_module(self) -> None:
+        self.assertEqual("benchmarking.datasets", benchmark_rl.load_records.__module__)
+
+    def test_evaluate_answer_uses_shared_benchmarking_evaluation_module(self) -> None:
+        self.assertEqual("benchmarking.evaluation", benchmark_rl.evaluate_answer.__module__)
+
     def test_current_python_prefers_virtualenv_python(self) -> None:
         original_virtual_env = os.environ.get("VIRTUAL_ENV")
         try:
@@ -223,7 +306,7 @@ class BenchmarkRLModuleTests(unittest.TestCase):
             reference_answer="A",
             payload={"options": {"A": "x"}},
         )
-        bundle = benchmark_rl.benchmark_test.RuntimeBundle(
+        bundle = benchmark_rl.RuntimeBundle(
             bundle_dir=Path("/tmp/bundle"),
             question_markdown=Path("/tmp/bundle/question.md"),
             image_files=[Path("/tmp/bundle/images/img01.png")],
@@ -517,7 +600,7 @@ class BenchmarkRLModuleTests(unittest.TestCase):
             run_id = "demo-run"
             manifest_path = root / "demo.manifest.json"
             cleanup_report = {"success": True, "removed_paths": [{"path": "/tmp/demo", "removed": True}]}
-            with mock.patch.object(benchmark_rl.benchmark_test, "invoke_cleanroom_cleanup", return_value=cleanup_report) as invoke:
+            with mock.patch.object(benchmark_rl, "invoke_cleanroom_cleanup", return_value=cleanup_report) as invoke:
                 cleanup = benchmark_rl.ReviewLoopRunner._cleanup_run_state(runner, run_id, {"compile": {}}, manifest_path=manifest_path)
             self.assertEqual(cleanup_report, cleanup)
             invoke.assert_called_once_with(manifest_path=manifest_path)

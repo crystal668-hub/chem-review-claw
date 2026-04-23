@@ -224,6 +224,36 @@ EXPERIMENT_GROUPS: dict[str, ExperimentGroup] = {
         websearch=False,
     ),
 }
+EXPERIMENT_SPECS: dict[str, ExperimentSpec] = {
+    "chemqa_web_on": ExperimentSpec(
+        id="chemqa_web_on",
+        label=EXPERIMENT_GROUPS["chemqa_web_on"].label,
+        runner_kind="chemqa",
+        websearch_enabled=True,
+        slot_set=CHEMQA_SLOT_SETS["chemqa_web_on"],
+    ),
+    "chemqa_web_off": ExperimentSpec(
+        id="chemqa_web_off",
+        label=EXPERIMENT_GROUPS["chemqa_web_off"].label,
+        runner_kind="chemqa",
+        websearch_enabled=False,
+        slot_set=CHEMQA_SLOT_SETS["chemqa_web_off"],
+    ),
+    "single_llm_web_on": ExperimentSpec(
+        id="single_llm_web_on",
+        label=EXPERIMENT_GROUPS["single_llm_web_on"].label,
+        runner_kind="single_llm",
+        websearch_enabled=True,
+        single_agent_id=BASELINE_AGENT_IDS["single_llm_web_on"],
+    ),
+    "single_llm_web_off": ExperimentSpec(
+        id="single_llm_web_off",
+        label=EXPERIMENT_GROUPS["single_llm_web_off"].label,
+        runner_kind="single_llm",
+        websearch_enabled=False,
+        single_agent_id=BASELINE_AGENT_IDS["single_llm_web_off"],
+    ),
+}
 
 
 @dataclass
@@ -349,7 +379,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--limit", type=int, help="最多运行多少条题目")
     parser.add_argument("--offset", type=int, default=0, help="跳过前多少条题目")
-    parser.add_argument("--single-agent", default=DEFAULT_SINGLE_AGENT, help="单一 LLM 基线所用 agent id")
+    parser.add_argument(
+        "--single-agent-id-override",
+        help="覆盖 single_llm 组的 agent id；未提供时按实验组规范使用默认 baseline agent",
+    )
     parser.add_argument(
         "--single-agent-model",
         default=DEFAULT_SINGLE_AGENT_MODEL,
@@ -383,7 +416,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--review-rounds", type=int, help="ChemQA review rounds 覆盖值")
     parser.add_argument("--rebuttal-rounds", type=int, help="ChemQA rebuttal rounds 覆盖值")
-    parser.add_argument("--keep-temp-configs", action="store_true", help="保留临时 OpenClaw 配置文件")
     parser.add_argument("--list-datasets", action="store_true", help="列出可发现的数据集文件后退出")
     parser.add_argument(
         "--print-selected-records",
@@ -602,6 +634,7 @@ def build_run_scoped_config_payload(
     group: ExperimentGroup,
     single_agent_model: str,
     judge_model: str,
+    single_agent_id_override: str | None = None,
 ) -> dict[str, Any]:
     judge_workspace = BASELINE_WORKSPACE_ROOT / JUDGE_AGENT_ID
     judge_agent_dir = runtime_paths.agents_root / JUDGE_AGENT_ID / "agent"
@@ -612,11 +645,14 @@ def build_run_scoped_config_payload(
         agent_dir=judge_agent_dir,
     )
     runner_agents: list[ProvisionedAgent] = []
-    spec = ExperimentSpec(
-        id=group.id,
-        label=group.label,
-        runner_kind=group.runner,
-        websearch_enabled=group.websearch,
+    spec = EXPERIMENT_SPECS.get(
+        group.id,
+        ExperimentSpec(
+            id=group.id,
+            label=group.label,
+            runner_kind=group.runner,
+            websearch_enabled=group.websearch,
+        ),
     )
 
     if group.id == "benchmark-judge-runtime":
@@ -629,7 +665,9 @@ def build_run_scoped_config_payload(
         )
 
     if group.runner == "single_llm":
-        agent_id = BASELINE_AGENT_IDS.get(group.id, JUDGE_AGENT_ID)
+        agent_id = spec.resolve_single_agent_id(single_agent_id_override)
+        if not agent_id:
+            raise BenchmarkError(f"Experiment group `{group.id}` missing single-agent id in experiment spec.")
         workspace = BASELINE_WORKSPACE_ROOT / agent_id
         agent_dir = runtime_paths.agents_root / agent_id / "agent"
         ensure_basic_agent_dirs(workspace, agent_dir)
@@ -641,11 +679,12 @@ def build_run_scoped_config_payload(
             )
         )
         single_spec = ExperimentSpec(
-            id=group.id,
-            label=group.label,
-            runner_kind=group.runner,
-            websearch_enabled=group.websearch,
+            id=spec.id,
+            label=spec.label,
+            runner_kind=spec.runner_kind,
+            websearch_enabled=spec.websearch_enabled,
             single_agent_id=agent_id,
+            slot_set=spec.slot_set,
         )
         return _render_run_config_or_raise(
             base_payload=base_payload,
@@ -773,6 +812,7 @@ class ConfigPool:
         output_root: Path,
         single_agent_model: str | None = None,
         judge_model: str | None = None,
+        single_agent_id_override: str | None = None,
     ) -> None:
         self.base_config_path = base_config_path
         self.output_root = output_root
@@ -785,6 +825,7 @@ class ConfigPool:
         discovered_judge = self._discover_agent_model("debate-coordinator") or "su8/gpt-5.4"
         self._single_agent_model = str(single_agent_model or discovered_single).strip() or discovered_single
         self._judge_model = str(judge_model or discovered_judge).strip() or discovered_judge
+        self._single_agent_id_override = single_agent_id_override
 
     def _discover_agent_model(self, agent_id: str) -> str | None:
         agents = ((self._payload.get("agents") or {}).get("list") or [])
@@ -804,6 +845,7 @@ class ConfigPool:
             group=group,
             single_agent_model=self._single_agent_model,
             judge_model=self._judge_model,
+            single_agent_id_override=self._single_agent_id_override,
         )
         path = self._config_dir / f"{group.id}-openclaw.json"
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -2731,6 +2773,7 @@ def main() -> int:
         output_root=output_root,
         single_agent_model=args.single_agent_model,
         judge_model=args.judge_model,
+        single_agent_id_override=args.single_agent_id_override,
     )
     judge = JudgeClient(
         judge_agent=args.judge_agent,
@@ -2756,7 +2799,12 @@ def main() -> int:
                 for group_id in wave_group_ids:
                     group = EXPERIMENT_GROUPS[group_id]
                     config_path = config_pool.config_for_group(group)
-                    single_agent = BASELINE_AGENT_IDS.get(group.id, args.single_agent)
+                    spec = EXPERIMENT_SPECS.get(group_id)
+                    single_agent = (
+                        spec.resolve_single_agent_id(args.single_agent_id_override)
+                        if spec is not None
+                        else DEFAULT_SINGLE_AGENT
+                    )
                     future = executor.submit(
                         run_group,
                         group=group,
@@ -2867,7 +2915,11 @@ def main() -> int:
                     "group": asdict(EXPERIMENT_GROUPS[group_id]),
                     "config_path": str(config_pool.config_for_group(EXPERIMENT_GROUPS[group_id])),
                     "slot_set": CHEMQA_SLOT_SETS.get(group_id),
-                    "single_agent": BASELINE_AGENT_IDS.get(group_id),
+                    "single_agent": (
+                        EXPERIMENT_SPECS[group_id].resolve_single_agent_id(args.single_agent_id_override)
+                        if group_id in EXPERIMENT_SPECS and EXPERIMENT_GROUPS[group_id].runner == "single_llm"
+                        else None
+                    ),
                     "single_agent_model": args.single_agent_model,
                     "chemqa_model_profile": args.chemqa_model_profile if EXPERIMENT_GROUPS[group_id].runner == "chemqa" else None,
                 }

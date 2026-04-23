@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Iterator
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "benchmark_test.py"
@@ -64,6 +65,94 @@ class JudgeStub:
 
 
 class BenchmarkTestModuleTests(unittest.TestCase):
+    def test_parse_args_accepts_single_agent_id_override_and_rejects_removed_flags(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "benchmark_test.py",
+                "--single-agent-id-override",
+                "custom-single-agent",
+            ],
+        ):
+            args = benchmark_test.parse_args()
+        self.assertEqual("custom-single-agent", args.single_agent_id_override)
+
+        with mock.patch.object(sys, "argv", ["benchmark_test.py", "--keep-temp-configs"]):
+            with self.assertRaises(SystemExit):
+                benchmark_test.parse_args()
+
+        with mock.patch.object(sys, "argv", ["benchmark_test.py", "--single-agent", "custom"]):
+            with self.assertRaises(SystemExit):
+                benchmark_test.parse_args()
+
+    def test_main_single_agent_override_applies_via_experiment_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dataset_path = root / "chembench" / "data" / "bench.jsonl"
+            dataset_path.parent.mkdir(parents=True, exist_ok=True)
+            dataset_path.write_text(
+                json.dumps(
+                    {
+                        "id": "demo-record",
+                        "prompt": "Question?",
+                        "answer": "42",
+                        "eval_kind": "chembench_open_ended",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            base_config = root / "openclaw.json"
+            base_config.write_text(json.dumps({"agents": {"list": []}}, ensure_ascii=False), encoding="utf-8")
+            output_root = root / "out"
+            captured: dict[str, str] = {}
+
+            class DummyConfigPool:
+                def __init__(self, **_: object) -> None:
+                    pass
+
+                def config_for_group(self, group: object) -> Path:
+                    path = output_root / "runtime-config" / f"{getattr(group, 'id', 'group')}-openclaw.json"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("{}", encoding="utf-8")
+                    return path
+
+                def judge_config_path(self) -> Path:
+                    path = output_root / "runtime-config" / "benchmark-judge-openclaw.json"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("{}", encoding="utf-8")
+                    return path
+
+            def fake_run_group(**kwargs):
+                captured["single_agent"] = kwargs["single_agent"]
+                return []
+
+            argv = [
+                "benchmark_test.py",
+                "--benchmark-root",
+                str(root),
+                "--openclaw-config",
+                str(base_config),
+                "--exact-output-dir",
+                str(output_root),
+                "--groups",
+                "single_llm_web_off",
+                "--single-agent-id-override",
+                "custom-single-agent",
+            ]
+
+            with mock.patch.object(benchmark_test, "ConfigPool", DummyConfigPool), \
+                mock.patch.object(benchmark_test, "JudgeClient", return_value=object()), \
+                mock.patch.object(benchmark_test, "run_group", side_effect=fake_run_group), \
+                mock.patch.object(sys, "argv", argv):
+                exit_code = benchmark_test.main()
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("custom-single-agent", captured.get("single_agent"))
+
     def test_current_python_prefers_virtualenv_python(self) -> None:
         original_virtual_env = os.environ.get("VIRTUAL_ENV")
         try:

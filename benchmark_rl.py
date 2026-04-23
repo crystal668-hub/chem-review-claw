@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -18,9 +17,35 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 try:
+    import benchmark_test
+except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fallback
+    if exc.name != "benchmark_test":
+        raise
+    from workspace import benchmark_test
+
+try:
     from workspace import runtime_paths
 except ModuleNotFoundError:  # pragma: no cover - script entry fallback
     import runtime_paths
+
+try:
+    from benchmarking.datasets import (
+        BenchmarkRecord,
+        classify_subset as classify_record_subset,
+        dataset_name_from_file as dataset_name_from_record_file,
+        load_records,
+    )
+    from benchmarking.evaluation import evaluate_record as evaluate_answer
+except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fallback
+    if exc.name != "benchmarking":
+        raise
+    from workspace.benchmarking.datasets import (
+        BenchmarkRecord,
+        classify_subset as classify_record_subset,
+        dataset_name_from_file as dataset_name_from_record_file,
+        load_records,
+    )
+    from workspace.benchmarking.evaluation import evaluate_record as evaluate_answer
 
 
 WORKSPACE_ROOT = runtime_paths.project_root
@@ -33,20 +58,7 @@ DEFAULT_COLLECTOR_MODEL = "packy/gpt-5.4"
 DEFAULT_JUDGE_AGENT = "benchmark-judge"
 DEFAULT_JUDGE_MODEL = "su8/gpt-5.4"
 BENCHMARK_AGENT_THINKING = "high"
-
-
-def load_benchmark_test_module() -> Any:
-    module_path = Path(__file__).resolve().parent / "benchmark_test.py"
-    spec = importlib.util.spec_from_file_location("benchmark_test", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load benchmark_test.py from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault(spec.name, module)
-    spec.loader.exec_module(module)
-    return module
-
-
-benchmark_test = load_benchmark_test_module()
+RuntimeBundle = benchmark_test.RuntimeBundle
 
 
 def current_python() -> str:
@@ -123,17 +135,6 @@ class ExperimentGroup:
     label: str
     runner: str
     websearch: bool
-
-
-@dataclass
-class BenchmarkRecord:
-    record_id: str
-    dataset: str
-    source_file: str
-    eval_kind: str
-    prompt: str
-    reference_answer: str
-    payload: dict[str, Any]
 
 
 @dataclass
@@ -287,8 +288,12 @@ def ensure_dir(path: Path) -> None:
     benchmark_test.ensure_dir(path)
 
 
+def invoke_cleanroom_cleanup(*, manifest_path: Path) -> dict[str, Any]:
+    return benchmark_test.invoke_cleanroom_cleanup(manifest_path=manifest_path)
+
+
 def dataset_name_from_file(path: Path) -> str:
-    return path.parent.parent.name
+    return dataset_name_from_record_file(path)
 
 
 def discover_dataset_files(root: Path) -> list[Path]:
@@ -326,74 +331,12 @@ def extract_reference_answer(payload: dict[str, Any]) -> str:
     return ""
 
 
-def load_records(paths: Iterable[Path]) -> list[BenchmarkRecord]:
-    records: list[BenchmarkRecord] = []
-    for path in paths:
-        dataset = dataset_name_from_file(path)
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                payload = json.loads(line)
-                record_id = str(payload.get("id") or f"{dataset}-{len(records)}")
-                prompt = extract_prompt(payload)
-                if not prompt:
-                    raise BenchmarkError(f"Missing prompt/problem/input/question field in record: {record_id}")
-                reference_answer = extract_reference_answer(payload)
-                if not reference_answer:
-                    raise BenchmarkError(f"Missing answer/target field in record: {record_id}")
-                eval_kind = str(payload.get("eval_kind") or "generic_semantic").strip() or "generic_semantic"
-                records.append(
-                    BenchmarkRecord(
-                        record_id=record_id,
-                        dataset=dataset,
-                        source_file=str(path),
-                        eval_kind=eval_kind,
-                        prompt=prompt,
-                        reference_answer=reference_answer,
-                        payload=payload,
-                    )
-                )
-    return records
-
-
 def apply_offset_limit(records: list[BenchmarkRecord], *, offset: int = 0, limit: int | None = None) -> list[BenchmarkRecord]:
     return benchmark_test.apply_offset_limit(records, offset=offset, limit=limit)
 
 
-def adapt_record_for_benchmark_test(record: BenchmarkRecord) -> Any:
-    grading = benchmark_test.GradingSpec(
-        kind=record.eval_kind,
-        reference_answer=record.reference_answer,
-        subset="",
-        config=benchmark_test.deep_copy_jsonish(
-            {
-                "preferred_score": record.payload.get("preferred_score"),
-                "relative_tolerance": record.payload.get("relative_tolerance"),
-                "track": record.payload.get("track"),
-                "options": record.payload.get("options"),
-                "reference_reasoning": record.payload.get("reference_reasoning"),
-                "hidden_judge_spec_ref": record.payload.get("hidden_judge_spec_ref"),
-                "modality": record.payload.get("modality"),
-                "source_uuid": record.payload.get("source_uuid"),
-            }
-        ),
-    )
-    return benchmark_test.BenchmarkRecord(
-        record_id=record.record_id,
-        dataset=record.dataset,
-        source_file=record.source_file,
-        prompt=record.prompt,
-        grading=grading,
-        raw_payload=benchmark_test.deep_copy_jsonish(record.payload),
-        eval_kind=record.eval_kind,
-        reference_answer=record.reference_answer,
-    )
-
-
 def classify_subset(record: BenchmarkRecord) -> str:
-    return benchmark_test.classify_subset(adapt_record_for_benchmark_test(record))
+    return classify_record_subset(record)
 
 
 def print_dataset_listing(paths: list[Path]) -> None:
@@ -1029,24 +972,9 @@ def aggregate_results(results: list[GroupRecordResult]) -> dict[str, Any]:
     return benchmark_test.aggregate_results(results)  # type: ignore[arg-type]
 
 
-def evaluate_answer(
-    record: BenchmarkRecord,
-    *,
-    short_answer_text: str,
-    full_response_text: str,
-    judge: JudgeClient,
-) -> Any:
-    return benchmark_test.evaluate_answer(
-        adapt_record_for_benchmark_test(record),
-        short_answer_text=short_answer_text,
-        full_response_text=full_response_text,
-        judge=judge,
-    )
-
-
 def ensure_runtime_bundle(record: BenchmarkRecord, *, bundle_root: Path) -> Any:
     return benchmark_test.ensure_runtime_bundle(
-        adapt_record_for_benchmark_test(record),
+        record,
         bundle_root=bundle_root,
     )
 
@@ -1345,7 +1273,7 @@ class ReviewLoopRunner:
     def _cleanup_run_state(self, run_id: str, launch_payload: dict[str, Any] | None, manifest_path: Path | None = None) -> dict[str, Any]:
         if manifest_path is None:
             raise BenchmarkError(f"Missing cleanroom manifest for review-loop run `{run_id}`.")
-        return benchmark_test.invoke_cleanroom_cleanup(manifest_path=manifest_path)
+        return invoke_cleanroom_cleanup(manifest_path=manifest_path)
 
     def _manifest_path_for_run(self, run_id: str) -> Path:
         return benchmark_test.cleanup_manifest_path(self.cleanup_output_root, run_id)
