@@ -49,7 +49,7 @@
 - Create: `benchmarking/experiments.py`
 - Test: `tests/test_benchmark_contracts.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 import unittest
@@ -108,12 +108,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m unittest tests.test_benchmark_contracts -v`
 Expected: `ModuleNotFoundError` for `benchmarking.contracts`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```python
 # benchmarking/contracts.py
@@ -203,12 +203,12 @@ __all__ = [
 ]
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `uv run python -m unittest tests.test_benchmark_contracts -v`
 Expected: `OK`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add benchmarking/__init__.py benchmarking/contracts.py benchmarking/experiments.py tests/test_benchmark_contracts.py
@@ -223,7 +223,7 @@ git commit -m "refactor: add explicit benchmark contracts"
 - Test: `tests/test_benchmark_config_runtime.py`
 - Modify: `benchmark_test.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 import json
@@ -273,12 +273,12 @@ class BenchmarkConfigRuntimeTests(unittest.TestCase):
             self.assertEqual("debateA-1", sentinel["slot"])
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m unittest tests.test_benchmark_config_runtime -v`
 Expected: `ModuleNotFoundError` for `benchmarking.config_renderer`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```python
 # benchmarking/provisioning.py
@@ -370,7 +370,7 @@ def render_run_config(
     return payload
 ```
 
-- [ ] **Step 4: Wire `benchmark_test.py` through the new helpers**
+- [x] **Step 4: Wire `benchmark_test.py` through the new helpers**
 
 ```python
 try:
@@ -392,12 +392,12 @@ def build_run_scoped_config_payload(...):
     )
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `uv run python -m unittest tests.test_benchmark_config_runtime tests.test_benchmark_test -v`
 Expected: `OK`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add benchmarking/provisioning.py benchmarking/config_renderer.py benchmark_test.py tests/test_benchmark_config_runtime.py tests/test_benchmark_test.py
@@ -412,7 +412,7 @@ git commit -m "refactor: split benchmark config rendering from provisioning"
 - Test: `tests/test_benchmark_datasets.py`
 - Modify: `benchmark_test.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 import json
@@ -453,12 +453,12 @@ class BenchmarkDatasetsTests(unittest.TestCase):
         self.assertIn("chembench_open_ended", EVALUATORS)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m unittest tests.test_benchmark_datasets -v`
 Expected: `ModuleNotFoundError` for `benchmarking.datasets`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```python
 # benchmarking/datasets.py
@@ -576,7 +576,7 @@ def evaluate_record(record: BenchmarkRecord, *, short_answer_text: str, full_res
     return evaluator(record, short_answer_text, full_response_text, judge)
 ```
 
-- [ ] **Step 4: Port existing evaluators in `benchmark_test.py` to use `record.grading` instead of `record.payload`**
+- [x] **Step 4: Port existing evaluators in `benchmark_test.py` to use `record.grading` instead of `record.payload`**
 
 ```python
 expected = record.grading.reference_answer
@@ -593,12 +593,12 @@ register_evaluator("superchem_multiple_choice_rpf", evaluate_superchem_multiple_
 register_evaluator("generic_semantic", evaluate_generic_semantic)
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `uv run python -m unittest tests.test_benchmark_datasets tests.test_benchmark_test tests.test_benchmark_rl -v`
 Expected: `OK`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add benchmarking/datasets.py benchmarking/evaluation.py benchmark_test.py tests/test_benchmark_datasets.py tests/test_benchmark_test.py tests/test_benchmark_rl.py
@@ -614,7 +614,7 @@ git commit -m "refactor: add validated benchmark record loading and evaluator re
 - Modify: `benchmark_test.py`
 - Test: `tests/test_benchmark_test.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_run_group_marks_unscored_recovery_as_execution_error(self) -> None:
@@ -662,12 +662,12 @@ def test_run_group_marks_unscored_recovery_as_execution_error(self) -> None:
     self.assertIsNotNone(results[0].error)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m unittest tests.test_benchmark_test -v`
 Expected: `AttributeError` for missing `build_runner` or missing `RunnerResult`
 
-- [ ] **Step 3: Extract runners and factory**
+- [x] **Step 3: Extract runners and factory**
 
 ```python
 # benchmarking/runners/__init__.py
@@ -724,7 +724,7 @@ if not is_chemqa_success_status(run_status):
     )
 ```
 
-- [ ] **Step 4: Gate scoring in `run_group()`**
+- [x] **Step 4: Gate scoring in `run_group()`**
 
 ```python
 run_result = runner.run(record, group)
@@ -753,12 +753,12 @@ else:
     )
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `uv run python -m unittest tests.test_benchmark_test tests.test_benchmark_rl -v`
 Expected: `OK`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add benchmarking/runners/__init__.py benchmarking/runners/single_llm.py benchmarking/runners/chemqa.py benchmark_test.py tests/test_benchmark_test.py tests/test_benchmark_rl.py
@@ -773,7 +773,7 @@ git commit -m "refactor: make benchmark runner status explicit"
 - Modify: `tests/test_benchmark_test.py`
 - Modify: `tests/test_benchmark_rl.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_select_single_agent_override_applies_to_single_llm_groups(self) -> None:
@@ -785,12 +785,12 @@ def test_benchmark_rl_uses_shared_benchmarking_modules(self) -> None:
     self.assertEqual("benchmarking.evaluation", benchmark_rl.evaluate_answer.__module__)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m unittest tests.test_benchmark_test tests.test_benchmark_rl -v`
 Expected: current modules still resolve through `benchmark_test` wrappers
 
-- [ ] **Step 3: Replace fake CLI flags and hard-coded single-agent override behavior**
+- [x] **Step 3: Replace fake CLI flags and hard-coded single-agent override behavior**
 
 ```python
 parser.add_argument(
@@ -810,7 +810,7 @@ if spec.runner_kind == "single_llm" and not single_agent_id:
 # parser.add_argument("--keep-temp-configs", action="store_true", help="保留临时 OpenClaw 配置文件")
 ```
 
-- [ ] **Step 4: Remove dynamic file loading from `benchmark_rl.py`**
+- [x] **Step 4: Remove dynamic file loading from `benchmark_rl.py`**
 
 ```python
 try:
@@ -832,7 +832,7 @@ def load_benchmark_test_module() -> Any:
 benchmark_test = load_benchmark_test_module()
 ```
 
-- [ ] **Step 5: Collapse `benchmark_test.py` to orchestration-only imports**
+- [x] **Step 5: Collapse `benchmark_test.py` to orchestration-only imports**
 
 ```python
 from benchmarking.contracts import AnswerPayload, RunStatus, RunnerResult
@@ -845,12 +845,12 @@ from benchmarking.runners import build_runner
 
 Keep only CLI parsing, wave scheduling, judge client, and report writing in `benchmark_test.py`.
 
-- [ ] **Step 6: Run full regression**
+- [x] **Step 6: Run full regression**
 
 Run: `uv run python -m unittest tests.test_benchmark_contracts tests.test_benchmark_config_runtime tests.test_benchmark_datasets tests.test_benchmark_test tests.test_benchmark_rl -v`
 Expected: `OK`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add benchmark_test.py benchmark_rl.py tests/test_benchmark_test.py tests/test_benchmark_rl.py
@@ -866,7 +866,7 @@ git commit -m "refactor: slim benchmark CLIs and use shared modules"
 - Test: `tests/test_benchmark_test.py`
 - Test: `tests/test_benchmark_rl.py`
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 ```python
 def test_results_json_keeps_legacy_top_level_shape(self) -> None:
@@ -886,12 +886,12 @@ def test_group_record_result_preserves_error_and_runner_meta_fields(self) -> Non
     self.assertEqual("demo", entry.runner_meta["traceback"])
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m unittest tests.test_benchmark_test tests.test_benchmark_rl -v`
 Expected: failures while shared reporting helpers do not exist
 
-- [ ] **Step 3: Extract shared reporting helpers**
+- [x] **Step 3: Extract shared reporting helpers**
 
 ```python
 # benchmarking/reporting.py
@@ -915,12 +915,12 @@ def build_error_group_record_result(...):
 
 Move `aggregate_results`, `materialize_group_failure_results`, `build_error_group_record_result`, `average_optional_metric`, and `aggregate_bucket` here without changing their serialized output.
 
-- [ ] **Step 4: Run full regression**
+- [x] **Step 4: Run full regression**
 
 Run: `uv run python -m unittest tests.test_benchmark_contracts tests.test_benchmark_config_runtime tests.test_benchmark_datasets tests.test_benchmark_test tests.test_benchmark_rl -v`
 Expected: `OK`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add benchmarking/reporting.py benchmark_test.py benchmark_rl.py tests/test_benchmark_test.py tests/test_benchmark_rl.py
@@ -942,3 +942,21 @@ git commit -m "refactor: extract shared benchmark reporting"
 - Provisioning functions do not mutate config payloads.
 - No CLI flag exists without an observable effect in tests.
 - Non-success ChemQA runs no longer produce `error=None` scored entries.
+
+## Completion Status
+
+Completed on branch `benchmark-refactor`.
+
+- Task 1 committed as `ea76d04 refactor: add explicit benchmark contracts`.
+- Task 2 committed as `2df18d2 refactor: split benchmark config rendering from provisioning`.
+- Task 3 committed as `b48cd40 refactor: add validated benchmark record loading and evaluator registry`.
+- Task 4 committed as `5f286c5 refactor: make benchmark runner status explicit`.
+- Task 5 committed as `95217d8 refactor: slim benchmark CLIs and use shared modules`.
+- Task 6 committed as `f41048d refactor: extract shared benchmark reporting`.
+
+Final verification performed after Task 6:
+
+- `uv run python -m py_compile benchmarking/reporting.py benchmark_test.py benchmark_rl.py` passed.
+- Task 6 focused reporting tests passed.
+- `uv run python -m unittest tests.test_benchmark_contracts tests.test_benchmark_config_runtime tests.test_benchmark_datasets -v` passed.
+- `uv run python -m unittest tests.test_benchmark_test tests.test_benchmark_rl -v` ran 90 tests: 89 passed, with one known environment/fixture failure in `test_evaluate_conformabench_constructive_handles_current_rdkit_environment` caused by missing `rdkit` and missing ConformaBench hidden judge spec at `benchmarks/conformabench/items/conformabench-0001/hidden_judge_spec.yaml`.
