@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,20 @@ from ..contracts import AnswerPayload, FailureInfo, RecoveryInfo, RunnerResult, 
 
 
 class ChemQARunner:
+    _ARCHIVABLE_ARTIFACT_FILENAMES = (
+        "candidate_submission.json",
+        "acceptance_decision.json",
+        "submission_trace.json",
+        "submission_cycles.json",
+        "proposer_trajectory.json",
+        "reviewer_trajectories.json",
+        "review_statuses.json",
+        "final_review_items.json",
+        "final_answer.md",
+        "final_submission.json",
+        "qa_result.json",
+    )
+
     def __init__(
         self,
         *,
@@ -158,6 +173,190 @@ class ChemQARunner:
             if path.is_file():
                 return path
         return None
+
+    def _archive_dir(self, *, group_id: str, record_id: str, run_id: str) -> Path:
+        return self.launch_workspace_root.parent / "artifacts" / group_id / self._slugify(record_id, limit=80) / run_id
+
+    def _protocol_candidates_in_dir(self, source_dir: Path) -> tuple[Path, ...]:
+        return (
+            source_dir / "chemqa_review_protocol.yaml",
+            source_dir / "chemqa_review_protocol.yml",
+            source_dir / "chemqa_review_protocol.json",
+            source_dir / "debate-coordinator" / "chemqa_review_protocol.yaml",
+            source_dir / "debate-coordinator" / "chemqa_review_protocol.json",
+            source_dir / "coordinator" / "chemqa_review_protocol.yaml",
+            source_dir / "coordinator" / "chemqa_review_protocol.json",
+        )
+
+    def _resolve_protocol_file(self, run_id: str, run_status: dict[str, Any]) -> Path | None:
+        explicit_candidates = []
+        explicit_protocol = str(run_status.get("protocol_path") or "").strip()
+        explicit_workspace_protocol = str(run_status.get("workspace_protocol_path") or "").strip()
+        if explicit_protocol:
+            explicit_candidates.append(Path(explicit_protocol).expanduser().resolve())
+        if explicit_workspace_protocol:
+            explicit_candidates.append(Path(explicit_workspace_protocol).expanduser().resolve())
+
+        seen: set[str] = set()
+        for candidate in explicit_candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.is_file():
+                return candidate
+
+        for source_dir in self._candidate_protocol_dirs(run_id, run_status):
+            for candidate in self._protocol_candidates_in_dir(source_dir):
+                key = str(candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if candidate.is_file():
+                    return candidate
+        return None
+
+    def _candidate_artifact_dirs(
+        self,
+        run_id: str,
+        run_status: dict[str, Any],
+        *,
+        qa_result_path: Path | None = None,
+    ) -> list[Path]:
+        candidates: list[Path] = []
+        if qa_result_path is not None:
+            candidates.append(qa_result_path.expanduser().resolve().parent)
+        explicit_output_dir = str(run_status.get("artifacts_output_dir") or "").strip()
+        if explicit_output_dir:
+            candidates.append(Path(explicit_output_dir).expanduser().resolve())
+        candidates.append(self.chemqa_root / "generated" / "artifacts" / run_id)
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+        return deduped
+
+    def _copy_existing_artifacts(self, *, source_dir: Path, archive_dir: Path) -> None:
+        if not source_dir.is_dir():
+            return
+        for filename in self._ARCHIVABLE_ARTIFACT_FILENAMES:
+            source_path = source_dir / filename
+            if not source_path.is_file():
+                continue
+            shutil.copy2(source_path, archive_dir / filename)
+
+    def _normalize_archived_qa_result(self, archive_dir: Path) -> dict[str, Any] | None:
+        qa_result_path = archive_dir / "qa_result.json"
+        if not qa_result_path.is_file():
+            return None
+        payload = json.loads(qa_result_path.read_text(encoding="utf-8"))
+        artifact_paths = payload.get("artifact_paths")
+        if not isinstance(artifact_paths, dict):
+            artifact_paths = {}
+        normalized_paths: dict[str, str] = {}
+        key_to_filename = {
+            "candidate_submission": "candidate_submission.json",
+            "acceptance_decision": "acceptance_decision.json",
+            "submission_trace": "submission_trace.json",
+            "submission_cycles": "submission_cycles.json",
+            "proposer_trajectory": "proposer_trajectory.json",
+            "reviewer_trajectories": "reviewer_trajectories.json",
+            "review_statuses": "review_statuses.json",
+            "final_review_items": "final_review_items.json",
+            "final_answer": "final_answer.md",
+            "final_submission": "final_submission.json",
+            "qa_result": "qa_result.json",
+        }
+        for key, filename in key_to_filename.items():
+            candidate = archive_dir / filename
+            if candidate.is_file():
+                normalized_paths[key] = str(candidate)
+            elif isinstance(artifact_paths.get(key), str) and str(artifact_paths.get(key)).strip():
+                normalized_paths[key] = str(artifact_paths[key]).strip()
+        payload["artifact_paths"] = normalized_paths
+        qa_result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return payload
+
+    def _archive_artifacts(
+        self,
+        *,
+        run_id: str,
+        group_id: str,
+        record_id: str,
+        run_status: dict[str, Any],
+        env: dict[str, str],
+        qa_result_path: Path | None = None,
+    ) -> dict[str, Any]:
+        archive_dir = self._archive_dir(group_id=group_id, record_id=record_id, run_id=run_id)
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        errors: list[str] = []
+        protocol_path = self._resolve_protocol_file(run_id, run_status)
+        archived_protocol_path = ""
+        if protocol_path is not None:
+            archived_protocol = archive_dir / "chemqa_review_protocol.yaml"
+            try:
+                shutil.copy2(protocol_path, archived_protocol)
+                archived_protocol_path = str(archived_protocol)
+            except Exception as exc:
+                errors.append(f"protocol_copy_failed: {exc}")
+
+        for source_dir in self._candidate_artifact_dirs(run_id, run_status, qa_result_path=qa_result_path):
+            try:
+                self._copy_existing_artifacts(source_dir=source_dir, archive_dir=archive_dir)
+            except Exception as exc:
+                errors.append(f"artifact_copy_failed[{source_dir}]: {exc}")
+
+        archived_qa_result_path = archive_dir / "qa_result.json"
+        if not archived_qa_result_path.is_file() and protocol_path is not None:
+            try:
+                self._collect_artifacts_from_source(source_dir=protocol_path.parent, output_dir=archive_dir, env=env)
+            except Exception as exc:
+                errors.append(f"artifact_rebuild_failed: {exc}")
+
+        normalized_qa_result = None
+        if archived_qa_result_path.is_file():
+            try:
+                normalized_qa_result = self._normalize_archived_qa_result(archive_dir)
+            except Exception as exc:
+                errors.append(f"qa_result_normalization_failed: {exc}")
+
+        archived_artifact_paths: dict[str, str] = {}
+        for filename in self._ARCHIVABLE_ARTIFACT_FILENAMES:
+            archived_path = archive_dir / filename
+            if archived_path.is_file():
+                archived_artifact_paths[archived_path.stem] = str(archived_path)
+        if normalized_qa_result is not None and isinstance(normalized_qa_result.get("artifact_paths"), dict):
+            archived_artifact_paths.update(
+                {str(key): str(value) for key, value in normalized_qa_result["artifact_paths"].items() if str(value).strip()}
+            )
+
+        has_protocol = bool(archived_protocol_path)
+        has_qa_result = archived_qa_result_path.is_file()
+        if has_protocol and has_qa_result:
+            archive_status = "ok"
+        elif has_protocol:
+            archive_status = "protocol_only"
+        elif archived_artifact_paths:
+            archive_status = "artifacts_only"
+        elif errors:
+            archive_status = "error"
+        else:
+            archive_status = "missing"
+
+        return {
+            "archive_dir": str(archive_dir),
+            "archived_protocol_path": archived_protocol_path,
+            "archived_artifact_paths": archived_artifact_paths,
+            "artifact_archive_status": archive_status,
+            "artifact_archive_error": "\n".join(errors).strip(),
+            "qa_result_path": str(archived_qa_result_path) if archived_qa_result_path.is_file() else "",
+        }
 
     def _candidate_submission_paths(self, run_id: str, run_status: dict[str, Any]) -> list[Path]:
         import re
@@ -387,6 +586,13 @@ class ChemQARunner:
             artifact_collection = self._deep_copy_jsonish(run_status.get("artifact_collection") or {})
 
             if not self._is_chemqa_success_status(run_status):
+                archive_meta = self._archive_artifacts(
+                    run_id=run_id,
+                    group_id=group.id,
+                    record_id=record.record_id,
+                    run_status=run_status,
+                    env=env,
+                )
                 message = (
                     f"ChemQA run ended with non-success status: "
                     f"{terminal_state or legacy_status or 'unknown'}"
@@ -402,7 +608,11 @@ class ChemQARunner:
                     "non_success_terminal_status": legacy_status or terminal_state or "unknown",
                     "missing_reviewer_lanes": list(((run_status.get("phase_progress") or {}).get("missing_reviewer_lanes") or [])),
                     "error": message,
+                    **archive_meta,
                 }
+                archived_qa_result_path = str(archive_meta.get("qa_result_path") or "").strip()
+                if archived_qa_result_path:
+                    runner_meta["qa_result_path"] = archived_qa_result_path
                 if legacy_status:
                     runner_meta["legacy_status"] = legacy_status
                 if input_bundle is not None:
@@ -443,6 +653,17 @@ class ChemQARunner:
                 )
 
             qa_result_path = self._ensure_artifacts(run_id, env=env, run_status=run_status)
+            archive_meta = self._archive_artifacts(
+                run_id=run_id,
+                group_id=group.id,
+                record_id=record.record_id,
+                run_status=run_status,
+                env=env,
+                qa_result_path=qa_result_path,
+            )
+            archived_qa_result_path = Path(str(archive_meta.get("qa_result_path") or "").strip()).expanduser()
+            if str(archive_meta.get("qa_result_path") or "").strip() and archived_qa_result_path.is_file():
+                qa_result_path = archived_qa_result_path.resolve()
             qa_result = json.loads(qa_result_path.read_text(encoding="utf-8"))
             short_answer_text, full_response_text = self._build_chemqa_full_response(qa_result=qa_result)
             runner_meta = {
@@ -454,6 +675,7 @@ class ChemQARunner:
                 "terminal_reason_code": terminal_reason_code or "",
                 "artifact_collection": artifact_collection,
                 "run_status": run_status,
+                **archive_meta,
             }
             if legacy_status:
                 runner_meta["legacy_status"] = legacy_status

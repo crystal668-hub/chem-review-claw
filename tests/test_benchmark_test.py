@@ -1392,6 +1392,278 @@ Points: 0.5, Item: Second criterion
             benchmark_test.ChemQARunner._wait_for_terminal_status = original_wait_for_terminal_status
             benchmark_test.ChemQARunner._ensure_artifacts = original_ensure_artifacts
 
+    def test_chemqa_runner_archives_completed_artifacts_under_output_root(self) -> None:
+        original_run_subprocess = benchmark_test.run_subprocess
+        original_ensure_runtime_bundle = benchmark_test.ensure_runtime_bundle
+        original_wait_for_terminal_status = benchmark_test.ChemQARunner._wait_for_terminal_status
+        original_ensure_artifacts = benchmark_test.ChemQARunner._ensure_artifacts
+        original_invoke_cleanroom_cleanup = benchmark_test.invoke_cleanroom_cleanup
+        try:
+            benchmark_test.run_subprocess = lambda command, *, env=None, cwd=None, timeout=None: benchmark_test.subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"run_id": "demo", "launch_mode": "run", "launched": {"returncode": 0}}),
+                stderr="",
+            )
+            benchmark_test.ensure_runtime_bundle = lambda record, bundle_root: None
+            benchmark_test.invoke_cleanroom_cleanup = lambda manifest_path: {"status": "cleaned", "manifest_path": str(manifest_path)}
+            benchmark_test.ChemQARunner._wait_for_terminal_status = lambda self, run_id, timeout_seconds: {
+                "status": "done",
+                "terminal_state": "completed",
+                "terminal_reason_code": "",
+                "artifact_collection": {"status": "ok"},
+            }
+
+            def fake_ensure_artifacts(self, run_id, *, env, run_status, wait_seconds=120, poll_seconds=5):
+                scratch_dir = self.chemqa_root / "generated" / "artifacts" / run_id
+                scratch_dir.mkdir(parents=True, exist_ok=True)
+                protocol_dir = self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id
+                protocol_dir.mkdir(parents=True, exist_ok=True)
+                (protocol_dir / "chemqa_review_protocol.yaml").write_text(
+                    "question: Demo\nacceptance_status: accepted\nterminal_state: completed\nfinal_answer: c1ccccc1\n",
+                    encoding="utf-8",
+                )
+                qa_result_path = scratch_dir / "qa_result.json"
+                qa_result_path.write_text(
+                    json.dumps(
+                        {
+                            "final_answer": "c1ccccc1",
+                            "artifact_paths": {
+                                "qa_result": str(qa_result_path),
+                                "final_answer": str(scratch_dir / "final_answer.md"),
+                            },
+                            "acceptance_status": "accepted",
+                            "terminal_state": "completed",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (scratch_dir / "final_answer.md").write_text("c1ccccc1\n", encoding="utf-8")
+                return qa_result_path
+
+            benchmark_test.ChemQARunner._ensure_artifacts = fake_ensure_artifacts
+            with tempfile.TemporaryDirectory() as tmpdir:
+                output_root = Path(tmpdir) / "benchmark-output"
+                launch_root = output_root / "chemqa-launch"
+                runner = benchmark_test.ChemQARunner(
+                    chemqa_root=Path(tmpdir) / "chemqa-root",
+                    timeout_seconds=30,
+                    config_path=Path(tmpdir) / "config.json",
+                    slot_set="A",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                    model_profile="profile-x",
+                    runtime_bundle_root=Path(tmpdir) / "bundles",
+                    launch_workspace_root=launch_root,
+                )
+                record = benchmark_test.BenchmarkRecord(
+                    record_id="conformabench-0001",
+                    dataset="conformabench",
+                    source_file="/tmp/demo.jsonl",
+                    eval_kind="conformabench_constructive",
+                    prompt="Design a molecule.",
+                    reference_answer="Points: 1.0, Item: ok",
+                    payload={},
+                )
+
+                out = runner.run(record, benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"])
+
+                self.assertEqual(benchmark_test.RunStatus.COMPLETED, out.status)
+                archive_dir = output_root / "artifacts" / "chemqa_web_on" / "conformabench-0001" / out.runner_meta["run_id"]
+                self.assertEqual(str(archive_dir), out.runner_meta["archive_dir"])
+                self.assertEqual(str(archive_dir / "qa_result.json"), out.runner_meta["qa_result_path"])
+                self.assertEqual(str(archive_dir / "chemqa_review_protocol.yaml"), out.runner_meta["archived_protocol_path"])
+                self.assertEqual("ok", out.runner_meta["artifact_archive_status"])
+                self.assertTrue((archive_dir / "qa_result.json").is_file())
+                self.assertTrue((archive_dir / "chemqa_review_protocol.yaml").is_file())
+                self.assertTrue((archive_dir / "final_answer.md").is_file())
+        finally:
+            benchmark_test.run_subprocess = original_run_subprocess
+            benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
+            benchmark_test.invoke_cleanroom_cleanup = original_invoke_cleanroom_cleanup
+            benchmark_test.ChemQARunner._wait_for_terminal_status = original_wait_for_terminal_status
+            benchmark_test.ChemQARunner._ensure_artifacts = original_ensure_artifacts
+
+    def test_chemqa_runner_archives_protocol_and_rebuilds_qa_result_for_failed_terminal_run(self) -> None:
+        original_run_subprocess = benchmark_test.run_subprocess
+        original_ensure_runtime_bundle = benchmark_test.ensure_runtime_bundle
+        original_wait_for_terminal_status = benchmark_test.ChemQARunner._wait_for_terminal_status
+        original_build_candidate_submission_fallback = benchmark_test.ChemQARunner._build_candidate_submission_fallback
+        original_collect_artifacts = benchmark_test.ChemQARunner._collect_artifacts_from_source
+        original_invoke_cleanroom_cleanup = benchmark_test.invoke_cleanroom_cleanup
+        try:
+            benchmark_test.run_subprocess = lambda command, *, env=None, cwd=None, timeout=None: benchmark_test.subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"run_id": "demo", "launch_mode": "run", "launched": {"returncode": 0}}),
+                stderr="",
+            )
+            benchmark_test.ensure_runtime_bundle = lambda record, bundle_root: None
+            benchmark_test.invoke_cleanroom_cleanup = lambda manifest_path: {"status": "cleaned", "manifest_path": str(manifest_path)}
+            benchmark_test.ChemQARunner._wait_for_terminal_status = lambda self, run_id, timeout_seconds: {
+                "status": "done",
+                "terminal_state": "failed",
+                "terminal_reason_code": "lane_stalled",
+                "artifact_collection": {"status": "error"},
+                "protocol_path": str(self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id / "chemqa_review_protocol.yaml"),
+            }
+            benchmark_test.ChemQARunner._build_candidate_submission_fallback = lambda self, run_id, run_status: None
+
+            def fake_collect_artifacts(self, *, source_dir, output_dir, env):
+                output_dir.mkdir(parents=True, exist_ok=True)
+                qa_result_path = output_dir / "qa_result.json"
+                qa_result_path.write_text(
+                    json.dumps(
+                        {
+                            "final_answer": "",
+                            "artifact_paths": {"qa_result": str(qa_result_path)},
+                            "acceptance_status": "rejected",
+                            "terminal_state": "failed",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (output_dir / "final_answer.md").write_text("No accepted answer.\n", encoding="utf-8")
+
+            benchmark_test.ChemQARunner._collect_artifacts_from_source = fake_collect_artifacts
+            with tempfile.TemporaryDirectory() as tmpdir:
+                output_root = Path(tmpdir) / "benchmark-output"
+                launch_root = output_root / "chemqa-launch"
+                chemqa_root = Path(tmpdir) / "chemqa-root"
+                runner = benchmark_test.ChemQARunner(
+                    chemqa_root=chemqa_root,
+                    timeout_seconds=30,
+                    config_path=Path(tmpdir) / "config.json",
+                    slot_set="A",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                    model_profile="profile-x",
+                    runtime_bundle_root=Path(tmpdir) / "bundles",
+                    launch_workspace_root=launch_root,
+                )
+                record = benchmark_test.BenchmarkRecord(
+                    record_id="conformabench-0001",
+                    dataset="conformabench",
+                    source_file="/tmp/demo.jsonl",
+                    eval_kind="conformabench_constructive",
+                    prompt="Design a molecule.",
+                    reference_answer="Points: 1.0, Item: ok",
+                    payload={},
+                )
+                run_id = "benchmark-chemqa_web_on-conformabench-0001-20260424-000000"
+                protocol_dir = chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id
+                protocol_dir.mkdir(parents=True, exist_ok=True)
+                (protocol_dir / "chemqa_review_protocol.yaml").write_text(
+                    "question: Demo\nacceptance_status: rejected\nterminal_state: failed\nfailure_reason: lane stalled\nfinal_answer: \"\"\n",
+                    encoding="utf-8",
+                )
+                runner._now_stamp = lambda: "20260424-000000"
+
+                out = runner.run(record, benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"])
+
+                self.assertEqual(benchmark_test.RunStatus.FAILED, out.status)
+                archive_dir = output_root / "artifacts" / "chemqa_web_on" / "conformabench-0001" / run_id
+                self.assertEqual(str(archive_dir), out.runner_meta["archive_dir"])
+                self.assertEqual(str(archive_dir / "chemqa_review_protocol.yaml"), out.runner_meta["archived_protocol_path"])
+                self.assertEqual("ok", out.runner_meta["artifact_archive_status"])
+                self.assertTrue((archive_dir / "chemqa_review_protocol.yaml").is_file())
+                self.assertTrue((archive_dir / "qa_result.json").is_file())
+        finally:
+            benchmark_test.run_subprocess = original_run_subprocess
+            benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
+            benchmark_test.invoke_cleanroom_cleanup = original_invoke_cleanroom_cleanup
+            benchmark_test.ChemQARunner._wait_for_terminal_status = original_wait_for_terminal_status
+            benchmark_test.ChemQARunner._build_candidate_submission_fallback = original_build_candidate_submission_fallback
+            benchmark_test.ChemQARunner._collect_artifacts_from_source = original_collect_artifacts
+
+    def test_chemqa_runner_archives_repeated_runs_into_distinct_run_id_directories(self) -> None:
+        original_run_subprocess = benchmark_test.run_subprocess
+        original_ensure_runtime_bundle = benchmark_test.ensure_runtime_bundle
+        original_wait_for_terminal_status = benchmark_test.ChemQARunner._wait_for_terminal_status
+        original_ensure_artifacts = benchmark_test.ChemQARunner._ensure_artifacts
+        original_invoke_cleanroom_cleanup = benchmark_test.invoke_cleanroom_cleanup
+        try:
+            benchmark_test.run_subprocess = lambda command, *, env=None, cwd=None, timeout=None: benchmark_test.subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"run_id": "demo", "launch_mode": "run", "launched": {"returncode": 0}}),
+                stderr="",
+            )
+            benchmark_test.ensure_runtime_bundle = lambda record, bundle_root: None
+            benchmark_test.invoke_cleanroom_cleanup = lambda manifest_path: {"status": "cleaned", "manifest_path": str(manifest_path)}
+            benchmark_test.ChemQARunner._wait_for_terminal_status = lambda self, run_id, timeout_seconds: {
+                "status": "done",
+                "terminal_state": "completed",
+                "terminal_reason_code": "",
+                "artifact_collection": {"status": "ok"},
+            }
+
+            def fake_ensure_artifacts(self, run_id, *, env, run_status, wait_seconds=120, poll_seconds=5):
+                scratch_dir = self.chemqa_root / "generated" / "artifacts" / run_id
+                scratch_dir.mkdir(parents=True, exist_ok=True)
+                protocol_dir = self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id
+                protocol_dir.mkdir(parents=True, exist_ok=True)
+                (protocol_dir / "chemqa_review_protocol.yaml").write_text(
+                    "question: Demo\nacceptance_status: accepted\nterminal_state: completed\nfinal_answer: c1ccccc1\n",
+                    encoding="utf-8",
+                )
+                qa_result_path = scratch_dir / "qa_result.json"
+                qa_result_path.write_text(
+                    json.dumps(
+                        {
+                            "final_answer": "c1ccccc1",
+                            "artifact_paths": {"qa_result": str(qa_result_path)},
+                            "acceptance_status": "accepted",
+                            "terminal_state": "completed",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return qa_result_path
+
+            benchmark_test.ChemQARunner._ensure_artifacts = fake_ensure_artifacts
+            with tempfile.TemporaryDirectory() as tmpdir:
+                output_root = Path(tmpdir) / "benchmark-output"
+                launch_root = output_root / "chemqa-launch"
+                runner = benchmark_test.ChemQARunner(
+                    chemqa_root=Path(tmpdir) / "chemqa-root",
+                    timeout_seconds=30,
+                    config_path=Path(tmpdir) / "config.json",
+                    slot_set="A",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                    model_profile="profile-x",
+                    runtime_bundle_root=Path(tmpdir) / "bundles",
+                    launch_workspace_root=launch_root,
+                )
+                record = benchmark_test.BenchmarkRecord(
+                    record_id="conformabench-0001",
+                    dataset="conformabench",
+                    source_file="/tmp/demo.jsonl",
+                    eval_kind="conformabench_constructive",
+                    prompt="Design a molecule.",
+                    reference_answer="Points: 1.0, Item: ok",
+                    payload={},
+                )
+                stamps = iter(["20260424-000001", "20260424-000002"])
+                runner._now_stamp = lambda: next(stamps)
+
+                out1 = runner.run(record, benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"])
+                out2 = runner.run(record, benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"])
+
+                self.assertNotEqual(out1.runner_meta["run_id"], out2.runner_meta["run_id"])
+                archive1 = Path(out1.runner_meta["archive_dir"])
+                archive2 = Path(out2.runner_meta["archive_dir"])
+                self.assertNotEqual(archive1, archive2)
+                self.assertTrue((archive1 / "qa_result.json").is_file())
+                self.assertTrue((archive2 / "qa_result.json").is_file())
+        finally:
+            benchmark_test.run_subprocess = original_run_subprocess
+            benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
+            benchmark_test.invoke_cleanroom_cleanup = original_invoke_cleanroom_cleanup
+            benchmark_test.ChemQARunner._wait_for_terminal_status = original_wait_for_terminal_status
+            benchmark_test.ChemQARunner._ensure_artifacts = original_ensure_artifacts
+
     def test_run_group_continues_after_record_failure(self) -> None:
         records = [
             benchmark_test.BenchmarkRecord(

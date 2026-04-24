@@ -209,6 +209,44 @@ class BenchmarkCleanroomTests(unittest.TestCase):
                 names,
             )
 
+    def test_cleanup_preserves_benchmark_archive_dir_outside_manifest_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "out"
+            scratch_dir = output_root / "generated" / "artifacts" / "demo-run"
+            archive_dir = output_root / "artifacts" / "chemqa_web_on" / "conformabench-0001" / "demo-run"
+            scratch_dir.mkdir(parents=True, exist_ok=True)
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            (scratch_dir / "qa_result.json").write_text("{}", encoding="utf-8")
+            (archive_dir / "qa_result.json").write_text("{}", encoding="utf-8")
+
+            manifest = {
+                "run_id": "demo-run",
+                "output_root": str(output_root),
+                "artifact_roots": [str(scratch_dir)],
+                "control_roots": [],
+                "generated_roots": [],
+                "session_assignments": {},
+            }
+            context = cleanup_benchmark_run.CleanupContext(manifest=manifest, manifest_path=None)
+            with mock.patch.object(cleanup_benchmark_run, "iter_lease_payloads", return_value=[]):
+                with mock.patch.object(cleanup_benchmark_run, "process_targets", return_value=([], [], [])):
+                    with mock.patch.object(cleanup_benchmark_run, "candidate_session_stores", return_value=[]):
+                        with mock.patch.object(cleanup_benchmark_run, "session_paths_from_manifest", return_value=[]):
+                            with mock.patch.object(cleanup_benchmark_run, "terminate_process_groups", return_value=[]):
+                                with mock.patch.object(cleanup_benchmark_run, "terminate_pids", return_value=[]):
+                                    with mock.patch.object(cleanup_benchmark_run, "wait_for_exit", return_value=[]):
+                                        report = cleanup_benchmark_run.cleanup(
+                                            context,
+                                            grace_seconds=0.0,
+                                            kill_after_seconds=0.0,
+                                            dry_run=False,
+                                        )
+
+            self.assertTrue(report["success"])
+            self.assertFalse(scratch_dir.exists())
+            self.assertTrue(archive_dir.exists())
+            self.assertTrue((archive_dir / "qa_result.json").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
