@@ -7,7 +7,13 @@ import os
 import subprocess
 from pathlib import Path
 
-from bundle_common import default_template_dir, resolve_python_interpreter, resolve_skill_root, run_json
+from bundle_common import (
+    default_template_dir,
+    resolve_clawteam_executable,
+    resolve_python_interpreter,
+    resolve_skill_root,
+    run_json,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,9 +118,12 @@ def main() -> int:
             env["CLAWTEAM_DATA_DIR"] = materialized["clawteam_data_dir"]
         if materialized.get("openclaw_config_path"):
             env["OPENCLAW_CONFIG_PATH"] = materialized["openclaw_config_path"]
-        result = subprocess.run(launch_command, cwd=str(root), env=env, check=False, capture_output=True, text=True)
+        effective_launch_command = list(launch_command)
+        if effective_launch_command and effective_launch_command[0] == "clawteam":
+            effective_launch_command[0] = resolve_clawteam_executable(env=env)
+        result = subprocess.run(effective_launch_command, cwd=str(root), env=env, check=False, capture_output=True, text=True)
         launched = {
-            "command": launch_command,
+            "command": effective_launch_command,
             "clawteam_data_dir": env.get("CLAWTEAM_DATA_DIR"),
             "returncode": result.returncode,
             "stdout": result.stdout,
@@ -122,7 +131,7 @@ def main() -> int:
         }
         if result.returncode != 0:
             raise SystemExit(
-                f"Launch failed ({result.returncode}): {' '.join(launch_command)}\n\n"
+                f"Launch failed ({result.returncode}): {' '.join(effective_launch_command)}\n\n"
                 f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
             )
     payload = {

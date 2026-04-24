@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from bundle_common import default_runtime_dir, dump_json, load_module_from_path, resolve_skill_root
+from bundle_common import default_runtime_dir, dump_json, load_module_from_path, resolve_clawteam_executable, resolve_skill_root
 from bundle_common import resolve_python_interpreter
 from chemqa_review_artifacts import (
     CANDIDATE_OWNER,
@@ -142,7 +142,11 @@ class ChemQAReviewDriver:
         wrapper_module = load_module_from_path("chemqa_driver_openclaw_wrapper", self.base_wrapper_path)
         explicit_config = Path(args.config_file).expanduser().resolve() if args.config_file else None
         wrapper_module.reset_slot_workspace_if_session_id_changed(args.slot, args.session_id, config_path=explicit_config)
-        wrapper_module.reset_slot_main_session_if_session_id_changed(args.slot, args.session_id)
+        wrapper_module.reset_slot_main_session_if_session_id_changed(
+            args.slot,
+            args.session_id,
+            config_path=explicit_config,
+        )
         self.workspace = wrapper_module.resolve_slot_workspace(args.slot, config_path=explicit_config)
         self.workspace_root = self.workspace.parent
 
@@ -155,6 +159,10 @@ class ChemQAReviewDriver:
         env_data_dir = os.environ.get("CLAWTEAM_DATA_DIR", "").strip()
         fallback_data_dir = str((self.skill_root / "generated" / "clawteam-data").resolve())
         self.data_dir = arg_data_dir or env_data_dir or fallback_data_dir
+        try:
+            self.clawteam_executable = resolve_clawteam_executable(env=self.env)
+        except FileNotFoundError as exc:
+            raise SystemExit("Missing clawteam executable in PATH or fallback locations.") from exc
         self.lane_failures: dict[str, dict[str, Any]] = {}
         self.reviewer_exits: dict[str, dict[str, Any]] = {}
         self.repair_cycles_without_progress = 0
@@ -248,7 +256,7 @@ class ChemQAReviewDriver:
             self.remove_cleanroom_lease()
 
     def current_task(self) -> dict[str, Any] | None:
-        command = ["clawteam"]
+        command = [self.clawteam_executable]
         if self.data_dir:
             command.extend(["--data-dir", self.data_dir])
         command.extend(["--json", "task", "list", self.args.team, "--owner", self.args.role])
@@ -266,7 +274,7 @@ class ChemQAReviewDriver:
             return
         if str(task.get("status")) == status:
             return
-        command = ["clawteam"]
+        command = [self.clawteam_executable]
         if self.data_dir:
             command.extend(["--data-dir", self.data_dir])
         command.extend(["task", "update", self.args.team, str(task["id"]), "--status", status])
@@ -275,7 +283,7 @@ class ChemQAReviewDriver:
             raise DriverError(f"Failed to update task {task['id']} to {status}: {result.stdout}\n{result.stderr}")
 
     def save_session(self) -> None:
-        command = ["clawteam"]
+        command = [self.clawteam_executable]
         if self.data_dir:
             command.extend(["--data-dir", self.data_dir])
         command.extend(["session", "save", self.args.team, "--session-id", self.args.session_id])
@@ -644,7 +652,7 @@ class ChemQAReviewDriver:
         raise TerminalFailure(reason)
 
     def all_tasks(self) -> list[dict[str, Any]]:
-        command = ["clawteam"]
+        command = [self.clawteam_executable]
         if self.data_dir:
             command.extend(["--data-dir", self.data_dir])
         command.extend(["--json", "task", "list", self.args.team])

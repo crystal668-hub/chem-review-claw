@@ -54,6 +54,17 @@ def main_session_key_for_slot(slot: str) -> str:
     return f"agent:{slot}:main"
 
 
+def main_session_keys_for_slot(slot: str) -> list[str]:
+    keys: list[str] = []
+    for candidate in (slot.strip(), slot.strip().lower()):
+        if not candidate:
+            continue
+        key = main_session_key_for_slot(candidate)
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
 SLOT_SENTINEL_FILENAME = ".debateclaw-slot.json"
 SLOT_SENTINEL_KIND = "debateclaw-slot-workspace"
 SLOT_SENTINEL_VERSION = 1
@@ -105,6 +116,59 @@ def now_stamp() -> str:
 
 def openclaw_config_path() -> Path:
     return Path.home() / ".openclaw" / "openclaw.json"
+
+
+def resolve_openclaw_executable(
+    *,
+    env: dict[str, str] | None = None,
+    fallback_paths: list[str | Path] | None = None,
+) -> str:
+    search_path = None
+    if env is not None:
+        search_path = env.get("PATH")
+    resolved = shutil.which("openclaw", path=search_path)
+    if resolved:
+        return resolved
+
+    candidates = [Path(candidate).expanduser() for candidate in (fallback_paths or [])]
+    candidates.extend(
+        [
+            Path.home() / ".nvm" / "versions" / "node" / "v24.15.0" / "bin" / "openclaw",
+            Path.home() / ".local" / "bin" / "openclaw",
+        ]
+    )
+    for candidate in candidates:
+        expanded = candidate.expanduser().resolve()
+        if expanded.is_file() and os.access(expanded, os.X_OK):
+            return str(expanded)
+    raise FileNotFoundError("openclaw")
+
+
+def resolve_node_executable(
+    *,
+    env: dict[str, str] | None = None,
+    fallback_paths: list[str | Path] | None = None,
+) -> str:
+    search_path = None
+    if env is not None:
+        search_path = env.get("PATH")
+    resolved = shutil.which("node", path=search_path)
+    if resolved:
+        return resolved
+
+    candidates = [Path(candidate).expanduser() for candidate in (fallback_paths or [])]
+    candidates.extend(
+        [
+            Path.home() / ".nvm" / "versions" / "node" / "v24.15.0" / "bin" / "node",
+            Path("/opt/homebrew/bin/node"),
+            Path("/usr/local/bin/node"),
+        ]
+    )
+    for candidate in candidates:
+        expanded = candidate.expanduser().resolve()
+        if expanded.is_file() and os.access(expanded, os.X_OK):
+            return str(expanded)
+    raise FileNotFoundError("node")
 
 
 def slot_agents_template_path() -> Path:
@@ -340,8 +404,13 @@ def reset_slot_main_session_if_session_id_changed(
     store = load_session_store(store_path)
     if not store:
         return
-    session_key = main_session_key_for_slot(effective_slot)
-    current_entry = store.get(session_key)
+    session_keys = main_session_keys_for_slot(effective_slot)
+    current_entry = None
+    for session_key in session_keys:
+        candidate_entry = store.get(session_key)
+        if isinstance(candidate_entry, dict):
+            current_entry = candidate_entry
+            break
     if not isinstance(current_entry, dict):
         return
     current_session_id = current_entry.get("sessionId")
@@ -363,7 +432,8 @@ def reset_slot_main_session_if_session_id_changed(
     ):
         return
     updated_store = dict(store)
-    updated_store.pop(session_key, None)
+    for session_key in session_keys:
+        updated_store.pop(session_key, None)
     atomic_write_json(store_path, updated_store)
 
 
@@ -424,9 +494,22 @@ def main() -> int:
         env["OPENCLAW_CONFIG_PATH"] = str(temp_config_path)
 
     effective_slot = resolve_effective_slot_id(args.slot, config_path=base_config_path)
+    try:
+        openclaw_executable = resolve_openclaw_executable(env=env)
+    except FileNotFoundError as exc:
+        raise SystemExit("Missing openclaw executable in PATH or fallback locations.") from exc
+    try:
+        node_executable = resolve_node_executable(env=env)
+    except FileNotFoundError as exc:
+        raise SystemExit("Missing node executable required by openclaw.") from exc
+    node_dir = str(Path(node_executable).resolve().parent)
+    existing_path = str(env.get("PATH") or "")
+    path_entries = [entry for entry in existing_path.split(os.pathsep) if entry]
+    if node_dir not in path_entries:
+        env["PATH"] = os.pathsep.join([node_dir, *path_entries]) if path_entries else node_dir
 
     command = [
-        "openclaw",
+        openclaw_executable,
         "agent",
         "--local",
         "--agent",

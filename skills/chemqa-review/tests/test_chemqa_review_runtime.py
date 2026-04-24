@@ -17,8 +17,10 @@ DEBATECLAW_SCRIPTS_DIR = PROJECT_ROOT / "skills" / "debateclaw-v1" / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import bundle_common  # noqa: E402
 import chemqa_review_transport as transport  # noqa: E402
 import collect_artifacts as collect_artifacts_module  # noqa: E402
+import launch_from_preset as launch_from_preset_module  # noqa: E402
 import materialize_runplan  # noqa: E402
 import recover_run  # noqa: E402
 
@@ -538,6 +540,444 @@ class DebateWrapperConfigTest(unittest.TestCase):
             self.assertEqual(["duckduckgo"], payload["plugins"]["allow"])
             self.assertEqual({"duckduckgo": {"kind": "builtin"}}, payload["plugins"]["entries"])
             temp_config_path.unlink(missing_ok=True)
+
+    def test_reset_slot_main_session_clears_lowercased_main_key_when_session_file_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_config_path = Path(tmpdir) / "openclaw.json"
+            base_config_path.write_text(
+                json.dumps(
+                    {
+                        "agents": {
+                            "list": [
+                                {
+                                    "id": "debateA-1",
+                                    "workspace": "/tmp/debateA-1",
+                                    "model": "dashscope-responses/qwen3.5-plus",
+                                }
+                            ]
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            store_path = Path(tmpdir) / "sessions.json"
+            store_path.write_text(
+                json.dumps(
+                    {
+                        "agent:debatea-1:main": {
+                            "sessionId": "chemqa-review-test-session",
+                            "sessionFile": "/tmp/smoke-chemqa-direct.jsonl",
+                            "modelProvider": "dashscope-responses",
+                            "model": "qwen3.5-plus",
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            original_session_store_path_for_slot = debate_wrapper_module.session_store_path_for_slot
+            try:
+                debate_wrapper_module.session_store_path_for_slot = lambda _slot: store_path
+                debate_wrapper_module.reset_slot_main_session_if_session_id_changed(
+                    "debateA-1",
+                    "chemqa-review-test-session",
+                    config_path=base_config_path,
+                )
+            finally:
+                debate_wrapper_module.session_store_path_for_slot = original_session_store_path_for_slot
+
+            payload = json.loads(store_path.read_text(encoding="utf-8"))
+            self.assertEqual({}, payload)
+
+
+class DriverInitConfigPropagationTest(unittest.TestCase):
+    def test_driver_init_passes_explicit_config_to_main_session_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir) / "runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            (runtime_dir / "debate_state.py").write_text("# stub\n", encoding="utf-8")
+            (runtime_dir / "openclaw_debate_agent.py").write_text("# stub\n", encoding="utf-8")
+            config_path = Path(tmpdir) / "cleanroom-openclaw.json"
+            config_path.write_text("{}", encoding="utf-8")
+
+            original_load_module = driver_module.load_module_from_path
+            original_resolve_skill_root = driver_module.resolve_skill_root
+            original_default_runtime_dir = driver_module.default_runtime_dir
+            original_load_cleanroom_runtime_lease_module = driver_module.load_cleanroom_runtime_lease_module
+            original_resolve_clawteam_executable = driver_module.resolve_clawteam_executable
+
+            class WrapperProbe:
+                def __init__(self) -> None:
+                    self.workspace_reset_config = None
+                    self.main_session_reset_config = None
+
+                def reset_slot_workspace_if_session_id_changed(self, _slot, _session_id, *, config_path=None):
+                    self.workspace_reset_config = config_path
+
+                def reset_slot_main_session_if_session_id_changed(self, _slot, _session_id, *, config_path=None):
+                    self.main_session_reset_config = config_path
+
+                def resolve_slot_workspace(self, _slot, *, config_path=None):
+                    return Path(tmpdir) / "workspace"
+
+            wrapper_probe = WrapperProbe()
+            try:
+                driver_module.load_module_from_path = lambda *_args, **_kwargs: wrapper_probe
+                driver_module.resolve_skill_root = lambda value: Path(value).resolve()
+                driver_module.default_runtime_dir = lambda: runtime_dir
+                driver_module.load_cleanroom_runtime_lease_module = lambda _skill_root: None
+                driver_module.resolve_clawteam_executable = lambda **_kwargs: "/tmp/fake-clawteam"
+
+                driver_module.ChemQAReviewDriver(
+                    argparse.Namespace(
+                        skill_root=str(SKILL_ROOT),
+                        runtime_dir=str(runtime_dir),
+                        config_file=str(config_path),
+                        team="chemqa-review-init-config",
+                        role="debate-coordinator",
+                        slot="debateA-coordinator",
+                        env_file="",
+                        data_dir="",
+                        lease_dir="",
+                        session_id="chemqa-review-init-config-session",
+                        prompt=None,
+                        message=None,
+                        thinking=None,
+                        poll_seconds=20,
+                        stale_timeout_seconds=300,
+                        max_model_attempts=1,
+                        model_timeout_seconds=None,
+                        candidate_timeout_seconds=None,
+                        review_timeout_seconds=None,
+                        rebuttal_timeout_seconds=None,
+                        coordinator_timeout_seconds=None,
+                        subprocess_timeout_grace_seconds=30,
+                        respawn_cooldown_seconds=120,
+                        lane_retry_budget=2,
+                        phase_repair_budget=1,
+                        max_respawns_per_role_phase_signature=1,
+                    )
+                )
+            finally:
+                driver_module.load_module_from_path = original_load_module
+                driver_module.resolve_skill_root = original_resolve_skill_root
+                driver_module.default_runtime_dir = original_default_runtime_dir
+                driver_module.load_cleanroom_runtime_lease_module = original_load_cleanroom_runtime_lease_module
+                driver_module.resolve_clawteam_executable = original_resolve_clawteam_executable
+
+            self.assertEqual(config_path.resolve(), wrapper_probe.workspace_reset_config)
+            self.assertEqual(config_path.resolve(), wrapper_probe.main_session_reset_config)
+
+
+class ClawteamResolutionTest(unittest.TestCase):
+    def test_resolve_clawteam_executable_falls_back_when_path_is_stripped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fallback = Path(tmpdir) / "clawteam"
+            fallback.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fallback.chmod(0o755)
+
+            resolved = bundle_common.resolve_clawteam_executable(
+                env={"PATH": "/usr/bin:/bin"},
+                fallback_paths=[fallback],
+            )
+
+            self.assertEqual(str(fallback.resolve()), resolved)
+
+    def test_resolve_clawteam_executable_uses_real_home_when_home_is_cleanroom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_home = Path(tmpdir) / "real-home"
+            cleanroom_home = Path(tmpdir) / "cleanroom-home"
+            fallback = real_home / ".local" / "share" / "uv" / "tools" / "clawteam" / "bin" / "clawteam"
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            fallback.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fallback.chmod(0o755)
+            cleanroom_home.mkdir(parents=True, exist_ok=True)
+
+            original_home = os.environ.get("HOME")
+            original_real_home = os.environ.get("OPENCLAW_REAL_HOME")
+            try:
+                os.environ["HOME"] = str(cleanroom_home)
+                os.environ["OPENCLAW_REAL_HOME"] = str(real_home)
+                resolved = bundle_common.resolve_clawteam_executable(
+                    env={"PATH": "/usr/bin:/bin"},
+                )
+            finally:
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+                if original_real_home is None:
+                    os.environ.pop("OPENCLAW_REAL_HOME", None)
+                else:
+                    os.environ["OPENCLAW_REAL_HOME"] = original_real_home
+
+            self.assertEqual(str(fallback.resolve()), resolved)
+
+    def test_current_task_uses_resolved_clawteam_executable(self) -> None:
+        driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+        driver.args = argparse.Namespace(team="chemqa-review-clawteam", role="proposer-2")
+        driver.data_dir = "/tmp/clawteam-data"
+        driver.clawteam_executable = "/tmp/resolved-clawteam"
+
+        original_run = driver_module.subprocess.run
+        captured: dict[str, object] = {}
+        try:
+            def fake_run(command, env=None, check=False, capture_output=False, text=False):
+                captured["command"] = list(command)
+                return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+
+            driver_module.subprocess.run = fake_run
+            payload = driver_module.ChemQAReviewDriver.current_task(driver)
+        finally:
+            driver_module.subprocess.run = original_run
+
+        self.assertIsNone(payload)
+        command = captured["command"]
+        assert isinstance(command, list)
+        self.assertEqual("/tmp/resolved-clawteam", command[0])
+        self.assertEqual(
+            [
+                "/tmp/resolved-clawteam",
+                "--data-dir",
+                "/tmp/clawteam-data",
+                "--json",
+                "task",
+                "list",
+                "chemqa-review-clawteam",
+                "--owner",
+                "proposer-2",
+            ],
+            command,
+        )
+
+    def test_launch_from_preset_resolves_bare_clawteam_command_before_run(self) -> None:
+        original_run_json = launch_from_preset_module.run_json
+        original_resolve_clawteam_executable = launch_from_preset_module.resolve_clawteam_executable
+        original_subprocess_run = launch_from_preset_module.subprocess.run
+        original_argv = sys.argv
+        captured: dict[str, object] = {}
+        try:
+            launch_from_preset_module.run_json = lambda command, cwd: (
+                {"run_id": "demo-run"}
+                if "compile_runplan.py" in str(command[1])
+                else {
+                    "launch_command": ["clawteam", "launch", "--template", "demo"],
+                    "clawteam_data_dir": "/tmp/demo-clawteam-data",
+                    "openclaw_config_path": "/tmp/demo-openclaw.json",
+                }
+            )
+            launch_from_preset_module.resolve_clawteam_executable = lambda **_kwargs: "/tmp/resolved-clawteam"
+
+            def fake_run(command, cwd=None, env=None, check=False, capture_output=False, text=False):
+                captured["command"] = list(command)
+                captured["cwd"] = cwd
+                captured["env"] = dict(env or {})
+                return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+            launch_from_preset_module.subprocess.run = fake_run
+            sys.argv = [
+                "launch_from_preset.py",
+                "--root",
+                str(SKILL_ROOT),
+                "--preset",
+                "chemqa-review@1",
+                "--goal",
+                "demo goal",
+                "--launch-mode",
+                "run",
+            ]
+
+            exit_code = launch_from_preset_module.main()
+        finally:
+            launch_from_preset_module.run_json = original_run_json
+            launch_from_preset_module.resolve_clawteam_executable = original_resolve_clawteam_executable
+            launch_from_preset_module.subprocess.run = original_subprocess_run
+            sys.argv = original_argv
+
+        self.assertEqual(0, exit_code)
+        command = captured["command"]
+        assert isinstance(command, list)
+        self.assertEqual("/tmp/resolved-clawteam", command[0])
+        self.assertEqual(["launch", "--template", "demo"], command[1:])
+        env = captured["env"]
+        assert isinstance(env, dict)
+        self.assertEqual("/tmp/demo-clawteam-data", env["CLAWTEAM_DATA_DIR"])
+        self.assertEqual("/tmp/demo-openclaw.json", env["OPENCLAW_CONFIG_PATH"])
+
+
+class OpenClawResolutionTest(unittest.TestCase):
+    def test_resolve_openclaw_executable_falls_back_when_path_is_stripped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fallback = Path(tmpdir) / "openclaw"
+            fallback.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fallback.chmod(0o755)
+
+            resolved = debate_wrapper_module.resolve_openclaw_executable(
+                env={"PATH": "/usr/bin:/bin"},
+                fallback_paths=[fallback],
+            )
+
+            self.assertEqual(str(fallback.resolve()), resolved)
+
+    def test_wrapper_main_uses_resolved_openclaw_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_config = Path(tmpdir) / "openclaw.json"
+            base_config.write_text(json.dumps({"agents": {"list": []}}, ensure_ascii=False), encoding="utf-8")
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text("", encoding="utf-8")
+
+            original_parse_args = debate_wrapper_module.parse_args
+            original_parse_env_entries = debate_wrapper_module.parse_env_entries
+            original_reset_workspace = debate_wrapper_module.reset_slot_workspace_if_session_id_changed
+            original_reset_session = debate_wrapper_module.reset_slot_main_session_if_session_id_changed
+            original_create_runtime_config = debate_wrapper_module.create_debate_runtime_config
+            original_resolve_slot = debate_wrapper_module.resolve_effective_slot_id
+            original_resolve_openclaw = getattr(debate_wrapper_module, "resolve_openclaw_executable", None)
+            original_write_lease = debate_wrapper_module.write_cleanroom_lease
+            original_run = debate_wrapper_module.subprocess.run
+
+            captured: dict[str, object] = {}
+            try:
+                debate_wrapper_module.parse_args = lambda: argparse.Namespace(
+                    slot="debateA-1",
+                    session_id="chemqa-review-test-session",
+                    config_file=str(base_config),
+                    env_file=str(env_file),
+                    prompt=None,
+                    message="probe",
+                    thinking="high",
+                    timeout=None,
+                    json=False,
+                )
+                debate_wrapper_module.parse_env_entries = lambda _path: {}
+                debate_wrapper_module.reset_slot_workspace_if_session_id_changed = lambda *args, **kwargs: None
+                debate_wrapper_module.reset_slot_main_session_if_session_id_changed = lambda *args, **kwargs: None
+                debate_wrapper_module.create_debate_runtime_config = lambda *_args, **_kwargs: None
+                debate_wrapper_module.resolve_effective_slot_id = lambda *_args, **_kwargs: "debateA-1"
+                debate_wrapper_module.resolve_openclaw_executable = lambda **_kwargs: "/tmp/resolved-openclaw"
+                debate_wrapper_module.write_cleanroom_lease = lambda **_kwargs: (None, None)
+
+                def fake_run(command, env=None, check=False):
+                    captured["command"] = list(command)
+                    return subprocess.CompletedProcess(command, 0)
+
+                debate_wrapper_module.subprocess.run = fake_run
+
+                exit_code = debate_wrapper_module.main()
+            finally:
+                debate_wrapper_module.parse_args = original_parse_args
+                debate_wrapper_module.parse_env_entries = original_parse_env_entries
+                debate_wrapper_module.reset_slot_workspace_if_session_id_changed = original_reset_workspace
+                debate_wrapper_module.reset_slot_main_session_if_session_id_changed = original_reset_session
+                debate_wrapper_module.create_debate_runtime_config = original_create_runtime_config
+                debate_wrapper_module.resolve_effective_slot_id = original_resolve_slot
+                if original_resolve_openclaw is None:
+                    delattr(debate_wrapper_module, "resolve_openclaw_executable")
+                else:
+                    debate_wrapper_module.resolve_openclaw_executable = original_resolve_openclaw
+                debate_wrapper_module.write_cleanroom_lease = original_write_lease
+                debate_wrapper_module.subprocess.run = original_run
+
+        self.assertEqual(0, exit_code)
+        command = captured["command"]
+        assert isinstance(command, list)
+        self.assertEqual("/tmp/resolved-openclaw", command[0])
+        self.assertEqual(
+            [
+                "/tmp/resolved-openclaw",
+                "agent",
+                "--local",
+                "--agent",
+                "debateA-1",
+                "--session-id",
+                "chemqa-review-test-session",
+                "--message",
+                "probe",
+                "--thinking",
+                "high",
+            ],
+            command,
+        )
+
+    def test_wrapper_main_prepends_resolved_node_directory_for_openclaw_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_config = Path(tmpdir) / "openclaw.json"
+            base_config.write_text(json.dumps({"agents": {"list": []}}, ensure_ascii=False), encoding="utf-8")
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text("", encoding="utf-8")
+
+            original_path = os.environ.get("PATH")
+            original_parse_args = debate_wrapper_module.parse_args
+            original_parse_env_entries = debate_wrapper_module.parse_env_entries
+            original_reset_workspace = debate_wrapper_module.reset_slot_workspace_if_session_id_changed
+            original_reset_session = debate_wrapper_module.reset_slot_main_session_if_session_id_changed
+            original_create_runtime_config = debate_wrapper_module.create_debate_runtime_config
+            original_resolve_slot = debate_wrapper_module.resolve_effective_slot_id
+            original_resolve_openclaw = getattr(debate_wrapper_module, "resolve_openclaw_executable", None)
+            original_resolve_node = getattr(debate_wrapper_module, "resolve_node_executable", None)
+            original_write_lease = debate_wrapper_module.write_cleanroom_lease
+            original_run = debate_wrapper_module.subprocess.run
+
+            captured: dict[str, object] = {}
+            try:
+                os.environ["PATH"] = "/usr/bin:/bin"
+                debate_wrapper_module.parse_args = lambda: argparse.Namespace(
+                    slot="debateA-1",
+                    session_id="chemqa-review-test-session",
+                    config_file=str(base_config),
+                    env_file=str(env_file),
+                    prompt=None,
+                    message="probe",
+                    thinking="high",
+                    timeout=None,
+                    json=False,
+                )
+                debate_wrapper_module.parse_env_entries = lambda _path: {}
+                debate_wrapper_module.reset_slot_workspace_if_session_id_changed = lambda *args, **kwargs: None
+                debate_wrapper_module.reset_slot_main_session_if_session_id_changed = lambda *args, **kwargs: None
+                debate_wrapper_module.create_debate_runtime_config = lambda *_args, **_kwargs: None
+                debate_wrapper_module.resolve_effective_slot_id = lambda *_args, **_kwargs: "debateA-1"
+                debate_wrapper_module.resolve_openclaw_executable = lambda **_kwargs: "/tmp/tool-bin/openclaw"
+                debate_wrapper_module.resolve_node_executable = lambda **_kwargs: "/tmp/node-bin/node"
+                debate_wrapper_module.write_cleanroom_lease = lambda **_kwargs: (None, None)
+
+                def fake_run(command, env=None, check=False):
+                    captured["command"] = list(command)
+                    captured["path"] = str((env or {}).get("PATH") or "")
+                    return subprocess.CompletedProcess(command, 0)
+
+                debate_wrapper_module.subprocess.run = fake_run
+
+                exit_code = debate_wrapper_module.main()
+            finally:
+                if original_path is None:
+                    os.environ.pop("PATH", None)
+                else:
+                    os.environ["PATH"] = original_path
+                debate_wrapper_module.parse_args = original_parse_args
+                debate_wrapper_module.parse_env_entries = original_parse_env_entries
+                debate_wrapper_module.reset_slot_workspace_if_session_id_changed = original_reset_workspace
+                debate_wrapper_module.reset_slot_main_session_if_session_id_changed = original_reset_session
+                debate_wrapper_module.create_debate_runtime_config = original_create_runtime_config
+                debate_wrapper_module.resolve_effective_slot_id = original_resolve_slot
+                if original_resolve_openclaw is None:
+                    delattr(debate_wrapper_module, "resolve_openclaw_executable")
+                else:
+                    debate_wrapper_module.resolve_openclaw_executable = original_resolve_openclaw
+                if original_resolve_node is None:
+                    delattr(debate_wrapper_module, "resolve_node_executable")
+                else:
+                    debate_wrapper_module.resolve_node_executable = original_resolve_node
+                debate_wrapper_module.write_cleanroom_lease = original_write_lease
+                debate_wrapper_module.subprocess.run = original_run
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("/tmp/tool-bin/openclaw", captured["command"][0])
+        expected_prefix = str((Path("/tmp/node-bin")).resolve()) + os.pathsep
+        self.assertTrue(str(captured["path"]).startswith(expected_prefix))
 
 
 class WorkerTimeoutSalvageTest(unittest.TestCase):

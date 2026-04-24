@@ -127,6 +127,46 @@ def probe_binary(name: str, version_command: list[str]) -> dict[str, object]:
     return {"name": name, "found": result.returncode == 0, "path": resolved, "version": output}
 
 
+def resolve_clawteam_executable(
+    *,
+    env: dict[str, str] | None = None,
+    fallback_paths: list[str | Path] | None = None,
+) -> str:
+    search_path = None
+    if env is not None:
+        search_path = env.get("PATH")
+    resolved = shutil.which("clawteam", path=search_path)
+    if resolved:
+        return resolved
+
+    candidates = [Path(candidate).expanduser() for candidate in (fallback_paths or [])]
+    home_dir = real_user_home()
+    candidates.extend(
+        [
+            home_dir / ".local" / "bin" / "clawteam",
+            home_dir / ".local" / "share" / "uv" / "tools" / "clawteam" / "bin" / "clawteam",
+        ]
+    )
+
+    for candidate in candidates:
+        expanded = candidate.expanduser().resolve()
+        if expanded.is_file() and os.access(expanded, os.X_OK):
+            return str(expanded)
+    raise FileNotFoundError("clawteam")
+
+
+def real_user_home() -> Path:
+    explicit = str(os.environ.get("OPENCLAW_REAL_HOME") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    try:
+        import pwd  # type: ignore
+
+        return Path(pwd.getpwuid(os.getuid()).pw_dir).expanduser().resolve()
+    except Exception:
+        return Path.home().expanduser().resolve()
+
+
 def collect_templates(template_dir: Path) -> list[str]:
     if not template_dir.is_dir():
         return []
