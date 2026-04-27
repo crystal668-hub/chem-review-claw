@@ -34,6 +34,13 @@ cleanup_benchmark_run = load_module("benchmark_cleanroom_cleanup_test", CLEANUP_
 
 
 class BenchmarkCleanroomTests(unittest.TestCase):
+    def test_manual_kind_choices_exclude_review_loop(self) -> None:
+        parser = cleanup_benchmark_run.parse_args
+        with mock.patch.object(sys, "argv", ["cleanup_benchmark_run.py", "--kind", "review-loop"]):
+            with self.assertRaises(SystemExit) as ctx:
+                parser()
+        self.assertEqual(2, ctx.exception.code)
+
     def test_parse_process_snapshot_handles_macos_style_ps_output(self) -> None:
         payload = "\n".join(
             [

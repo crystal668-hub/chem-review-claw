@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Clean benchmark run-scoped processes, sessions, and state.")
     parser.add_argument("--manifest", help="Cleanup manifest path")
     parser.add_argument("--run-id", help="Manual run id fallback")
-    parser.add_argument("--kind", choices=("chemqa", "review-loop"), help="Manual benchmark kind")
+    parser.add_argument("--kind", choices=("chemqa",), help="Manual benchmark kind")
     parser.add_argument("--output-root", help="Manual output root")
     parser.add_argument("--grace-seconds", type=float, default=5.0)
     parser.add_argument("--kill-after-seconds", type=float, default=10.0)

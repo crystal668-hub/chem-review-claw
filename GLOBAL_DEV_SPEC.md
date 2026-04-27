@@ -7,10 +7,9 @@
   - The repo root also stores live runtime state for OpenClaw and ClawTeam: agent configs, generated workspaces, SQLite state, logs, device/auth files, and task/session registries.
 - Current capabilities (ONLY what works)
   - `DONE`: Run benchmark batches across four experiment groups: `chemqa_web_on`, `chemqa_web_off`, `single_llm_web_on`, `single_llm_web_off` via `workspace/benchmark_test.py`.
-  - `DONE`: Run DebateClaw `review-loop@1` benchmark batches with websearch on/off via `workspace/benchmark_rl.py`.
   - `DONE`: Load benchmark JSONL datasets into a normalized `BenchmarkRecord` model via `workspace/benchmarking/datasets.py`.
   - `DONE`: Score outputs with registered evaluators for ChemBench, FrontierScience Olympiad/Research, ConformaBench, SuperChem, and generic semantic matching via `workspace/benchmark_test.py` and `workspace/benchmarking/evaluation.py`.
-  - `DONE`: Provision run-scoped OpenClaw configs and DebateClaw/ChemQA slot workspaces via `workspace/benchmarking/config_renderer.py`, `workspace/benchmarking/provisioning.py`, `workspace/benchmark_test.py`, and `workspace/benchmark_rl.py`.
+  - `DONE`: Provision run-scoped OpenClaw configs and DebateClaw/ChemQA slot workspaces via `workspace/benchmarking/config_renderer.py`, `workspace/benchmarking/provisioning.py`, and `workspace/benchmark_test.py`.
   - `DONE`: Run a single-agent OpenClaw baseline by shelling out to `openclaw agent` via `workspace/benchmarking/runners/single_llm.py`.
   - `DONE`: Run a ChemQA multi-agent workflow by compiling/materializing a ChemQA launch, monitoring run-status, rebuilding artifacts, archiving outputs, and cleaning runtime leftovers via `workspace/benchmarking/runners/chemqa.py`.
   - `DONE`: Manage DebateClaw V1 runtime, slot provisioning, prompt/materialization, and launch commands via `workspace/skills/debateclaw-v1/scripts/*.py`.
@@ -69,9 +68,6 @@
   - `workspace/benchmark_test.py`
     - Main four-group benchmark CLI.
     - Also contains benchmark-specific evaluators, runtime bundle helpers, config pools, cleanup registration, and runner wiring.
-  - `workspace/benchmark_rl.py`
-    - Main review-loop benchmark CLI.
-    - Builds DebateClaw profile-backed configs, monitors run progress, and performs post-run judging.
   - `workspace/conformabench_judge.py`
     - RDKit-based hidden judge for constructive molecular answers.
   - `workspace/runtime_paths.py`
@@ -103,8 +99,6 @@
     - Launches ChemQA preset flow, polls run status, rebuilds artifacts, archives outputs.
   - `benchmark_test.py` -> `skills/benchmark-cleanroom`
     - Writes cleanup manifests and runs cleanup hooks on exit/failure.
-  - `benchmark_rl.py` -> `skills/debateclaw-v1`
-    - Uses DebateClaw presets/model profiles/runtime helpers to materialize and launch review-loop runs.
   - `chemqa_review_openclaw_driver.py` -> `debate_state.py`
     - Subprocess-driven control loop; asks for next action, submits artifacts, advances state.
   - `collect_artifacts.py` -> protocol YAML/JSON emitted by coordinator
@@ -119,14 +113,6 @@
     - Input: benchmark root or dataset files, group list, timeouts, config path, model/profile overrides.
     - Output: `results.json`, `results.partial.json`, `runtime-manifest.json`, `runtime-config/*.json`, `per-record/*/*.json`, CSV summaries.
   - Implementation location: `workspace/benchmark_test.py`, `workspace/benchmarking/*`
-  - Status: `DONE`
-
-- Name: Review-loop benchmark runner
-  - Description: Runs DebateClaw `review-loop@1` benchmark groups with configurable model profile, collector, judge, and stall timeout handling.
-  - Input / Output:
-    - Input: benchmark root/files, websearch mode, review/rebuttal/proposer counts, model profile, OpenClaw config.
-    - Output: run-scoped runtime status, partial/final results, archived artifacts, aggregate summary.
-  - Implementation location: `workspace/benchmark_rl.py`
   - Status: `DONE`
 
 - Name: Benchmark record normalization
@@ -190,7 +176,7 @@
   - Input / Output:
     - Input: base config payload, experiment spec, provisioned agents.
     - Output: modified config payload written under run output.
-  - Implementation location: `workspace/benchmarking/config_renderer.py`, `workspace/benchmark_test.py`, `workspace/benchmark_rl.py`
+  - Implementation location: `workspace/benchmarking/config_renderer.py`, `workspace/benchmark_test.py`
   - Status: `DONE`
 
 - Name: Slot workspace provisioning
@@ -401,16 +387,6 @@
   - All per-record outputs are persisted immediately under `per-record/<group>/<slug>.json`.
   - Cleanup manifests are registered and benchmark-cleanroom cleanup runs in `finally`/signal/atexit paths.
 
-- Primary execution flow: review-loop benchmark
-  - `workspace/benchmark_rl.py` discovers records and chooses one experiment group based on `--websearch`.
-  - It materializes a model-profile-specific OpenClaw config by reading DebateClaw model profile JSON and mapping `model_ref` -> `provider_ref/remote_model_id`.
-  - It launches DebateClaw review-loop runs through a `ReviewLoopRunner`.
-  - Progress is tracked in `runtime-status.json`; partial aggregate state is flushed to `results.partial.json`.
-  - Final answer extraction is indirect:
-    - first from coordinator summary/proposal payloads,
-    - then via an outer collector agent,
-    - then through fallback text extraction.
-
 - Real ChemQA control path
   - The operational state machine is `workspace/skills/debateclaw-v1/scripts/debate_state.py`, not `workspace/skills/chemqa-review/runtime/workflow.py`.
   - `chemqa_review_openclaw_driver.py` loops by repeatedly calling `debate_state.py` subcommands in subprocesses.
@@ -439,7 +415,7 @@
 
 - Shortcuts, hacks, implicit logic
   - Benchmark scripts duplicate a large amount of logic that also exists in `workspace/benchmarking/*`; the package is not the sole orchestration layer.
-  - `benchmark_test.py` and `benchmark_rl.py` both contain direct JSON parsing, subprocess wrappers, config pools, and answer extraction helpers instead of delegating all logic to package modules.
+  - `benchmark_test.py` contains direct JSON parsing, subprocess wrappers, config pools, and answer extraction helpers instead of delegating all logic to package modules.
   - Native workflow package support exists, but current live ChemQA execution bypasses it in favor of CLI/state-script orchestration.
   - Run-scoped OpenClaw configs are produced by mutating a copy of the user’s local `~/.openclaw/openclaw.json`.
   - Recovery and artifact collection rely on specific file naming conventions such as `proposer-1.md`, `chemqa_review_protocol.yaml`, `qa_result.json`.
@@ -469,7 +445,7 @@
 - Architectural inconsistencies
   - Intended architecture suggests package-based workflows and reusable modules.
   - Actual behavior is still script-heavy and subprocess-heavy:
-    - `benchmark_test.py` and `benchmark_rl.py` are monolithic entrypoints with embedded orchestration logic.
+    - `benchmark_test.py` is a monolithic entrypoint with embedded orchestration logic.
     - ChemQA runs are controlled through external state scripts instead of the native workflow package.
   - `workspace/benchmarking/` exists as a reusable layer, but benchmark entry scripts still duplicate significant behavior.
   - `workspace/pyproject.toml` advertises `web-ui` extras, but there is no corresponding app module.
@@ -478,13 +454,12 @@
 ## 6. Risks & Technical Debt
 - Fragile logic
   - Artifact recovery depends on specific filenames and directory heuristics in `workspace/benchmarking/runners/chemqa.py`.
-  - Review-loop answer extraction depends on summary payload shape and fallback parsing heuristics in `workspace/benchmark_rl.py`.
   - Cleanup depends on manifests, process command-line matching, and session store scrubbing heuristics in `workspace/skills/benchmark-cleanroom/scripts/cleanup_benchmark_run.py`.
   - ChemQA recovery depends on `spawn_registry.json`, `/proc`-style process inspection when available, and workspace naming conventions in `workspace/skills/chemqa-review/scripts/recover_run.py`.
 
 - Hardcoded values
   - Default OpenClaw home/config roots are hardcoded in `workspace/runtime_paths.py`.
-  - Default model ids, agent ids, workspace roots, slot sets, and timeouts are hardcoded in `workspace/benchmark_test.py` and `workspace/benchmark_rl.py`.
+  - Default model ids, agent ids, workspace roots, slot sets, and timeouts are hardcoded in `workspace/benchmark_test.py`.
   - GROBID and MinerU default URLs are hardcoded in docs/scripts.
   - ChemQA role topology is fixed to one candidate owner plus four reviewer lanes in `workspace/skills/chemqa-review/runtime/state_models.py` and associated scripts.
 
@@ -503,7 +478,7 @@
 - Replace or retire the skeletal native workflow package:
   - Either make `workspace/skills/chemqa-review/runtime/workflow.py` the real execution engine or explicitly treat it as deprecated scaffolding.
 - Collapse duplicated benchmark orchestration logic:
-  - Move more logic from `workspace/benchmark_test.py` and `workspace/benchmark_rl.py` into `workspace/benchmarking/`.
+  - Move more logic from `workspace/benchmark_test.py` into `workspace/benchmarking/`.
 - Separate source from runtime state:
   - Move generated workspaces, logs, DBs, and mutable OpenClaw runtime state outside the analyzed source tree or document them as runtime-only roots.
 - Remove or implement misleading declared surfaces:
