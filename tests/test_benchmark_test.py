@@ -1649,7 +1649,7 @@ Points: 0.5, Item: Second criterion
 
             def fake_collect_artifacts(self, *, source_dir, output_dir, env):
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / "final_answer.md").write_text("FINAL ANSWER: CCO\n", encoding="utf-8")
+                _ = (self, source_dir, env)
 
             benchmark_test.ChemQARunner._collect_artifacts_from_source = fake_collect_artifacts
 
@@ -1710,6 +1710,10 @@ Points: 0.5, Item: Second criterion
                 self.assertTrue(out.should_score())
                 self.assertTrue(out.recovery.scored)
                 self.assertEqual("candidate_submission", out.recovery.source)
+                self.assertTrue(out.runner_meta["fallback_used"])
+                self.assertEqual("proposer-1-proposal", out.runner_meta["fallback_source"])
+                self.assertIn("proposal_path", out.raw["fallback"])
+                self.assertTrue(str(out.raw["fallback"]["proposal_path"]).endswith("proposer-1.md"))
         finally:
             benchmark_test.run_subprocess = original_run_subprocess
             benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
@@ -2178,18 +2182,34 @@ Points: 0.5, Item: Second criterion
 
         original_build_runner = getattr(benchmark_test, "build_runner", None)
         original_evaluate_answer = benchmark_test.evaluate_answer
+        judge = object()
         try:
             benchmark_test.build_runner = lambda **kwargs: StubRunner()
-            benchmark_test.evaluate_answer = lambda *args, **kwargs: benchmark_test.EvaluationResult(
-                eval_kind="chembench_open_ended",
-                score=1.0,
-                max_score=1.0,
-                normalized_score=1.0,
-                passed=True,
-                primary_metric="exact_str_match",
-                primary_metric_direction="higher_is_better",
-                details={},
-            )
+
+            def fake_evaluate_answer(
+                actual_record: object,
+                *,
+                short_answer_text: str,
+                full_response_text: str,
+                judge: object,
+            ) -> benchmark_test.EvaluationResult:
+                self.assertIs(record, actual_record)
+                self.assertEqual("fallback-answer", short_answer_text)
+                self.assertEqual("FINAL ANSWER: fallback-answer", full_response_text)
+                self.assertIs(judge, judge_obj)
+                return benchmark_test.EvaluationResult(
+                    eval_kind="chembench_open_ended",
+                    score=1.0,
+                    max_score=1.0,
+                    normalized_score=1.0,
+                    passed=True,
+                    primary_metric="exact_str_match",
+                    primary_metric_direction="higher_is_better",
+                    details={},
+                )
+
+            judge_obj = judge
+            benchmark_test.evaluate_answer = fake_evaluate_answer
             with tempfile.TemporaryDirectory() as tmpdir:
                 results = benchmark_test.run_group(
                     group=benchmark_test.EXPERIMENT_GROUPS["chemqa_web_off"],
@@ -2197,7 +2217,7 @@ Points: 0.5, Item: Second criterion
                     output_root=Path(tmpdir),
                     single_timeout=10,
                     chemqa_timeout=10,
-                    judge=object(),
+                    judge=judge,
                     config_path=Path(tmpdir) / "cfg.json",
                     single_agent="unused",
                     chemqa_root=Path(tmpdir),
