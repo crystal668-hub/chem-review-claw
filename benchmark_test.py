@@ -1491,10 +1491,30 @@ def build_chemqa_response_from_submission(*, final_submission: dict[str, Any], f
     return normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
 
 
+def extract_chemqa_scoreable_answer(value: Any) -> str:
+    if isinstance(value, str):
+        stripped = normalize_space(value)
+        if not stripped:
+            return ""
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                return stripped
+            return extract_chemqa_scoreable_answer(parsed)
+        return stripped
+    if isinstance(value, dict):
+        for key in ("direct_answer", "answer", "value", "final_answer"):
+            candidate = extract_chemqa_scoreable_answer(value.get(key))
+            if candidate:
+                return candidate
+        return ""
+    return ""
+
 
 def build_chemqa_full_response(*, qa_result: dict[str, Any]) -> tuple[str, str]:
     artifact_paths = dict(qa_result.get("artifact_paths") or {})
-    short_answer_text = normalize_space(str(qa_result.get("final_answer") or ""))
+    short_answer_text = extract_chemqa_scoreable_answer(qa_result.get("final_answer"))
     final_submission_path = str(artifact_paths.get("final_submission") or "").strip()
     if final_submission_path:
         path = Path(final_submission_path)
@@ -1509,7 +1529,11 @@ def build_chemqa_full_response(*, qa_result: dict[str, Any]) -> tuple[str, str]:
         path = Path(final_answer_path)
         if path.is_file():
             fallback_text = path.read_text(encoding="utf-8").strip()
+            if not short_answer_text:
+                return "", fallback_text
             return normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=fallback_text)
+    if not short_answer_text:
+        return "", ""
     return normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text="")
 
 

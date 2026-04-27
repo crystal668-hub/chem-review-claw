@@ -1235,41 +1235,6 @@ class DriverRespawnTest(unittest.TestCase):
 
 
 class CoordinatorStagnationReviewerExitTest(unittest.TestCase):
-    def test_maybe_handle_stagnation_marks_missing_reviewer_exited_and_continues(self) -> None:
-        helper = ProtocolReconstructionTest()
-        stalled_status = helper.build_summary()
-        stalled_status["status"] = "running"
-        stalled_status["phase"] = "review"
-        stalled_status["review_round"] = 1
-        stalled_status["reviews"] = [
-            review for review in stalled_status["reviews"]
-            if not (review.get("reviewer") == "proposer-5" and review.get("target_proposer") == "proposer-1")
-        ]
-        stalled_status["phase_progress"] = {
-            "actual": 3,
-            "complete": False,
-            "counts_by_target": [{"blocking": 0, "submitted": 3, "target": "proposer-1"}],
-            "expected": 4,
-            "kind": "review",
-            "missing_reviewer_lanes": ["proposer-5"],
-            "round": 1,
-            "targets": ["proposer-1"],
-            "active_reviewer_lanes": ["proposer-2", "proposer-3", "proposer-4", "proposer-5"],
-            "exited_reviewer_lanes": [],
-        }
-        status_after_exit = dict(stalled_status)
-        status_after_exit["exited_reviewer_lanes"] = ["proposer-5"]
-        status_after_exit["active_reviewer_lanes"] = ["proposer-2", "proposer-3", "proposer-4"]
-        status_after_exit["reviewer_exit_reasons"] = {
-            "proposer-5": {"reason": "missing formal review artifact for proposer-5->proposer-1"}
-        }
-        status_after_exit["phase_progress"] = {
-            "actual": 3,
-            "complete": True,
-            "counts_by_target": [{"blocking": 0, "submitted": 3, "target": "proposer-1"}],
-            "expected": 3,
-            "kind": "review",
-            "missing_reviewer_lanes": [],
     def test_maybe_handle_stagnation_does_not_mark_progress_on_probe_completion_alone(self) -> None:
         helper = ProtocolReconstructionTest()
         stalled_status = helper.build_summary()
@@ -1316,6 +1281,41 @@ class CoordinatorStagnationReviewerExitTest(unittest.TestCase):
         self.assertEqual([], terminal_failures)
         self.assertEqual(1, driver.repair_cycles_without_progress)
 
+    def test_maybe_handle_stagnation_marks_missing_reviewer_exited_and_continues(self) -> None:
+        helper = ProtocolReconstructionTest()
+        stalled_status = helper.build_summary()
+        stalled_status["status"] = "running"
+        stalled_status["phase"] = "review"
+        stalled_status["review_round"] = 1
+        stalled_status["reviews"] = [
+            review for review in stalled_status["reviews"]
+            if not (review.get("reviewer") == "proposer-5" and review.get("target_proposer") == "proposer-1")
+        ]
+        stalled_status["phase_progress"] = {
+            "actual": 3,
+            "complete": False,
+            "counts_by_target": [{"blocking": 0, "submitted": 3, "target": "proposer-1"}],
+            "expected": 4,
+            "kind": "review",
+            "missing_reviewer_lanes": ["proposer-5"],
+            "round": 1,
+            "targets": ["proposer-1"],
+            "active_reviewer_lanes": ["proposer-2", "proposer-3", "proposer-4", "proposer-5"],
+            "exited_reviewer_lanes": [],
+        }
+        status_after_exit = dict(stalled_status)
+        status_after_exit["exited_reviewer_lanes"] = ["proposer-5"]
+        status_after_exit["active_reviewer_lanes"] = ["proposer-2", "proposer-3", "proposer-4"]
+        status_after_exit["reviewer_exit_reasons"] = {
+            "proposer-5": {"reason": "missing formal review artifact for proposer-5->proposer-1"}
+        }
+        status_after_exit["phase_progress"] = {
+            "actual": 3,
+            "complete": True,
+            "counts_by_target": [{"blocking": 0, "submitted": 3, "target": "proposer-1"}],
+            "expected": 3,
+            "kind": "review",
+            "missing_reviewer_lanes": [],
             "round": 1,
             "targets": ["proposer-1"],
             "active_reviewer_lanes": ["proposer-2", "proposer-3", "proposer-4"],
@@ -1358,41 +1358,6 @@ class CoordinatorStagnationReviewerExitTest(unittest.TestCase):
 
 
 class CoordinatorTimeoutSalvageTest(unittest.TestCase):
-    def test_generate_protocol_with_model_salvages_valid_artifact_after_timeout(self) -> None:
-        helper = ProtocolReconstructionTest()
-        summary_payload = helper.build_summary()
-        deterministic_protocol = transport.build_protocol_from_summary(summary_payload)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
-            driver.args = argparse.Namespace(max_model_attempts=1, role="debate-coordinator")
-            driver.workspace = Path(tmpdir)
-
-            protocol_path = driver.workspace / transport.coordinator_protocol_filename()
-
-            def fake_call_model(_prompt_parts: list[str], *, artifact_kind: str) -> None:
-                self.assertEqual("coordinator_protocol", artifact_kind)
-                payload = json.loads(json.dumps(deterministic_protocol, ensure_ascii=False))
-                payload["overall_confidence"] = {
-                    "level": "high",
-                    "rationale": "Coordinator finished writing before the wrapper timeout fired.",
-                }
-                protocol_path.write_text(
-                    transport.check_protocol(json.dumps(payload, ensure_ascii=False)).normalized_text,
-                    encoding="utf-8",
-                )
-                raise driver_module.DriverError("OpenClaw model turn timed out after 300s for debate-coordinator.")
-
-            driver.call_model = fake_call_model
-
-            protocol_payload, generation_mode = driver_module.ChemQAReviewDriver.generate_protocol_with_model(
-                driver,
-                summary_payload=summary_payload,
-                deterministic_protocol=deterministic_protocol,
-            )
-
-            self.assertEqual("model_timeout_salvaged", generation_mode)
-            self.assertEqual("accepted", protocol_payload["acceptance_status"])
     def test_attempt_model_artifact_rejects_unchanged_preexisting_candidate_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
@@ -1452,46 +1417,46 @@ class CoordinatorTimeoutSalvageTest(unittest.TestCase):
             self.assertEqual("propose:candidate", recorded_failures[0][0])
             self.assertIn("was not updated by model turn", " ".join(recorded_failures[0][2] or []))
 
+    def test_generate_protocol_with_model_salvages_valid_artifact_after_timeout(self) -> None:
+        helper = ProtocolReconstructionTest()
+        summary_payload = helper.build_summary()
+        deterministic_protocol = transport.build_protocol_from_summary(summary_payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+            driver.args = argparse.Namespace(max_model_attempts=1, role="debate-coordinator")
+            driver.workspace = Path(tmpdir)
+
+            protocol_path = driver.workspace / transport.coordinator_protocol_filename()
+
+            def fake_call_model(_prompt_parts: list[str], *, artifact_kind: str) -> None:
+                self.assertEqual("coordinator_protocol", artifact_kind)
+                payload = json.loads(json.dumps(deterministic_protocol, ensure_ascii=False))
+                payload["overall_confidence"] = {
+                    "level": "high",
+                    "rationale": "Coordinator finished writing before the wrapper timeout fired.",
+                }
+                protocol_path.write_text(
+                    transport.check_protocol(json.dumps(payload, ensure_ascii=False)).normalized_text,
+                    encoding="utf-8",
+                )
+                raise driver_module.DriverError("OpenClaw model turn timed out after 300s for debate-coordinator.")
+
+            driver.call_model = fake_call_model
+
+            protocol_payload, generation_mode = driver_module.ChemQAReviewDriver.generate_protocol_with_model(
+                driver,
+                summary_payload=summary_payload,
+                deterministic_protocol=deterministic_protocol,
+            )
+
+            self.assertEqual("model_timeout_salvaged", generation_mode)
+            self.assertEqual("accepted", protocol_payload["acceptance_status"])
             self.assertEqual("high", protocol_payload["overall_confidence"]["level"])
             self.assertTrue(protocol_path.is_file())
 
 
 class RunStatusShapeTest(unittest.TestCase):
-    def test_sync_run_status_writes_done_and_terminal_state(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
-            driver.args = argparse.Namespace(team="chemqa-review-run-status", role="debate-coordinator")
-            driver.lane_failures = {}
-            driver.reviewer_exit_state = lambda: {}
-            driver.repair_cycles_without_progress = 0
-            driver.last_recovery_payload = {}
-            driver.last_respawn_events = []
-            driver.all_tasks = lambda: []
-            driver.last_progress_change = 0.0
-            driver.last_progress_key = ""
-            store = driver_module.FileControlStore(Path(tmpdir))
-            driver.store = store
-
-            driver_module.ChemQAReviewDriver.sync_run_status(
-                driver,
-                {"status": "done", "terminal_state": "failed", "failure_reason": "engine stopped", "phase": "done"},
-                {"action": "stop", "advance_ready": False, "message": "done"},
-            )
-
-            payload = json.loads((store.control / "run-status" / "chemqa-review-run-status.json").read_text(encoding="utf-8"))
-            self.assertEqual("done", payload["status"])
-            self.assertEqual("failed", payload["terminal_state"])
-            self.assertEqual("engine_terminal_failure", payload["terminal_reason_code"])
-            self.assertEqual("engine stopped", payload["terminal_reason"])
-
-    def test_emit_terminal_failure_writes_done_failed_reason_code(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
-            driver.args = argparse.Namespace(team="chemqa-review-terminal-failure", role="debate-coordinator")
-            driver.terminal_failure_emitted = False
-            driver.workspace = Path(tmpdir)
-            driver.lane_failures = {"proposer-2": {"reason": "bad output"}}
-            driver.repair_cycles_without_progress = 1
     def test_ensure_candidate_submission_retries_after_duplicate_epoch_submission(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
@@ -1579,6 +1544,41 @@ class RunStatusShapeTest(unittest.TestCase):
             self.assertIn("duplicate", "\n".join(attempt_prompts[1]).lower())
             self.assertEqual(["progress"], progress_marks)
 
+    def test_sync_run_status_writes_done_and_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+            driver.args = argparse.Namespace(team="chemqa-review-run-status", role="debate-coordinator")
+            driver.lane_failures = {}
+            driver.reviewer_exit_state = lambda: {}
+            driver.repair_cycles_without_progress = 0
+            driver.last_recovery_payload = {}
+            driver.last_respawn_events = []
+            driver.all_tasks = lambda: []
+            driver.last_progress_change = 0.0
+            driver.last_progress_key = ""
+            store = driver_module.FileControlStore(Path(tmpdir))
+            driver.store = store
+
+            driver_module.ChemQAReviewDriver.sync_run_status(
+                driver,
+                {"status": "done", "terminal_state": "failed", "failure_reason": "engine stopped", "phase": "done"},
+                {"action": "stop", "advance_ready": False, "message": "done"},
+            )
+
+            payload = json.loads((store.control / "run-status" / "chemqa-review-run-status.json").read_text(encoding="utf-8"))
+            self.assertEqual("done", payload["status"])
+            self.assertEqual("failed", payload["terminal_state"])
+            self.assertEqual("engine_terminal_failure", payload["terminal_reason_code"])
+            self.assertEqual("engine stopped", payload["terminal_reason"])
+
+    def test_emit_terminal_failure_writes_done_failed_reason_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+            driver.args = argparse.Namespace(team="chemqa-review-terminal-failure", role="debate-coordinator")
+            driver.terminal_failure_emitted = False
+            driver.workspace = Path(tmpdir)
+            driver.lane_failures = {"proposer-2": {"reason": "bad output"}}
+            driver.repair_cycles_without_progress = 1
             driver.current_task = lambda: {"status": "in_progress"}
             driver.reviewer_exit_state = lambda: {"proposer-5": {"reason": "timeout"}}
             store = driver_module.FileControlStore(Path(tmpdir))
@@ -1990,41 +1990,6 @@ class RecoveryScriptTest(unittest.TestCase):
                 else:
                     os.environ["CLAWTEAM_DATA_DIR"] = previous_data_dir
 
-    def test_recover_rebuttal_repairs_existing_rebuttal_file(self) -> None:
-        debate_state = load_module(DEBATE_STATE_PATH, "debate_state_for_recovery_rebuttal_tests")
-        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as workspace_root:
-            env = os.environ.copy()
-            env["CLAWTEAM_DATA_DIR"] = tmpdir
-            previous_data_dir = os.environ.get("CLAWTEAM_DATA_DIR")
-            os.environ["CLAWTEAM_DATA_DIR"] = tmpdir
-            try:
-                config = debate_state.DebateConfig(
-                    team_name="chemqa-review-recover-rebuttal",
-                    workflow="chemqa-review",
-                    goal="Question: test?",
-                    evidence_policy="strict",
-                    proposer_count=5,
-                    max_review_rounds=2,
-                    max_rebuttal_rounds=1,
-                    max_epochs=2,
-                )
-                debate_state.init_debate_state(config, reset=True)
-
-                fixtures = Path(tmpdir) / "fixtures"
-                fixtures.mkdir(parents=True, exist_ok=True)
-                proposal_path = fixtures / "proposal.yaml"
-                proposal_path.write_text(
-                    "\n".join(
-                        [
-                            "artifact_kind: candidate_submission",
-                            "phase: propose",
-                            "owner: proposer-1",
-                            "direct_answer: A",
-                            "summary: initial answer",
-                            "submission_trace:",
-                            "- step: reasoning",
-                            "  status: success",
-                            "  detail: initial trace",
     def test_recover_propose_uses_archived_candidate_when_workspace_and_capture_are_missing(self) -> None:
         debate_state = load_module(DEBATE_STATE_PATH, "debate_state_for_recovery_propose_archive_tests")
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as workspace_root:
@@ -2305,6 +2270,41 @@ class RecoveryScriptTest(unittest.TestCase):
                 else:
                     os.environ["CLAWTEAM_DATA_DIR"] = previous_data_dir
 
+    def test_recover_rebuttal_repairs_existing_rebuttal_file(self) -> None:
+        debate_state = load_module(DEBATE_STATE_PATH, "debate_state_for_recovery_rebuttal_tests")
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as workspace_root:
+            env = os.environ.copy()
+            env["CLAWTEAM_DATA_DIR"] = tmpdir
+            previous_data_dir = os.environ.get("CLAWTEAM_DATA_DIR")
+            os.environ["CLAWTEAM_DATA_DIR"] = tmpdir
+            try:
+                config = debate_state.DebateConfig(
+                    team_name="chemqa-review-recover-rebuttal",
+                    workflow="chemqa-review",
+                    goal="Question: test?",
+                    evidence_policy="strict",
+                    proposer_count=5,
+                    max_review_rounds=2,
+                    max_rebuttal_rounds=1,
+                    max_epochs=2,
+                )
+                debate_state.init_debate_state(config, reset=True)
+
+                fixtures = Path(tmpdir) / "fixtures"
+                fixtures.mkdir(parents=True, exist_ok=True)
+                proposal_path = fixtures / "proposal.yaml"
+                proposal_path.write_text(
+                    "\n".join(
+                        [
+                            "artifact_kind: candidate_submission",
+                            "phase: propose",
+                            "owner: proposer-1",
+                            "direct_answer: A",
+                            "summary: initial answer",
+                            "submission_trace:",
+                            "- step: reasoning",
+                            "  status: success",
+                            "  detail: initial trace",
                         ]
                     ),
                     encoding="utf-8",
@@ -2413,6 +2413,30 @@ class RecoveryScriptTest(unittest.TestCase):
             self.assertEqual("failed", payload["terminal_state"])
             self.assertEqual("stalled", payload["terminal_reason_code"])
 
+    def test_recover_run_stalled_single_step_does_not_publish_done_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recoverer = recover_run.RunRecoverer.__new__(recover_run.RunRecoverer)
+            recoverer.args = argparse.Namespace(team="chemqa-review-recover-status", max_steps=1, json=False)
+            recoverer.actions = []
+            recoverer.blockers = []
+            recoverer.store = recover_run.FileControlStore(Path(tmpdir))
+            recoverer._phase_signature = lambda _state: "review:1"
+            recoverer.status = lambda: {"status": "running", "phase": "review"}
+            recoverer.repair_invalid_review_state = lambda _state: False
+            recoverer.recover_propose = lambda _state: False
+            recoverer.recover_review = lambda _state: False
+            recoverer.recover_rebuttal = lambda _state: False
+            recoverer.next_action = lambda _agent: {"action": "wait"}
+            recoverer.respawn_actionable_roles = lambda: False
+
+            exit_code = recover_run.RunRecoverer.run(recoverer)
+
+            self.assertEqual(1, exit_code)
+            payload = json.loads((Path(tmpdir) / "control" / "run-status" / "chemqa-review-recover-status.json").read_text(encoding="utf-8"))
+            self.assertEqual("running", payload["status"])
+            self.assertNotIn("terminal_state", payload)
+            self.assertNotIn("terminal_reason_code", payload)
+
 
 class SnapshotScriptTest(unittest.TestCase):
     def run_cmd(self, env: dict[str, str], *command: str) -> str:
@@ -2448,30 +2472,6 @@ class SnapshotScriptTest(unittest.TestCase):
 
                 def write_file(name: str, text: str) -> Path:
                     path = proposal_dir / name
-    def test_recover_run_stalled_single_step_does_not_publish_done_failed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            recoverer = recover_run.RunRecoverer.__new__(recover_run.RunRecoverer)
-            recoverer.args = argparse.Namespace(team="chemqa-review-recover-status", max_steps=1, json=False)
-            recoverer.actions = []
-            recoverer.blockers = []
-            recoverer.store = recover_run.FileControlStore(Path(tmpdir))
-            recoverer._phase_signature = lambda _state: "review:1"
-            recoverer.status = lambda: {"status": "running", "phase": "review"}
-            recoverer.repair_invalid_review_state = lambda _state: False
-            recoverer.recover_propose = lambda _state: False
-            recoverer.recover_review = lambda _state: False
-            recoverer.recover_rebuttal = lambda _state: False
-            recoverer.next_action = lambda _agent: {"action": "wait"}
-            recoverer.respawn_actionable_roles = lambda: False
-
-            exit_code = recover_run.RunRecoverer.run(recoverer)
-
-            self.assertEqual(1, exit_code)
-            payload = json.loads((Path(tmpdir) / "control" / "run-status" / "chemqa-review-recover-status.json").read_text(encoding="utf-8"))
-            self.assertEqual("running", payload["status"])
-            self.assertNotIn("terminal_state", payload)
-            self.assertNotIn("terminal_reason_code", payload)
-
                     path.write_text(text, encoding="utf-8")
                     return path
 
@@ -2585,6 +2585,65 @@ class SnapshotScriptTest(unittest.TestCase):
                 payload_legacy,
                 snapshot_module_legacy.load_terminal_status(store, "run-legacy"),
             )
+
+    def test_write_run_status_running_does_not_emit_terminal_failure_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recoverer = recover_run.RunRecoverer.__new__(recover_run.RunRecoverer)
+            recoverer.args = argparse.Namespace(team="chemqa-review-recover-running")
+            recoverer.actions = ["respawn-role proposer-4 pid=123"]
+            recoverer.blockers = ["missing formal review artifact"]
+            recoverer.store = recover_run.FileControlStore(Path(tmpdir))
+
+            recover_run.RunRecoverer.write_run_status(
+                recoverer,
+                state={"phase": "review", "review_round": 1},
+                status="running",
+                recovery_cycles_without_progress=1,
+                progress_made=False,
+                terminal_state="failed",
+                terminal_reason_code="stalled",
+                terminal_reason="should not be persisted for running status",
+            )
+
+            payload = json.loads((Path(tmpdir) / "control" / "run-status" / "chemqa-review-recover-running.json").read_text(encoding="utf-8"))
+            self.assertEqual("running", payload["status"])
+            self.assertEqual("review", payload["phase"])
+            self.assertNotIn("terminal_state", payload)
+            self.assertNotIn("terminal_reason_code", payload)
+            self.assertNotIn("terminal_reason", payload)
+
+    def test_run_leaves_run_status_running_when_single_step_recovery_stalls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recoverer = recover_run.RunRecoverer.__new__(recover_run.RunRecoverer)
+            recoverer.args = argparse.Namespace(team="chemqa-review-recover-loop", max_steps=1, json=False)
+            recoverer.actions = []
+            recoverer.blockers = ["missing formal review artifact for proposer-4->proposer-1"]
+            recoverer.store = recover_run.FileControlStore(Path(tmpdir))
+            recoverer._phase_signature = lambda state: "review-1"
+            recoverer.status = lambda: {
+                "status": "running",
+                "phase": "review",
+                "review_round": 1,
+                "rebuttal_round": 0,
+                "phase_progress": {"kind": "review", "complete": False, "actual": 3, "expected": 4},
+            }
+            recoverer.repair_invalid_review_state = lambda _state: False
+            recoverer.recover_propose = lambda _state: False
+            recoverer.recover_review = lambda _state: False
+            recoverer.recover_rebuttal = lambda _state: False
+            recoverer.next_action = lambda _agent: {"action": "wait"}
+            recoverer.advance = lambda: None
+            recoverer.respawn_actionable_roles = lambda: False
+
+            exit_code = recover_run.RunRecoverer.run(recoverer)
+
+            self.assertEqual(1, exit_code)
+            payload = json.loads((Path(tmpdir) / "control" / "run-status" / "chemqa-review-recover-loop.json").read_text(encoding="utf-8"))
+            self.assertEqual("running", payload["status"])
+            self.assertEqual("review", payload["phase"])
+            self.assertEqual(0, payload["recovery_cycles_without_progress"])
+            self.assertNotIn("terminal_state", payload)
+            self.assertNotIn("terminal_reason_code", payload)
 
 
 if __name__ == "__main__":

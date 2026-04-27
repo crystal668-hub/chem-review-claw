@@ -424,6 +424,18 @@ class ChemQARunner:
         result = self._run_subprocess(command, env=env, cwd=self.chemqa_root, timeout=120)
         self._parse_json_stdout(result, command)
 
+    def _load_archived_completed_qa_result(self, archive_meta: dict[str, Any]) -> tuple[Path, dict[str, Any]] | None:
+        archived_qa_result = str(archive_meta.get("qa_result_path") or "").strip()
+        if not archived_qa_result:
+            return None
+        qa_result_path = Path(archived_qa_result).expanduser()
+        if not qa_result_path.is_file():
+            return None
+        payload = json.loads(qa_result_path.read_text(encoding="utf-8"))
+        if str(payload.get("terminal_state") or "").strip() != "completed":
+            return None
+        return qa_result_path.resolve(), payload
+
     def _ensure_artifacts(
         self,
         run_id: str,
@@ -593,6 +605,35 @@ class ChemQARunner:
                     run_status=run_status,
                     env=env,
                 )
+                reconciled_qa_result = self._load_archived_completed_qa_result(archive_meta)
+                if reconciled_qa_result is not None:
+                    qa_result_path, qa_result = reconciled_qa_result
+                    short_answer_text, full_response_text = self._build_chemqa_full_response(qa_result=qa_result)
+                    runner_meta = {
+                        "run_id": run_id,
+                        "launch": payload,
+                        "qa_result_path": str(qa_result_path),
+                        "acceptance_status": qa_result.get("acceptance_status"),
+                        "terminal_state": qa_result.get("terminal_state"),
+                        "terminal_reason_code": terminal_reason_code or "",
+                        "artifact_collection": artifact_collection,
+                        "run_status": run_status,
+                        "reconciled_from_archived_artifacts": True,
+                        **archive_meta,
+                    }
+                    if legacy_status:
+                        runner_meta["legacy_status"] = legacy_status
+                    if input_bundle is not None:
+                        runner_meta["runtime_bundle"] = input_bundle.to_meta()
+                    return RunnerResult(
+                        status=RunStatus.COMPLETED,
+                        answer=AnswerPayload(
+                            short_answer_text=short_answer_text,
+                            full_response_text=full_response_text,
+                        ),
+                        raw=qa_result,
+                        runner_meta=runner_meta,
+                    )
                 message = (
                     f"ChemQA run ended with non-success status: "
                     f"{terminal_state or legacy_status or 'unknown'}"
