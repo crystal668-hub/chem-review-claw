@@ -1,0 +1,14 @@
+{
+  "diagnostics": [
+    {
+      "input_name": "eta-cyclopentadienyl iron",
+      "provider_status": "FAILURE",
+      "provider_message": "Unsupported nomenclature feature: eta bonding notation"
+    },
+    {
+      "input_name": "xylene",
+      "provider_status": "FAILURE",
+      "provider_message": "Name appears to be ambiguous between multiple structures"
+    }
+  ]
+}
