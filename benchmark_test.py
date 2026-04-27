@@ -2521,6 +2521,57 @@ def materialize_group_failure_results(
     return [GroupRecordResult(**asdict(entry)) for entry in entries]
 
 
+def build_result_axes_from_runner(run_result: Any) -> dict[str, Any]:
+    status = getattr(run_result, "status", None)
+    runner_meta = getattr(run_result, "runner_meta", None) or {}
+    raw = getattr(run_result, "raw", None) or {}
+    recovery = getattr(run_result, "recovery", None)
+    scored = bool(run_result.should_score())
+    run_lifecycle_status = "completed" if status in (RunStatus.COMPLETED, RunStatus.RECOVERED) else "failed"
+
+    terminal_state = runner_meta.get("terminal_state")
+    if terminal_state == "completed":
+        protocol_completion_status = "completed"
+    elif raw.get("run_status") is not None:
+        protocol_completion_status = "failed"
+    else:
+        protocol_completion_status = "missing"
+
+    axes: dict[str, Any] = {
+        "schema_version": 2,
+        "run_lifecycle_status": run_lifecycle_status,
+        "protocol_completion_status": protocol_completion_status,
+        "protocol_acceptance_status": runner_meta.get("acceptance_status"),
+    }
+
+    if recovery is not None:
+        recovery_mode = str(getattr(recovery, "recovery_mode", "") or "none")
+        axes.update(
+            answer_availability=(
+                "preview_only"
+                if recovery_mode == "run-status-final-answer-preview"
+                else "recovered_candidate"
+            ),
+            answer_reliability=str(getattr(recovery, "reliability", "") or "none"),
+            evaluable=bool(getattr(recovery, "evaluable", False)),
+            scored=scored,
+            recovery_mode=recovery_mode,
+            degraded_execution=True,
+        )
+    else:
+        status_is_completed = status is RunStatus.COMPLETED
+        axes.update(
+            answer_availability="native_final",
+            answer_reliability="native" if status_is_completed else "none",
+            evaluable=scored,
+            scored=scored,
+            recovery_mode="none",
+            degraded_execution=not status_is_completed,
+        )
+
+    axes["execution_error_kind"] = None if axes["scored"] else "execution_error"
+    return axes
+
 
 def run_group(
     *,
@@ -2614,6 +2665,7 @@ def run_group(
         try:
             run_result = runner.run(record, group)
             ensure_compatible_runner_result(run_result)
+            axes = build_result_axes_from_runner(run_result)
             if run_result.should_score():
                 evaluation = evaluate_answer(
                     record,
@@ -2623,6 +2675,7 @@ def run_group(
                 )
                 answer_text = run_result.answer.full_response_text or run_result.answer.short_answer_text
                 entry = GroupRecordResult(
+                    **axes,
                     group_id=group.id,
                     group_label=group.label,
                     runner=group.runner,
@@ -2662,6 +2715,7 @@ def run_group(
                     runner_meta=run_result.runner_meta,
                     raw=run_result.raw,
                 )
+                entry = GroupRecordResult(**{**asdict(entry), **axes, "error": error_message})
         except Exception as exc:
             elapsed = time.time() - started
             error_message = f"Record `{record.record_id}` failed in group `{group.id}`: {exc}"

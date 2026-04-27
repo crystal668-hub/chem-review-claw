@@ -310,6 +310,7 @@ Points: 0.5, Item: Second criterion
             group_dir = root / "per-record" / "single_llm_web_on"
             group_dir.mkdir(parents=True, exist_ok=True)
             payload = benchmark_test.GroupRecordResult(
+                schema_version=2,
                 group_id="single_llm_web_on",
                 group_label="单一 LLM + 启用 websearch plugin",
                 runner="single_llm",
@@ -326,6 +327,16 @@ Points: 0.5, Item: Second criterion
                 runner_meta={},
                 raw={},
                 elapsed_seconds=1.0,
+                run_lifecycle_status="completed",
+                protocol_completion_status="completed",
+                protocol_acceptance_status=None,
+                answer_availability="native_final",
+                answer_reliability="native",
+                evaluable=True,
+                scored=True,
+                recovery_mode="none",
+                degraded_execution=False,
+                execution_error_kind=None,
                 error=None,
                 short_answer_text="A",
                 full_response_text="FINAL ANSWER: A",
@@ -1064,6 +1075,7 @@ Points: 0.5, Item: Second criterion
     def test_aggregate_results_groups_by_experiment(self) -> None:
         sample = [
             benchmark_test.GroupRecordResult(
+                schema_version=2,
                 group_id="g1",
                 group_label="Group 1",
                 runner="single_llm",
@@ -1089,8 +1101,19 @@ Points: 0.5, Item: Second criterion
                 runner_meta={},
                 raw={},
                 elapsed_seconds=2.0,
+                run_lifecycle_status="completed",
+                protocol_completion_status="completed",
+                protocol_acceptance_status=None,
+                answer_availability="native_final",
+                answer_reliability="native",
+                evaluable=True,
+                scored=True,
+                recovery_mode="none",
+                degraded_execution=False,
+                execution_error_kind=None,
             ),
             benchmark_test.GroupRecordResult(
+                schema_version=2,
                 group_id="g1",
                 group_label="Group 1",
                 runner="single_llm",
@@ -1116,6 +1139,16 @@ Points: 0.5, Item: Second criterion
                 runner_meta={},
                 raw={},
                 elapsed_seconds=4.0,
+                run_lifecycle_status="completed",
+                protocol_completion_status="completed",
+                protocol_acceptance_status=None,
+                answer_availability="native_final",
+                answer_reliability="native",
+                evaluable=True,
+                scored=True,
+                recovery_mode="none",
+                degraded_execution=False,
+                execution_error_kind=None,
             ),
         ]
         summary = benchmark_test.aggregate_results(sample)
@@ -1127,6 +1160,7 @@ Points: 0.5, Item: Second criterion
     def test_aggregate_results_includes_superchem_metrics(self) -> None:
         sample = [
             benchmark_test.GroupRecordResult(
+                schema_version=2,
                 group_id="g1",
                 group_label="Group 1",
                 runner="single_llm",
@@ -1152,6 +1186,16 @@ Points: 0.5, Item: Second criterion
                 runner_meta={},
                 raw={},
                 elapsed_seconds=5.0,
+                run_lifecycle_status="completed",
+                protocol_completion_status="completed",
+                protocol_acceptance_status=None,
+                answer_availability="native_final",
+                answer_reliability="native",
+                evaluable=True,
+                scored=True,
+                recovery_mode="none",
+                degraded_execution=False,
+                execution_error_kind=None,
             )
         ]
         summary = benchmark_test.aggregate_results(sample)
@@ -1161,6 +1205,7 @@ Points: 0.5, Item: Second criterion
     def test_results_json_keeps_legacy_top_level_shape(self) -> None:
         sample = [
             benchmark_test.GroupRecordResult(
+                schema_version=2,
                 group_id="g1",
                 group_label="Group 1",
                 runner="single_llm",
@@ -1186,8 +1231,19 @@ Points: 0.5, Item: Second criterion
                 runner_meta={},
                 raw={},
                 elapsed_seconds=2.0,
+                run_lifecycle_status="completed",
+                protocol_completion_status="completed",
+                protocol_acceptance_status=None,
+                answer_availability="native_final",
+                answer_reliability="native",
+                evaluable=True,
+                scored=True,
+                recovery_mode="none",
+                degraded_execution=False,
+                execution_error_kind=None,
             ),
             benchmark_test.GroupRecordResult(
+                schema_version=2,
                 group_id="g1",
                 group_label="Group 1",
                 runner="single_llm",
@@ -1213,6 +1269,16 @@ Points: 0.5, Item: Second criterion
                 runner_meta={},
                 raw={},
                 elapsed_seconds=4.0,
+                run_lifecycle_status="completed",
+                protocol_completion_status="completed",
+                protocol_acceptance_status=None,
+                answer_availability="native_final",
+                answer_reliability="native",
+                evaluable=True,
+                scored=True,
+                recovery_mode="none",
+                degraded_execution=False,
+                execution_error_kind=None,
             ),
         ]
         summary = benchmark_test.aggregate_results(sample)
@@ -1222,6 +1288,50 @@ Points: 0.5, Item: Second criterion
         self.assertEqual(["g1"], summary["group_order"])
         self.assertIn("g1", summary["groups"])
         self.assertIn("g1::chembench", summary["group_subset"])
+
+    def test_group_record_result_includes_evaluability_axes(self) -> None:
+        result = benchmark_test.GroupRecordResult(
+            schema_version=2,
+            group_id="g1",
+            group_label="Group 1",
+            runner="single_llm",
+            websearch=False,
+            record_id="r1",
+            subset="chembench",
+            dataset="d1",
+            source_file="/tmp/a.jsonl",
+            eval_kind="chembench_open_ended",
+            prompt="Q1",
+            reference_answer="1",
+            answer_text="1",
+            evaluation={
+                "eval_kind": "chembench_open_ended",
+                "score": 1.0,
+                "max_score": 1.0,
+                "normalized_score": 1.0,
+                "passed": True,
+                "primary_metric": "exact_str_match",
+                "primary_metric_direction": "higher_is_better",
+                "details": {},
+            },
+            runner_meta={},
+            raw={},
+            elapsed_seconds=2.0,
+            run_lifecycle_status="completed",
+            protocol_completion_status="completed",
+            protocol_acceptance_status=None,
+            answer_availability="native_final",
+            answer_reliability="native",
+            evaluable=True,
+            scored=True,
+            recovery_mode="none",
+            degraded_execution=False,
+            execution_error_kind=None,
+            error=None,
+        )
+        self.assertEqual(2, result.schema_version)
+        self.assertTrue(result.evaluable)
+        self.assertTrue(result.scored)
 
     def test_export_csv_reports_writes_summary_files(self) -> None:
         summary = {

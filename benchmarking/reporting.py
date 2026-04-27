@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 @dataclass
 class GroupRecordResult:
+    schema_version: int
     group_id: str
     group_label: str
     runner: str
@@ -23,6 +24,16 @@ class GroupRecordResult:
     runner_meta: dict[str, Any]
     raw: dict[str, Any]
     elapsed_seconds: float
+    run_lifecycle_status: str
+    protocol_completion_status: str
+    protocol_acceptance_status: str | None
+    answer_availability: str
+    answer_reliability: str
+    evaluable: bool
+    scored: bool
+    recovery_mode: str
+    degraded_execution: bool
+    execution_error_kind: str | None = None
     error: str | None = None
     short_answer_text: str = ""
     full_response_text: str = ""
@@ -136,6 +147,7 @@ def build_error_group_record_result(
     )
     compatible_answer_text = answer_text or full_text or short_text
     return GroupRecordResult(
+        schema_version=2,
         group_id=str(getattr(group, "id", "") or ""),
         group_label=str(getattr(group, "label", "") or ""),
         runner=str(getattr(group, "runner", "") or ""),
@@ -152,6 +164,16 @@ def build_error_group_record_result(
         runner_meta=meta,
         raw=payload,
         elapsed_seconds=elapsed_seconds,
+        run_lifecycle_status="failed",
+        protocol_completion_status="missing",
+        protocol_acceptance_status=None,
+        answer_availability="missing",
+        answer_reliability="none",
+        evaluable=False,
+        scored=False,
+        recovery_mode="none",
+        degraded_execution=False,
+        execution_error_kind="execution_error",
         error=error_message,
         short_answer_text=short_text,
         full_response_text=full_text,

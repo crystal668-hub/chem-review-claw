@@ -61,7 +61,7 @@
     - `provisioning.py`
       - Creates slot workspaces and `.debateclaw-slot.json` sentinels.
     - `reporting.py`
-      - Aggregates per-record results into summary buckets.
+      - Defines the per-record benchmark result schema and aggregates per-record results into summary buckets.
     - `runners/`
       - `single_llm.py`: baseline single-agent runner.
       - `chemqa.py`: ChemQA launch/monitor/archive/cleanup runner.
@@ -112,6 +112,7 @@
   - Input / Output:
     - Input: benchmark root or dataset files, group list, timeouts, config path, model/profile overrides.
     - Output: `results.json`, `results.partial.json`, `runtime-manifest.json`, `runtime-config/*.json`, `per-record/*/*.json`, CSV summaries.
+    - Per-record JSON entries are on schema version `2` and include explicit evaluability axes such as run lifecycle status, protocol completion/acceptance status, answer availability/reliability, evaluable/scored flags, recovery mode, degraded execution, and execution error kind.
   - Implementation location: `workspace/benchmark_test.py`, `workspace/benchmarking/*`
   - Status: `DONE`
 
