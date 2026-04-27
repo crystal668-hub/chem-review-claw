@@ -26,6 +26,10 @@ class FailureInfo:
 class RecoveryInfo:
     source: str
     scored: bool
+    evaluable: bool = False
+    reliability: str = "none"
+    recovery_mode: str = "none"
+    reason: str = ""
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -41,7 +45,12 @@ class RunnerResult:
     def should_score(self) -> bool:
         if self.status is RunStatus.COMPLETED:
             return True
-        return self.status is RunStatus.RECOVERED and self.recovery is not None and self.recovery.scored
+        return (
+            self.status is RunStatus.RECOVERED
+            and self.recovery is not None
+            and self.recovery.scored
+            and self.recovery.evaluable
+        )
 
     @property
     def short_answer_text(self) -> str:

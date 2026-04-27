@@ -230,6 +230,9 @@ class BenchmarkTestModuleTests(unittest.TestCase):
             recovery=benchmark_test.RecoveryInfo(
                 source="candidate_submission",
                 scored=True,
+                evaluable=True,
+                reliability="high_confidence_recovered",
+                recovery_mode="candidate_submission",
                 details={
                     "evaluable": True,
                     "reliability": "high_confidence_recovered",
@@ -2180,6 +2183,9 @@ Points: 0.5, Item: Second criterion
             recovery=benchmark_test.RecoveryInfo(
                 source="candidate_submission",
                 scored=True,
+                evaluable=True,
+                reliability="high_confidence_recovered",
+                recovery_mode="candidate_submission",
                 details={
                     "evaluable": True,
                     "reliability": "high_confidence_recovered",

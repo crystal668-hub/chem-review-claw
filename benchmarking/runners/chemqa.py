@@ -410,6 +410,47 @@ class ChemQARunner:
             }
         return None
 
+    def _assess_recovered_answer(
+        self,
+        *,
+        run_id: str,
+        run_status: dict[str, Any],
+        archive_meta: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        _ = archive_meta
+        fallback_payload = self._build_candidate_submission_fallback(run_id, run_status)
+        if fallback_payload is None:
+            return None
+        short_answer_text, full_response_text, fallback_meta = fallback_payload
+        short_text = self._normalize_space(short_answer_text)
+        if not short_text:
+            return {
+                "evaluable": False,
+                "scored": False,
+                "reliability": "none",
+                "recovery_mode": str(fallback_meta.get("fallback_source") or "none"),
+                "reason": "empty_short_answer",
+                "short_answer_text": "",
+                "full_response_text": full_response_text,
+                "details": fallback_meta,
+            }
+        recovery_mode = str(fallback_meta.get("fallback_source") or "candidate_submission")
+        reliability = (
+            "high_confidence_recovered"
+            if recovery_mode != "run-status-final-answer-preview"
+            else "low_confidence_recovered"
+        )
+        return {
+            "evaluable": True,
+            "scored": True,
+            "reliability": reliability,
+            "recovery_mode": recovery_mode,
+            "reason": "",
+            "short_answer_text": short_text,
+            "full_response_text": full_response_text,
+            "details": fallback_meta,
+        }
+
     def _collect_artifacts_from_source(self, *, source_dir: Path, output_dir: Path, env: dict[str, str]) -> None:
         command = [
             self._current_python(),
@@ -658,27 +699,40 @@ class ChemQARunner:
                     runner_meta["legacy_status"] = legacy_status
                 if input_bundle is not None:
                     runner_meta["runtime_bundle"] = input_bundle.to_meta()
-                fallback_payload = self._build_candidate_submission_fallback(run_id, run_status)
-                if fallback_payload is not None:
-                    short_answer_text, full_response_text, fallback_meta = fallback_payload
+                recovery_assessment = self._assess_recovered_answer(
+                    run_id=run_id,
+                    run_status=run_status,
+                    archive_meta=archive_meta,
+                )
+                if recovery_assessment is not None and recovery_assessment.get("evaluable"):
+                    recovery_details = self._deep_copy_jsonish(recovery_assessment.get("details") or {})
                     runner_meta.update(
                         {
                             "fallback_used": True,
-                            **fallback_meta,
+                            **recovery_details,
+                            "evaluable": True,
+                            "scored": True,
+                            "recovery_mode": str(recovery_assessment["recovery_mode"]),
+                            "answer_reliability": str(recovery_assessment["reliability"]),
+                            "degraded_execution": True,
                         }
                     )
                     return RunnerResult(
                         status=RunStatus.RECOVERED,
                         answer=AnswerPayload(
-                            short_answer_text=short_answer_text,
-                            full_response_text=full_response_text,
+                            short_answer_text=str(recovery_assessment["short_answer_text"]),
+                            full_response_text=str(recovery_assessment["full_response_text"]),
                         ),
-                        raw={"run_status": run_status, "fallback": fallback_meta},
+                        raw={"run_status": run_status, "fallback": recovery_details},
                         runner_meta=runner_meta,
                         recovery=RecoveryInfo(
-                            source=str(fallback_meta["fallback_source"]),
-                            scored=False,
-                            details=fallback_meta,
+                            source="candidate_submission",
+                            scored=True,
+                            evaluable=True,
+                            reliability=str(recovery_assessment["reliability"]),
+                            recovery_mode=str(recovery_assessment["recovery_mode"]),
+                            reason=str(recovery_assessment["reason"]),
+                            details=recovery_details,
                         ),
                     )
                 return RunnerResult(

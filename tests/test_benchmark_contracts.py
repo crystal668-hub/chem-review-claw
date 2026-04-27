@@ -36,7 +36,7 @@ class BenchmarkContractsTests(unittest.TestCase):
             answer=AnswerPayload(short_answer_text="42", full_response_text="FINAL ANSWER: 42"),
             raw={},
             runner_meta={},
-            recovery=RecoveryInfo(source="proposer-1-proposal", scored=True, details={}),
+            recovery=RecoveryInfo(source="proposer-1-proposal", scored=True, evaluable=True, details={}),
         )
         recovery_without_info = RunnerResult(
             status=RunStatus.RECOVERED,

@@ -196,7 +196,7 @@
   - Status: `DONE`
 
 - Name: ChemQA benchmark runner
-  - Description: Launches ChemQA preset flow, waits for terminal run-status, rebuilds/archives artifacts, falls back to proposal payloads when needed, writes cleanup manifest.
+  - Description: Launches ChemQA preset flow, waits for terminal run-status, rebuilds/archives artifacts, marks evaluable recovered candidate submissions as scoreable degraded executions, and writes cleanup manifest.
   - Input / Output:
     - Input: benchmark record, ChemQA skill root, config path, slot set, profile/round overrides.
     - Output: `RunnerResult` plus archived artifact tree.
