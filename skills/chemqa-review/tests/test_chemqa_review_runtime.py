@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,22 @@ debate_wrapper_module = load_module(DEBATECLAW_SCRIPTS_DIR / "openclaw_debate_ag
 
 
 class TransportHelpersTest(unittest.TestCase):
+    def test_current_proposal_prefers_current_epoch_and_ignores_prior_epoch_rows(self) -> None:
+        status_payload = {
+            "epoch": 2,
+            "proposals": [
+                {"epoch": 1, "proposer": "proposer-1", "status": "active", "body": "old"},
+                {"epoch": 1, "proposer": "proposer-2", "status": "active", "body": "other"},
+            ],
+        }
+        self.assertIsNone(transport.current_proposal(status_payload, "proposer-1"))
+
+        status_payload["proposals"].append({"epoch": 2, "proposer": "proposer-1", "status": "active", "body": "new"})
+        current = transport.current_proposal(status_payload, "proposer-1")
+        assert current is not None
+        self.assertEqual(2, current["epoch"])
+        self.assertEqual("new", current["body"])
+
     def test_placeholder_and_transport_review_shapes(self) -> None:
         placeholder = transport.render_placeholder_proposal("proposer-2")
         self.assertIn("artifact_kind: placeholder", placeholder)
@@ -1218,6 +1235,52 @@ class CoordinatorStagnationReviewerExitTest(unittest.TestCase):
             "expected": 3,
             "kind": "review",
             "missing_reviewer_lanes": [],
+    def test_maybe_handle_stagnation_does_not_mark_progress_on_probe_completion_alone(self) -> None:
+        helper = ProtocolReconstructionTest()
+        stalled_status = helper.build_summary()
+        stalled_status["status"] = "running"
+        stalled_status["phase"] = "review"
+        stalled_status["review_round"] = 1
+
+        driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+        driver.args = argparse.Namespace(stale_timeout_seconds=600, phase_repair_budget=2)
+        driver.current_task = lambda: {"status": "in_progress"}
+        driver.stale_for_seconds = lambda: 600
+        driver.last_repair_signature = ""
+        driver.repair_cycles_without_progress = 0
+        driver.last_recovery_payload = {}
+        driver.reviewer_exits = {}
+        driver.run_recovery_cycle = lambda: {"status": "done", "blockers": ["probe exited without state change"]}
+        statuses = [stalled_status, stalled_status]
+        driver.status = lambda: statuses.pop(0)
+        next_actions = [{"phase": "review", "action": "review"}, {"phase": "review", "action": "review"}]
+        driver.next_action = lambda: next_actions.pop(0)
+        driver.candidate_submission_text = lambda _status: helper.make_candidate()
+        marked: list[tuple[str, str]] = []
+        driver.mark_reviewer_exited = lambda reviewer, **kwargs: marked.append((reviewer, kwargs["reason"])) or True
+        advanced: list[str] = []
+        driver.advance = lambda: advanced.append("advanced")
+        progress_marks: list[str] = []
+        driver.mark_progress = lambda: progress_marks.append("progress")
+        terminal_failures: list[tuple[str, list[str]]] = []
+        driver.force_complete_with_missing_reviews = lambda **_kwargs: self.fail("should not force degraded completion without missing lanes")
+        driver.emit_terminal_failure = lambda **kwargs: terminal_failures.append(
+            (kwargs["reason"], list(kwargs.get("blockers") or []))
+        )
+
+        result = driver_module.ChemQAReviewDriver.maybe_handle_stagnation(
+            driver,
+            stalled_status,
+            {"phase": "review", "action": "review"},
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual([], marked)
+        self.assertEqual([], advanced)
+        self.assertEqual([], progress_marks)
+        self.assertEqual([], terminal_failures)
+        self.assertEqual(1, driver.repair_cycles_without_progress)
+
             "round": 1,
             "targets": ["proposer-1"],
             "active_reviewer_lanes": ["proposer-2", "proposer-3", "proposer-4"],
@@ -1295,6 +1358,65 @@ class CoordinatorTimeoutSalvageTest(unittest.TestCase):
 
             self.assertEqual("model_timeout_salvaged", generation_mode)
             self.assertEqual("accepted", protocol_payload["acceptance_status"])
+    def test_attempt_model_artifact_rejects_unchanged_preexisting_candidate_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+            driver.args = argparse.Namespace(
+                max_model_attempts=1,
+                lane_retry_budget=2,
+                role="proposer-1",
+                model_timeout_seconds=None,
+                candidate_timeout_seconds=None,
+                review_timeout_seconds=None,
+                rebuttal_timeout_seconds=None,
+                coordinator_timeout_seconds=None,
+                subprocess_timeout_grace_seconds=30,
+            )
+            driver.workspace = Path(tmpdir)
+            proposal_path = driver.workspace / transport.proposal_filename()
+            proposal_path.write_text(
+                "\n".join(
+                    [
+                        "artifact_kind: candidate_submission",
+                        "artifact_contract_version: react-reviewed-v2",
+                        "phase: propose",
+                        "owner: proposer-1",
+                        "direct_answer: CN(C)CCF",
+                        "summary: stale candidate left by an earlier epoch.",
+                        "submission_trace:",
+                        "- step: structural_reasoning",
+                        "  status: success",
+                        "  detail: stale candidate.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            driver.call_model = lambda _prompt_parts, *, artifact_kind: self.assertEqual("candidate_submission", artifact_kind)
+            recorded_failures: list[tuple[str, str, list[str] | None]] = []
+            driver.record_lane_failure = (
+                lambda failure_key, *, reason, problems=None: recorded_failures.append((failure_key, reason, problems)) or 1
+            )
+            driver.emit_terminal_failure = lambda **_kwargs: self.fail("unchanged stale artifact should not terminal-fail on first detection")
+
+            with self.assertRaises(driver_module.DriverError):
+                driver_module.ChemQAReviewDriver.attempt_model_artifact(
+                    driver,
+                    filename=transport.proposal_filename(),
+                    instructions=["Write the revised proposal file."],
+                    checker=lambda text: transport.check_candidate_submission(text, owner="proposer-1"),
+                artifact_kind="candidate_submission",
+                failure_key="propose:candidate",
+                failure_reason="proposer-1 failed to produce a valid candidate submission",
+                status_payload={"phase": "propose", "epoch": 2},
+                next_action_payload={"phase": "propose", "action": "propose"},
+                require_file_change=True,
+            )
+
+            self.assertEqual(1, len(recorded_failures))
+            self.assertEqual("propose:candidate", recorded_failures[0][0])
+            self.assertIn("was not updated by model turn", " ".join(recorded_failures[0][2] or []))
+
             self.assertEqual("high", protocol_payload["overall_confidence"]["level"])
             self.assertTrue(protocol_path.is_file())
 
@@ -1335,6 +1457,93 @@ class RunStatusShapeTest(unittest.TestCase):
             driver.workspace = Path(tmpdir)
             driver.lane_failures = {"proposer-2": {"reason": "bad output"}}
             driver.repair_cycles_without_progress = 1
+    def test_ensure_candidate_submission_retries_after_duplicate_epoch_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+            driver.args = argparse.Namespace(role="proposer-1", lane_retry_budget=2, max_model_attempts=2)
+            driver.workspace = Path(tmpdir)
+            proposal_path = driver.workspace / transport.proposal_filename()
+
+            attempt_prompts: list[list[str]] = []
+
+            def fake_attempt_model_artifact(*, instructions, **_kwargs):
+                attempt_prompts.append(list(instructions))
+                if len(attempt_prompts) == 1:
+                    proposal_path.write_text(
+                        "\n".join(
+                            [
+                                "artifact_kind: candidate_submission",
+                                "artifact_contract_version: react-reviewed-v2",
+                                "phase: propose",
+                                "owner: proposer-1",
+                                "direct_answer: CN(C)CCF",
+                                "summary: repeated stale candidate.",
+                                "submission_trace:",
+                                "- step: structural_reasoning",
+                                "  status: success",
+                                "  detail: repeated stale candidate.",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                else:
+                    proposal_path.write_text(
+                        "\n".join(
+                            [
+                                "artifact_kind: candidate_submission",
+                                "artifact_contract_version: react-reviewed-v2",
+                                "phase: propose",
+                                "owner: proposer-1",
+                                "direct_answer: NCCF",
+                                "summary: revised candidate after duplicate rejection.",
+                                "submission_trace:",
+                                "- step: literature_alignment",
+                                "  status: success",
+                                "  detail: revised after duplicate rejection.",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                return proposal_path
+
+            driver.attempt_model_artifact = fake_attempt_model_artifact
+            submit_calls: list[str] = []
+
+            def fake_submit_proposal(path: Path):
+                submit_calls.append(path.read_text(encoding="utf-8"))
+                if len(submit_calls) == 1:
+                    raise driver_module.DriverError(
+                        "Command failed (1): submit-proposal\nSTDOUT:\n\nSTDERR:\n"
+                        "Proposal matches a prior submission from epoch 1: artifact_kind: candidate_submission"
+                    )
+                return {"ok": True}
+
+            driver.submit_proposal = fake_submit_proposal
+            driver.status = lambda: {
+                "epoch": 2,
+                "proposals": [
+                    {
+                        "epoch": 2,
+                        "proposer": "proposer-1",
+                        "status": "active",
+                        "body": proposal_path.read_text(encoding="utf-8"),
+                    }
+                ],
+            }
+            progress_marks: list[str] = []
+            driver.mark_progress = lambda: progress_marks.append("progress")
+
+            driver_module.ChemQAReviewDriver.ensure_candidate_submission(
+                driver,
+                {"phase": "propose", "epoch": 2},
+                {"phase": "propose", "action": "propose"},
+            )
+
+            self.assertEqual(2, len(attempt_prompts))
+            self.assertEqual(2, len(submit_calls))
+            self.assertIn("duplicate", "\n".join(attempt_prompts[1]).lower())
+            self.assertEqual(["progress"], progress_marks)
+
             driver.current_task = lambda: {"status": "in_progress"}
             driver.reviewer_exit_state = lambda: {"proposer-5": {"reason": "timeout"}}
             store = driver_module.FileControlStore(Path(tmpdir))
@@ -1781,6 +1990,286 @@ class RecoveryScriptTest(unittest.TestCase):
                             "- step: reasoning",
                             "  status: success",
                             "  detail: initial trace",
+    def test_recover_propose_uses_archived_candidate_when_workspace_and_capture_are_missing(self) -> None:
+        debate_state = load_module(DEBATE_STATE_PATH, "debate_state_for_recovery_propose_archive_tests")
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as workspace_root:
+            env = os.environ.copy()
+            env["CLAWTEAM_DATA_DIR"] = tmpdir
+            previous_data_dir = os.environ.get("CLAWTEAM_DATA_DIR")
+            os.environ["CLAWTEAM_DATA_DIR"] = tmpdir
+            try:
+                config = debate_state.DebateConfig(
+                    team_name="chemqa-review-recover-propose-archive",
+                    workflow="chemqa-review",
+                    goal="Question: test?",
+                    evidence_policy="strict",
+                    proposer_count=5,
+                    max_review_rounds=2,
+                    max_rebuttal_rounds=1,
+                    max_epochs=2,
+                )
+                debate_state.init_debate_state(config, reset=True)
+
+                workspaces = Path(workspace_root)
+                (workspaces / "debate-1").mkdir(parents=True, exist_ok=True)
+                archive_dir = Path(tmpdir) / "teams" / config.team_name / "debate" / "artifacts" / "proposals" / "epoch-002"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                archive_path = archive_dir / "proposer-1.md"
+                archive_path.write_text(
+                    "\n".join(
+                        [
+                            "artifact_kind: candidate_submission",
+                            "artifact_contract_version: react-reviewed-v2",
+                            "phase: propose",
+                            "owner: proposer-1",
+                            "direct_answer: NCCF",
+                            "summary: recovered from archived epoch candidate",
+                            "submission_trace:",
+                            "- step: structural_reasoning",
+                            "  status: success",
+                            "  detail: archived candidate remained valid after rollback.",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+                args = argparse.Namespace(
+                    skill_root=str(SKILL_ROOT),
+                    team=config.team_name,
+                    runtime_dir=str(DEBATE_STATE_PATH.parent),
+                    workspace_root=str(workspaces),
+                    max_steps=1,
+                    json=False,
+                )
+                recoverer = recover_run.RunRecoverer(args)
+                status_before = recoverer.status()
+                self.assertEqual("propose", status_before["phase"])
+                changed = recoverer.recover_propose(status_before)
+                self.assertTrue(changed)
+                status_after = recoverer.status()
+                self.assertEqual(1, len(status_after["proposals"]))
+                proposal_entry = dict(status_after["proposals"][0])
+                proposal_body = str(proposal_entry.get("body") or "")
+                if not proposal_body.strip():
+                    artifact = proposal_entry.get("artifact") or {}
+                    for key in ("source_path", "archive_path"):
+                        candidate = str(artifact.get(key) or "").strip()
+                        if candidate:
+                            proposal_body = Path(candidate).read_text(encoding="utf-8")
+                            break
+                self.assertIn("direct_answer: NCCF", proposal_body)
+                self.assertIn("summary: recovered from archived epoch candidate", proposal_body)
+            finally:
+                if previous_data_dir is None:
+                    os.environ.pop("CLAWTEAM_DATA_DIR", None)
+                else:
+                    os.environ["CLAWTEAM_DATA_DIR"] = previous_data_dir
+
+    def test_recover_propose_duplicate_candidate_adds_blocker_instead_of_raising(self) -> None:
+        debate_state = load_module(DEBATE_STATE_PATH, "debate_state_for_recovery_propose_duplicate_tests")
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as workspace_root:
+            env = os.environ.copy()
+            env["CLAWTEAM_DATA_DIR"] = tmpdir
+            previous_data_dir = os.environ.get("CLAWTEAM_DATA_DIR")
+            os.environ["CLAWTEAM_DATA_DIR"] = tmpdir
+            try:
+                config = debate_state.DebateConfig(
+                    team_name="chemqa-review-recover-propose-duplicate",
+                    workflow="chemqa-review",
+                    goal="Question: test?",
+                    evidence_policy="strict",
+                    proposer_count=5,
+                    max_review_rounds=2,
+                    max_rebuttal_rounds=1,
+                    max_epochs=2,
+                )
+                debate_state.init_debate_state(config, reset=True)
+
+                fixtures = Path(tmpdir) / "fixtures"
+                fixtures.mkdir(parents=True, exist_ok=True)
+                prior_candidate_path = fixtures / "proposal.yaml"
+                prior_candidate_text = transport.check_candidate_submission(
+                    "\n".join(
+                        [
+                            "artifact_kind: candidate_submission",
+                            "artifact_contract_version: react-reviewed-v2",
+                            "phase: propose",
+                            "owner: proposer-1",
+                            "direct_answer: NCCF",
+                            "summary: prior epoch candidate",
+                            "submission_trace:",
+                            "- step: structural_reasoning",
+                            "  status: success",
+                            "  detail: prior epoch reasoning.",
+                        ]
+                    ),
+                    owner="proposer-1",
+                ).normalized_text
+                prior_candidate_path.write_text(
+                    prior_candidate_text,
+                    encoding="utf-8",
+                )
+                self.run_cmd(
+                    env,
+                    TEST_PYTHON,
+                    str(DEBATE_STATE_PATH),
+                    "submit-proposal",
+                    "--team",
+                    config.team_name,
+                    "--agent",
+                    "proposer-1",
+                    "--file",
+                    str(prior_candidate_path),
+                )
+
+                state_db = Path(tmpdir) / "teams" / config.team_name / "debate" / "state.db"
+                with sqlite3.connect(state_db) as conn:
+                    conn.execute("UPDATE meta SET value = '2' WHERE key = 'epoch'")
+                    conn.execute("UPDATE meta SET value = 'propose' WHERE key = 'phase'")
+                    conn.execute("UPDATE meta SET value = '0' WHERE key = 'review_round'")
+                    conn.execute("UPDATE meta SET value = '0' WHERE key = 'rebuttal_round'")
+                    conn.execute("UPDATE meta SET value = '[\"proposer-1\"]' WHERE key = 'phase_targets_json'")
+                    conn.commit()
+
+                workspaces = Path(workspace_root)
+                (workspaces / "debate-1").mkdir(parents=True, exist_ok=True)
+                capture_dir = Path(tmpdir) / "teams" / config.team_name / "artifacts" / "captures" / "proposer-1"
+                capture_dir.mkdir(parents=True, exist_ok=True)
+                capture_path = capture_dir / "proposal.captured.yaml"
+                capture_path.write_text(prior_candidate_text, encoding="utf-8")
+
+                args = argparse.Namespace(
+                    skill_root=str(SKILL_ROOT),
+                    team=config.team_name,
+                    runtime_dir=str(DEBATE_STATE_PATH.parent),
+                    workspace_root=str(workspaces),
+                    max_steps=1,
+                    json=False,
+                )
+                recoverer = recover_run.RunRecoverer(args)
+                status_before = recoverer.status()
+                self.assertEqual("propose", status_before["phase"])
+
+                changed = recoverer.recover_propose(status_before)
+
+                self.assertFalse(changed)
+                self.assertEqual([], recoverer.actions)
+                self.assertTrue(recoverer.blockers)
+                self.assertIn("stale candidate proposal source", recoverer.blockers[0])
+            finally:
+                if previous_data_dir is None:
+                    os.environ.pop("CLAWTEAM_DATA_DIR", None)
+                else:
+                    os.environ["CLAWTEAM_DATA_DIR"] = previous_data_dir
+
+    def test_recover_propose_does_not_resubmit_stale_prior_epoch_candidate_after_epoch_increment(self) -> None:
+        debate_state = load_module(DEBATE_STATE_PATH, "debate_state_for_recovery_propose_stale_epoch_tests")
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as workspace_root:
+            env = os.environ.copy()
+            env["CLAWTEAM_DATA_DIR"] = tmpdir
+            previous_data_dir = os.environ.get("CLAWTEAM_DATA_DIR")
+            os.environ["CLAWTEAM_DATA_DIR"] = tmpdir
+            try:
+                config = debate_state.DebateConfig(
+                    team_name="chemqa-review-recover-propose-stale-epoch",
+                    workflow="chemqa-review",
+                    goal="Question: test?",
+                    evidence_policy="strict",
+                    proposer_count=5,
+                    max_review_rounds=2,
+                    max_rebuttal_rounds=1,
+                    max_epochs=3,
+                )
+                debate_state.init_debate_state(config, reset=True)
+
+                state_db = Path(tmpdir) / "teams" / config.team_name / "debate" / "state.db"
+                with sqlite3.connect(state_db) as conn:
+                    conn.execute("UPDATE meta SET value = '2' WHERE key = 'epoch'")
+                    conn.execute("UPDATE meta SET value = 'propose' WHERE key = 'phase'")
+                    conn.execute("UPDATE meta SET value = '0' WHERE key = 'review_round'")
+                    conn.execute("UPDATE meta SET value = '0' WHERE key = 'rebuttal_round'")
+                    conn.execute("UPDATE meta SET value = '[\"proposer-1\"]' WHERE key = 'phase_targets_json'")
+                    conn.commit()
+
+                fixtures = Path(tmpdir) / "fixtures"
+                fixtures.mkdir(parents=True, exist_ok=True)
+                prior_candidate_path = fixtures / "proposal.yaml"
+                prior_candidate_text = transport.check_candidate_submission(
+                    "\n".join(
+                        [
+                            "artifact_kind: candidate_submission",
+                            "artifact_contract_version: react-reviewed-v2",
+                            "phase: propose",
+                            "owner: proposer-1",
+                            "direct_answer: CN(C)CCF",
+                            "summary: epoch-2 revised candidate",
+                            "submission_trace:",
+                            "- step: structural_reasoning",
+                            "  status: success",
+                            "  detail: epoch-2 candidate reasoning.",
+                        ]
+                    ),
+                    owner="proposer-1",
+                ).normalized_text
+                prior_candidate_path.write_text(prior_candidate_text, encoding="utf-8")
+                self.run_cmd(
+                    env,
+                    TEST_PYTHON,
+                    str(DEBATE_STATE_PATH),
+                    "submit-proposal",
+                    "--team",
+                    config.team_name,
+                    "--agent",
+                    "proposer-1",
+                    "--file",
+                    str(prior_candidate_path),
+                )
+
+                with sqlite3.connect(state_db) as conn:
+                    conn.execute("UPDATE meta SET value = '3' WHERE key = 'epoch'")
+                    conn.execute("UPDATE meta SET value = 'propose' WHERE key = 'phase'")
+                    conn.execute("UPDATE meta SET value = '0' WHERE key = 'review_round'")
+                    conn.execute("UPDATE meta SET value = '0' WHERE key = 'rebuttal_round'")
+                    conn.execute("UPDATE meta SET value = '[\"proposer-1\"]' WHERE key = 'phase_targets_json'")
+                    conn.commit()
+
+                workspaces = Path(workspace_root)
+                (workspaces / "debate-1").mkdir(parents=True, exist_ok=True)
+                (workspaces / "debate-1" / transport.proposal_filename()).write_text(
+                    prior_candidate_text,
+                    encoding="utf-8",
+                )
+                capture_dir = Path(tmpdir) / "teams" / config.team_name / "artifacts" / "captures" / "proposer-1"
+                capture_dir.mkdir(parents=True, exist_ok=True)
+                (capture_dir / "proposal.captured.yaml").write_text(prior_candidate_text, encoding="utf-8")
+
+                args = argparse.Namespace(
+                    skill_root=str(SKILL_ROOT),
+                    team=config.team_name,
+                    runtime_dir=str(DEBATE_STATE_PATH.parent),
+                    workspace_root=str(workspaces),
+                    max_steps=1,
+                    json=False,
+                )
+                recoverer = recover_run.RunRecoverer(args)
+                recoverer.submit_proposal = lambda **_kwargs: self.fail(
+                    "recover_propose should not resubmit a stale prior-epoch candidate after the run has advanced epochs"
+                )
+                status_before = recoverer.status()
+                self.assertEqual("propose", status_before["phase"])
+                self.assertEqual(3, int(status_before["epoch"]))
+
+                changed = recoverer.recover_propose(status_before)
+
+                self.assertFalse(changed)
+                self.assertEqual([], recoverer.actions)
+                self.assertTrue(recoverer.blockers)
+            finally:
+                if previous_data_dir is None:
+                    os.environ.pop("CLAWTEAM_DATA_DIR", None)
+                else:
+                    os.environ["CLAWTEAM_DATA_DIR"] = previous_data_dir
+
                         ]
                     ),
                     encoding="utf-8",
@@ -1924,6 +2413,30 @@ class SnapshotScriptTest(unittest.TestCase):
 
                 def write_file(name: str, text: str) -> Path:
                     path = proposal_dir / name
+    def test_recover_run_stalled_single_step_does_not_publish_done_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recoverer = recover_run.RunRecoverer.__new__(recover_run.RunRecoverer)
+            recoverer.args = argparse.Namespace(team="chemqa-review-recover-status", max_steps=1, json=False)
+            recoverer.actions = []
+            recoverer.blockers = []
+            recoverer.store = recover_run.FileControlStore(Path(tmpdir))
+            recoverer._phase_signature = lambda _state: "review:1"
+            recoverer.status = lambda: {"status": "running", "phase": "review"}
+            recoverer.repair_invalid_review_state = lambda _state: False
+            recoverer.recover_propose = lambda _state: False
+            recoverer.recover_review = lambda _state: False
+            recoverer.recover_rebuttal = lambda _state: False
+            recoverer.next_action = lambda _agent: {"action": "wait"}
+            recoverer.respawn_actionable_roles = lambda: False
+
+            exit_code = recover_run.RunRecoverer.run(recoverer)
+
+            self.assertEqual(1, exit_code)
+            payload = json.loads((Path(tmpdir) / "control" / "run-status" / "chemqa-review-recover-status.json").read_text(encoding="utf-8"))
+            self.assertEqual("running", payload["status"])
+            self.assertNotIn("terminal_state", payload)
+            self.assertNotIn("terminal_reason_code", payload)
+
                     path.write_text(text, encoding="utf-8")
                     return path
 

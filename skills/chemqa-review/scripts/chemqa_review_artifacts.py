@@ -781,11 +781,20 @@ def proposal_is_transport_placeholder(proposal: dict[str, Any] | None) -> bool:
 
 
 def current_proposal(status_payload: dict[str, Any], agent: str) -> dict[str, Any] | None:
-    proposals = status_payload.get("proposals") or []
-    for proposal in proposals:
-        if str(proposal.get("proposer")) == agent:
-            return dict(proposal)
-    return None
+    proposals = [dict(proposal) for proposal in (status_payload.get("proposals") or []) if str(proposal.get("proposer")) == agent]
+    if not proposals:
+        return None
+    epoch = status_payload.get("epoch")
+    has_epoch_info = any(proposal.get("epoch") not in (None, "") for proposal in proposals)
+    if epoch not in (None, "") and has_epoch_info:
+        current_epoch_matches = [
+            proposal for proposal in proposals
+            if int(proposal.get("epoch") or 0) == int(epoch)
+        ]
+        if current_epoch_matches:
+            return current_epoch_matches[-1]
+        return None
+    return proposals[-1]
 
 
 def review_exists(status_payload: dict[str, Any], *, reviewer: str, target: str, review_round: int | None = None) -> bool:

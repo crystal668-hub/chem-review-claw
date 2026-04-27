@@ -111,6 +111,31 @@ class RunRecoverer:
             return path
         return self.workspace_for(role) / CANDIDATE_CAPTURE_FILENAME
 
+    def latest_archived_candidate_path_for(self, role: str) -> Path | None:
+        team_dir = self.team_dir()
+        if team_dir is None:
+            return None
+        proposals_root = team_dir / "debate" / "artifacts" / "proposals"
+        if not proposals_root.is_dir():
+            return None
+        candidates = sorted(proposals_root.glob(f"epoch-*/{role}.md"), reverse=True)
+        for path in candidates:
+            if path.is_file():
+                return path
+        return None
+
+    @staticmethod
+    def _candidate_epoch_from_path(path: Path | None) -> int | None:
+        if path is None:
+            return None
+        for part in path.parts:
+            if not part.startswith("epoch-"):
+                continue
+            suffix = part.split("epoch-", 1)[-1]
+            if suffix.isdigit():
+                return int(suffix)
+        return None
+
     def team_dir(self) -> Path | None:
         if not self.data_dir:
             return None
@@ -383,6 +408,7 @@ class RunRecoverer:
     def recover_propose(self, status_payload: dict[str, Any]) -> bool:
         changed = False
         workflow = str(status_payload.get("workflow") or "")
+        current_epoch = int(status_payload.get("epoch") or 0)
         if workflow == "chemqa-review":
             expected = [CANDIDATE_OWNER]
         else:
@@ -394,27 +420,63 @@ class RunRecoverer:
             file_path = workspace / proposal_filename()
             if agent == CANDIDATE_OWNER:
                 capture_path = self.candidate_capture_path_for(agent)
+                archive_path = self.latest_archived_candidate_path_for(agent)
+                archived_candidate_epoch = self._candidate_epoch_from_path(archive_path)
+                archived_candidate_text = None
+                if archive_path is not None and archive_path.is_file():
+                    archived_candidate_text = check_candidate_submission(
+                        repair_candidate_submission_text(archive_path.read_text(encoding="utf-8"), owner=agent),
+                        owner=agent,
+                    ).normalized_text
                 checked = None
                 source_path = None
                 invalid_reasons: list[str] = []
-                for candidate_path in (file_path, capture_path):
+                for candidate_path in (file_path, capture_path, archive_path):
+                    if candidate_path is None:
+                        continue
                     if not candidate_path.is_file():
+                        continue
+                    candidate_epoch = self._candidate_epoch_from_path(candidate_path)
+                    if candidate_epoch is not None and current_epoch and candidate_epoch < current_epoch:
+                        self.blockers.append(
+                            f"stale candidate proposal source for {agent} belongs to epoch {candidate_epoch}, current epoch is {current_epoch}: {candidate_path}"
+                        )
                         continue
                     repaired = repair_candidate_submission_text(candidate_path.read_text(encoding="utf-8"), owner=agent)
                     checked = check_candidate_submission(repaired, owner=agent)
+                    if (
+                        checked.ok
+                        and archived_candidate_text
+                        and archived_candidate_epoch is not None
+                        and current_epoch
+                        and archived_candidate_epoch < current_epoch
+                        and checked.normalized_text == archived_candidate_text
+                    ):
+                        self.blockers.append(
+                            f"stale candidate proposal source for {agent} duplicates archived epoch {archived_candidate_epoch} candidate while current epoch is {current_epoch}: {candidate_path}"
+                        )
+                        continue
                     if checked.ok:
                         candidate_path.write_text(checked.normalized_text, encoding="utf-8")
                         source_path = candidate_path
                         break
                     invalid_reasons.append(f"{candidate_path}: {'; '.join(checked.errors)}")
                 if source_path is not None and checked is not None:
-                    self.submit_proposal(agent=agent, file_path=source_path)
+                    try:
+                        self.submit_proposal(agent=agent, file_path=source_path)
+                    except RecoverError as exc:
+                        message = str(exc)
+                        if "Proposal matches a prior submission from epoch" in message:
+                            duplicate_reason = message.split("STDERR:\n", 1)[-1].strip() or message.strip()
+                            self.blockers.append(f"candidate proposal for {agent} duplicates a prior epoch submission: {duplicate_reason}")
+                            continue
+                        raise
                     changed = True
                 elif invalid_reasons:
                     self.blockers.append(f"candidate proposal sources exist but are invalid: {' | '.join(invalid_reasons)}")
                 else:
                     self.blockers.append(
-                        f"missing candidate proposal sources for {agent}: workspace={file_path}; capture={capture_path}"
+                        f"missing candidate proposal sources for {agent}: workspace={file_path}; capture={capture_path}; archive={archive_path}"
                     )
                 continue
             checked_text = render_placeholder_proposal(agent)
@@ -581,7 +643,7 @@ class RunRecoverer:
         final_state = self.status()
         stalled = str(final_state.get("status") or "") != "done"
         payload = {
-            "status": "done",
+            "status": "running" if stalled else "done",
             "actions": self.actions,
             "blockers": self.blockers,
             "state": final_state,
@@ -589,20 +651,12 @@ class RunRecoverer:
             "recovery_cycles_without_progress": recovery_cycles_without_progress,
         }
         if stalled:
-            payload["terminal_state"] = "failed"
-            payload["terminal_reason_code"] = "stalled"
+            payload["stalled"] = True
         self.write_run_status(
             state=final_state,
             status=payload["status"],
             recovery_cycles_without_progress=recovery_cycles_without_progress,
             progress_made=progress_made,
-            terminal_state="failed" if stalled else "",
-            terminal_reason_code="stalled" if stalled else "",
-            terminal_reason=(
-                f"Recovery stopped without reaching done after {recovery_cycles_without_progress} stagnant cycle(s)."
-                if stalled
-                else ""
-            ),
         )
         if self.args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -937,6 +938,32 @@ class ChemQAReviewDriver:
             return True, []
         return False, ["model turn timed out before wrapper completion", *list(checked.errors)]
 
+    @staticmethod
+    def _file_snapshot(path: Path) -> tuple[int, int, str] | None:
+        if not path.is_file():
+            return None
+        text = path.read_text(encoding="utf-8")
+        stat = path.stat()
+        return (stat.st_mtime_ns, stat.st_size, hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+    @staticmethod
+    def _normalized_candidate_text(checker: Callable[[str], Any], path: Path) -> str | None:
+        if not path.is_file():
+            return None
+        raw_text = path.read_text(encoding="utf-8")
+        checked = checker(raw_text)
+        normalized = str(getattr(checked, "normalized_text", "") or "").strip()
+        if normalized:
+            return normalized
+        return raw_text.strip() or None
+
+    @staticmethod
+    def _duplicate_proposal_reason(exc: DriverError) -> str:
+        message = str(exc)
+        if "Proposal matches a prior submission from epoch" not in message:
+            return ""
+        return message.split("STDERR:\n", 1)[-1].strip() or message.strip()
+
     def attempt_model_artifact(
         self,
         *,
@@ -949,12 +976,17 @@ class ChemQAReviewDriver:
         status_payload: dict[str, Any],
         next_action_payload: dict[str, Any],
         minimal_template_lines: list[str] | None = None,
+        max_attempts_override: int | None = None,
+        require_file_change: bool = False,
     ) -> Path:
         file_path = self.workspace_path(filename)
         last_errors: list[str] = []
-        for attempt in range(1, self.args.max_model_attempts + 1):
+        max_attempts = max(1, int(max_attempts_override or self.args.max_model_attempts))
+        for attempt in range(1, max_attempts + 1):
+            pre_call_snapshot = self._file_snapshot(file_path)
+            pre_call_normalized = self._normalized_candidate_text(checker, file_path) if require_file_change else None
             print(
-                f"{self.args.role}: attempt {attempt}/{self.args.max_model_attempts} for {artifact_kind} -> {file_path.name}",
+                f"{self.args.role}: attempt {attempt}/{max_attempts} for {artifact_kind} -> {file_path.name}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -1011,6 +1043,19 @@ class ChemQAReviewDriver:
             if checked.normalized_text:
                 file_path.write_text(checked.normalized_text, encoding="utf-8")
             if checked.ok:
+                if require_file_change and pre_call_snapshot is not None:
+                    post_call_snapshot = self._file_snapshot(file_path)
+                    post_call_normalized = str(checked.normalized_text or raw_text).strip()
+                    if post_call_snapshot == pre_call_snapshot or (
+                        pre_call_normalized is not None and post_call_normalized == pre_call_normalized
+                    ):
+                        last_errors = [f"`{filename}` was not updated by model turn"]
+                        print(
+                            f"{self.args.role}: stale `{filename}` was reused without changes for {artifact_kind}.",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        continue
                 return file_path
             last_errors = list(checked.errors)
             print(
@@ -1099,7 +1144,7 @@ class ChemQAReviewDriver:
         refreshed_status = self.status()
         refreshed_next = self.next_action()
         post = liveness_summary(refreshed_status, coordinator_task_status=str((self.current_task() or {}).get("status") or ""))
-        if post["phase_signature"] != pre["phase_signature"] or recovery.get("status") == "done":
+        if post["phase_signature"] != pre["phase_signature"]:
             self.mark_progress()
             return None
 
@@ -1192,45 +1237,86 @@ class ChemQAReviewDriver:
         self.mark_progress()
 
     def ensure_candidate_submission(self, status_payload: dict[str, Any], next_action_payload: dict[str, Any]) -> None:
-        self.attempt_model_artifact(
-            filename=proposal_filename(),
-            instructions=[
-                "Runtime request for this turn:",
-                f"- You are in `propose` for the main candidate owner. Write exactly one pure-YAML file named `{proposal_filename()}`.",
-                "- No markdown headings, bullets outside YAML, or code fences.",
-                "- Do not submit transport commands yourself. The runtime wrapper will do that after this turn.",
-                "- Do not wait or poll. Produce the file and stop.",
-            ],
-            checker=lambda text: check_candidate_submission(text, owner=self.args.role),
-            artifact_kind="candidate_submission",
-            failure_key="propose:candidate",
-            failure_reason=f"{self.args.role} failed to produce a valid candidate submission",
-            status_payload=status_payload,
-            next_action_payload=next_action_payload,
-            minimal_template_lines=[
-                "artifact_kind: candidate_submission",
-                "artifact_contract_version: react-reviewed-v2",
-                "phase: propose",
-                f"owner: {self.args.role}",
-                'direct_answer: "6"',
-                "summary: Short explanation of why the answer has that many distinct proton environments.",
-                "submission_trace:",
-                "  - step: structural_reasoning",
-                "    status: success",
-                "    detail: Counted distinct proton environments from the provided SMILES.",
-                "evidence_limits:",
-                "  - Based on first-principles NMR equivalence reasoning from the provided structure.",
-                "claim_anchors: []",
-            ],
+        base_instructions = [
+            "Runtime request for this turn:",
+            f"- You are in `propose` for the main candidate owner. Write exactly one pure-YAML file named `{proposal_filename()}`.",
+            "- No markdown headings, bullets outside YAML, or code fences.",
+            "- Do not submit transport commands yourself. The runtime wrapper will do that after this turn.",
+            "- Do not wait or poll. Produce the file and stop.",
+        ]
+        duplicate_feedback: list[str] = []
+        duplicate_reason = ""
+        max_attempts = max(1, int(getattr(self.args, "max_model_attempts", MODEL_ATTEMPTS_DEFAULT)))
+
+        for submit_attempt in range(1, max_attempts + 1):
+            instructions = list(base_instructions)
+            if duplicate_feedback:
+                instructions.extend(duplicate_feedback)
+            self.attempt_model_artifact(
+                filename=proposal_filename(),
+                instructions=instructions,
+                checker=lambda text: check_candidate_submission(text, owner=self.args.role),
+                artifact_kind="candidate_submission",
+                failure_key="propose:candidate",
+                failure_reason=f"{self.args.role} failed to produce a valid candidate submission",
+                status_payload=status_payload,
+                next_action_payload=next_action_payload,
+                minimal_template_lines=[
+                    "artifact_kind: candidate_submission",
+                    "artifact_contract_version: react-reviewed-v2",
+                    "phase: propose",
+                    f"owner: {self.args.role}",
+                    'direct_answer: "6"',
+                    "summary: Short explanation of why the answer has that many distinct proton environments.",
+                    "submission_trace:",
+                    "  - step: structural_reasoning",
+                    "    status: success",
+                    "    detail: Counted distinct proton environments from the provided SMILES.",
+                    "evidence_limits:",
+                    "  - Based on first-principles NMR equivalence reasoning from the provided structure.",
+                    "claim_anchors: []",
+                ],
+                max_attempts_override=1,
+                require_file_change=True,
+            )
+            target = self.best_available_candidate_submission_path()
+            if target is None:
+                raise DriverError(f"{self.args.role} did not leave a valid candidate submission in workspace or capture.")
+            try:
+                self.submit_proposal(target)
+            except DriverError as exc:
+                duplicate_reason = self._duplicate_proposal_reason(exc)
+                if not duplicate_reason:
+                    raise
+                duplicate_feedback = [
+                    "Previous turn produced a candidate that was rejected because it duplicated a prior epoch submission.",
+                    f"- {duplicate_reason}",
+                    "- Do not repeat the conceded prior answer unchanged.",
+                    "- Revise the direct answer and supporting trace so the new candidate explicitly addresses the prior review items.",
+                ]
+                continue
+            refreshed = self.status()
+            if not current_proposal(refreshed, self.args.role):
+                raise DriverError(f"Candidate submission for {self.args.role} was not registered.")
+            self.mark_progress()
+            return
+
+        count = self.record_lane_failure(
+            "propose:candidate:duplicate_epoch_submission",
+            reason=f"{self.args.role} kept resubmitting a duplicate candidate across epochs",
+            problems=[duplicate_reason] if duplicate_reason else None,
         )
-        target = self.best_available_candidate_submission_path()
-        if target is None:
-            raise DriverError(f"{self.args.role} did not leave a valid candidate submission in workspace or capture.")
-        self.submit_proposal(target)
-        refreshed = self.status()
-        if not current_proposal(refreshed, self.args.role):
-            raise DriverError(f"Candidate submission for {self.args.role} was not registered.")
-        self.mark_progress()
+        if count >= self.args.lane_retry_budget:
+            self.emit_terminal_failure(
+                reason=f"{self.args.role} kept resubmitting a duplicate candidate across epochs; lane retry budget exhausted",
+                status_payload=status_payload,
+                next_action_payload=next_action_payload,
+                blockers=[duplicate_reason] if duplicate_reason else [],
+            )
+        raise DriverError(
+            f"{self.args.role} kept resubmitting a duplicate candidate across epochs"
+            + (f": {duplicate_reason}" if duplicate_reason else "")
+        )
 
     def ensure_pending_reviews(self, status_payload: dict[str, Any], next_action_payload: dict[str, Any]) -> None:
         targets = [str(item) for item in (next_action_payload.get("targets") or [])]
