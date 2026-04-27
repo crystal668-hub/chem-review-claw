@@ -1,0 +1,13 @@
+{
+  "expected": {
+    "value": 10.0,
+    "unit": "kJ/mol"
+  },
+  "candidate": {
+    "value": 10.4,
+    "unit": "kJ/mol"
+  },
+  "tolerance": {
+    "absolute": 0.1
+  }
+}

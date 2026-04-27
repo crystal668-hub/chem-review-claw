@@ -1,0 +1,6 @@
+{
+  "operation": "convert",
+  "value": 25.0,
+  "from_unit": "C",
+  "to_unit": "K"
+}

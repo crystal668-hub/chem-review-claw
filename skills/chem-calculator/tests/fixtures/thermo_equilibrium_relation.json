@@ -1,0 +1,5 @@
+{
+  "operation": "equilibrium_constant_from_delta_g",
+  "delta_g_kj_per_mol": -11.1,
+  "temperature_k": 298.15
+}

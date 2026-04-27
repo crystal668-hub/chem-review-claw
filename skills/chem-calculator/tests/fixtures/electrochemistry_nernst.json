@@ -1,0 +1,7 @@
+{
+  "operation": "nernst",
+  "standard_potential_v": 1.1,
+  "electrons_transferred": 1,
+  "reaction_quotient": 10.0,
+  "temperature_k": 298.15
+}

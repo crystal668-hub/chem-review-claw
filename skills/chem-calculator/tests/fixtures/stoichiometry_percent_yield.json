@@ -1,0 +1,11 @@
+{
+  "operation": "percent_yield",
+  "theoretical_yield": {
+    "value": 10.0,
+    "unit": "g"
+  },
+  "actual_yield": {
+    "value": 8.0,
+    "unit": "g"
+  }
+}

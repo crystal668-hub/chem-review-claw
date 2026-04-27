@@ -1,0 +1,13 @@
+{
+  "expected": {
+    "value": 0.500,
+    "unit": "mol/L"
+  },
+  "candidate": {
+    "value": 0.5,
+    "unit": "M"
+  },
+  "tolerance": {
+    "relative": 0.001
+  }
+}

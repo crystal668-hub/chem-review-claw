@@ -1,0 +1,5 @@
+{
+  "operation": "partial_pressure",
+  "total_pressure_atm": 2.0,
+  "mole_fraction": 0.35
+}

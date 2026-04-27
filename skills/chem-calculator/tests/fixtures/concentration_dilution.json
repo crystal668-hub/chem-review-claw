@@ -1,0 +1,6 @@
+{
+  "operation": "dilution",
+  "stock_concentration_molar": 2.0,
+  "stock_volume_l": 0.25,
+  "final_volume_l": 1.0
+}

@@ -1,0 +1,15 @@
+{
+  "operation": "delta_g",
+  "delta_h": {
+    "value": -25.0,
+    "unit": "kJ/mol"
+  },
+  "delta_s": {
+    "value": -50.0,
+    "unit": "J/mol/K"
+  },
+  "temperature": {
+    "value": 300.0,
+    "unit": "K"
+  }
+}

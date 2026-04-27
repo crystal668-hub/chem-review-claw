@@ -1,0 +1,35 @@
+{
+  "operation": "limiting_reagent",
+  "reaction": {
+    "reactants": [
+      {
+        "species": "H2",
+        "coefficient": 2
+      },
+      {
+        "species": "O2",
+        "coefficient": 1
+      }
+    ],
+    "products": [
+      {
+        "species": "H2O",
+        "coefficient": 2
+      }
+    ]
+  },
+  "known_amounts": [
+    {
+      "species": "H2",
+      "value": 5.0,
+      "unit": "mol"
+    },
+    {
+      "species": "O2",
+      "value": 2.0,
+      "unit": "mol"
+    }
+  ],
+  "target_species": "H2O",
+  "target_unit": "mol"
+}

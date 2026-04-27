@@ -1,0 +1,6 @@
+{
+  "operation": "delta_g",
+  "delta_h_kj_per_mol": -40.0,
+  "delta_s_j_per_mol_k": -59.0,
+  "temperature_k": 298.15
+}

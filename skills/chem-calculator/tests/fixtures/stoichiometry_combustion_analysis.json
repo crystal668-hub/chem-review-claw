@@ -1,0 +1,8 @@
+{
+  "operation": "combustion_analysis",
+  "sample_mass_g": 3.0,
+  "products": {
+    "CO2_mass_g": 4.4,
+    "H2O_mass_g": 1.8
+  }
+}

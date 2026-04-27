@@ -1,0 +1,13 @@
+{
+  "operation": "mix_solutions",
+  "solutions": [
+    {
+      "concentration_molar": 1.0,
+      "volume_l": 0.5
+    },
+    {
+      "concentration_molar": 0.5,
+      "volume_l": 0.5
+    }
+  ]
+}

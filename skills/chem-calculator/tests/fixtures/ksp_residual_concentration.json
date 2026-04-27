@@ -1,0 +1,10 @@
+{
+  "operation": "residual_concentration",
+  "ksp": 1.8e-10,
+  "solid": "AgCl",
+  "known_ion": {
+    "species": "Cl-",
+    "concentration_molar": 0.01
+  },
+  "unknown_ion_species": "Ag+"
+}

@@ -1,0 +1,12 @@
+{
+  "operation": "precipitation_check",
+  "ksp": 1.8e-10,
+  "ion_product": {
+    "Ag+": 0.001,
+    "Cl-": 0.001
+  },
+  "stoichiometry": {
+    "Ag+": 1,
+    "Cl-": 1
+  }
+}

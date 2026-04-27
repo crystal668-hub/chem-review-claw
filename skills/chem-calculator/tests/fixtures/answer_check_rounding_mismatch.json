@@ -1,0 +1,14 @@
+{
+  "expected": {
+    "value": 12.34,
+    "unit": "g"
+  },
+  "candidate": {
+    "value": 12.3,
+    "unit": "g"
+  },
+  "tolerance": {
+    "relative": 0.01
+  },
+  "significant_figures": 4
+}

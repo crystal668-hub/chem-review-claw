@@ -1,0 +1,7 @@
+{
+  "operation": "faraday",
+  "current_a": 2.0,
+  "time_s": 900.0,
+  "molar_mass_g_per_mol": 63.546,
+  "electrons_per_mole": 2
+}
