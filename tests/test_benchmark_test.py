@@ -450,6 +450,63 @@ Points: 0.5, Item: Second criterion
             self.assertEqual("proposer-1-proposal", entry.recovery_mode)
             self.assertTrue(entry.degraded_execution)
 
+    def test_load_results_from_output_root_legacy_per_record_prefers_explicit_recovery_hints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            group_dir = root / "per-record" / "chemqa_web_off"
+            group_dir.mkdir(parents=True, exist_ok=True)
+            legacy_payload = {
+                "group_id": "chemqa_web_off",
+                "group_label": "ChemQA + 禁用 websearch plugin",
+                "runner": "chemqa",
+                "websearch": False,
+                "record_id": "legacy-preview-record",
+                "subset": "chembench",
+                "dataset": "chembench",
+                "source_file": "/tmp/demo.jsonl",
+                "eval_kind": "chembench_open_ended",
+                "prompt": "Q",
+                "reference_answer": "A",
+                "answer_text": "FINAL ANSWER: fallback-answer",
+                "evaluation": {
+                    "eval_kind": "chembench_open_ended",
+                    "score": 0.0,
+                    "max_score": 1.0,
+                    "normalized_score": 0.0,
+                    "passed": False,
+                    "primary_metric": "execution_error",
+                    "primary_metric_direction": "higher_is_better",
+                    "details": {},
+                },
+                "runner_meta": {
+                    "fallback_used": True,
+                    "fallback_source": "run-status-final-answer-preview",
+                    "evaluable": False,
+                    "scored": False,
+                    "answer_reliability": "none",
+                    "recovery_mode": "run-status-final-answer-preview",
+                    "degraded_execution": True,
+                },
+                "raw": {"run_status": {"status": "done", "terminal_state": "failed"}},
+                "elapsed_seconds": 1.0,
+                "error": "preview fallback not scoreable",
+                "short_answer_text": "fallback-answer",
+                "full_response_text": "FINAL ANSWER: fallback-answer",
+            }
+            (group_dir / "legacy-preview-record.json").write_text(json.dumps(legacy_payload), encoding="utf-8")
+            loaded = benchmark_test.load_results_from_output_root(root, group_ids=["chemqa_web_off"])
+            self.assertEqual(1, len(loaded))
+            entry = loaded[0]
+            self.assertEqual("failed", entry.run_lifecycle_status)
+            self.assertEqual("failed", entry.protocol_completion_status)
+            self.assertEqual("preview_only", entry.answer_availability)
+            self.assertEqual("none", entry.answer_reliability)
+            self.assertFalse(entry.evaluable)
+            self.assertFalse(entry.scored)
+            self.assertEqual("run-status-final-answer-preview", entry.recovery_mode)
+            self.assertTrue(entry.degraded_execution)
+            self.assertEqual("execution_error", entry.execution_error_kind)
+
     def test_build_run_scoped_config_payload_uses_explicit_single_and_judge_models(self) -> None:
         base = {
             "agents": {"list": []},
@@ -2699,7 +2756,9 @@ Points: 0.5, Item: Second criterion
             self.assertEqual("ChemQA run `demo-run` terminated as failed (reason=stalled)", entry.error)
             self.assertEqual("completed", entry.run_lifecycle_status)
             self.assertEqual("failed", entry.protocol_completion_status)
-            self.assertEqual("missing", entry.answer_availability)
+            self.assertEqual("recovered_candidate", entry.answer_availability)
+            self.assertEqual("high_confidence_recovered", entry.answer_reliability)
+            self.assertEqual("test-double", entry.recovery_mode)
             self.assertTrue(entry.degraded_execution)
         finally:
             if original_build_runner is None:

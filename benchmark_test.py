@@ -2390,39 +2390,39 @@ def load_group_record_result(path: Path) -> GroupRecordResult:
         fallback_used = bool(runner_meta.get("fallback_used"))
         fallback_source = str(runner_meta.get("fallback_source") or "")
         run_status_present = isinstance(raw.get("run_status"), dict)
-        scored = primary_metric != "execution_error"
+        scored = bool(runner_meta.get("scored", primary_metric != "execution_error"))
+        explicit_evaluable = runner_meta.get("evaluable")
+        explicit_reliability = str(runner_meta.get("answer_reliability") or "").strip()
+        explicit_recovery_mode = str(runner_meta.get("recovery_mode") or "").strip()
+        explicit_degraded = runner_meta.get("degraded_execution")
+        evaluable = bool(explicit_evaluable) if explicit_evaluable is not None else scored
         if fallback_used:
             run_lifecycle_status = "completed" if scored else "failed"
             protocol_completion_status = "failed" if run_status_present else "missing"
-            answer_availability = (
-                "preview_only"
-                if fallback_source == "run-status-final-answer-preview"
-                else "recovered_candidate"
-            )
-            answer_reliability = (
-                "low_confidence_recovered"
-                if fallback_source == "run-status-final-answer-preview"
-                else "high_confidence_recovered"
-            )
-            evaluable = scored
-            recovery_mode = fallback_source or "none"
-            degraded_execution = True
+            recovery_mode = explicit_recovery_mode or fallback_source or "none"
+            if recovery_mode == "run-status-final-answer-preview":
+                answer_availability = "preview_only"
+                default_reliability = "low_confidence_recovered"
+            else:
+                answer_availability = "recovered_candidate"
+                default_reliability = "high_confidence_recovered"
+            answer_reliability = explicit_reliability or default_reliability
+            degraded_execution = bool(explicit_degraded) if explicit_degraded is not None else True
         elif scored:
             run_lifecycle_status = "completed"
             protocol_completion_status = "completed"
             answer_availability = "native_final"
-            answer_reliability = "native"
-            evaluable = True
-            recovery_mode = "none"
-            degraded_execution = False
+            answer_reliability = explicit_reliability or "native"
+            recovery_mode = explicit_recovery_mode or "none"
+            degraded_execution = bool(explicit_degraded) if explicit_degraded is not None else False
         else:
             run_lifecycle_status = "failed"
             protocol_completion_status = "failed" if run_status_present else "missing"
             answer_availability = "missing"
-            answer_reliability = "none"
-            evaluable = False
-            recovery_mode = "none"
-            degraded_execution = True
+            answer_reliability = explicit_reliability or "none"
+            evaluable = False if explicit_evaluable is None else bool(explicit_evaluable)
+            recovery_mode = explicit_recovery_mode or "none"
+            degraded_execution = bool(explicit_degraded) if explicit_degraded is not None else True
         payload = {
             **payload,
             # Upconvert schema-v1 per-record payloads so historical outputs remain loadable.
@@ -2621,7 +2621,27 @@ def build_result_axes_from_runner(run_result: Any) -> dict[str, Any]:
         )
     else:
         status_is_completed = normalized_status == "completed"
-        if status_is_completed:
+        if normalized_status == "recovered":
+            fallback_source = str(runner_meta.get("fallback_source") or "")
+            answer_availability = (
+                "preview_only"
+                if fallback_source == "run-status-final-answer-preview"
+                else "recovered_candidate"
+            )
+            answer_reliability = str(runner_meta.get("answer_reliability") or "").strip() or (
+                "low_confidence_recovered"
+                if fallback_source == "run-status-final-answer-preview"
+                else "high_confidence_recovered"
+            )
+            axes.update(
+                answer_availability=answer_availability,
+                answer_reliability=answer_reliability,
+                evaluable=False,
+                scored=False,
+                recovery_mode=str(runner_meta.get("recovery_mode") or fallback_source or "none"),
+                degraded_execution=True,
+            )
+        elif status_is_completed:
             axes.update(
                 answer_availability="native_final",
                 answer_reliability="native",
