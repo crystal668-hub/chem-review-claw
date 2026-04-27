@@ -860,6 +860,63 @@ class ClawteamResolutionTest(unittest.TestCase):
         self.assertEqual("/tmp/demo-openclaw.json", env["OPENCLAW_CONFIG_PATH"])
 
 
+class ChemProviderIntegrationTest(unittest.TestCase):
+    def test_required_skills_include_chem_provider_bundles(self) -> None:
+        expected = {
+            "debateclaw-v1",
+            "paper-retrieval",
+            "paper-access",
+            "paper-parse",
+            "paper-rerank",
+            "rdkit",
+            "pubchem",
+            "opsin",
+            "chem-calculator",
+        }
+        self.assertEqual(expected, set(bundle_common.REQUIRED_SKILLS))
+
+        report = bundle_common.dependency_report(SKILL_ROOT)
+        self.assertEqual(expected, set(report))
+        self.assertEqual([], bundle_common.missing_skills_from_report(report))
+
+    def test_prompt_contracts_include_chem_provider_routing_rules(self) -> None:
+        proposer = (SKILL_ROOT / "prompts" / "contracts" / "proposer-main.md").read_text(encoding="utf-8")
+        reasoning = (SKILL_ROOT / "prompts" / "contracts" / "reviewer-reasoning-consistency.md").read_text(
+            encoding="utf-8"
+        )
+        evidence = (SKILL_ROOT / "prompts" / "contracts" / "reviewer-evidence-trace.md").read_text(
+            encoding="utf-8"
+        )
+        counter = (SKILL_ROOT / "prompts" / "contracts" / "reviewer-counterevidence.md").read_text(
+            encoding="utf-8"
+        )
+        required_skills = (SKILL_ROOT / "prompts" / "modules" / "context" / "required-skills.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("chem-calculator", proposer)
+        self.assertIn("FrontierScience", proposer)
+        self.assertIn("SuperChem", proposer)
+        self.assertIn("extract available SMILES/name text first", proposer)
+        self.assertIn("rdkit", proposer)
+        self.assertIn("opsin", proposer)
+        self.assertIn("pubchem", proposer)
+
+        self.assertIn("chem-calculator", reasoning)
+        self.assertIn("result.json", reasoning)
+        self.assertIn("tool_trace", reasoning)
+
+        self.assertIn("result.json", evidence)
+        self.assertIn("tool_trace", evidence)
+        self.assertIn("result.json", counter)
+        self.assertIn("tool_trace", counter)
+
+        self.assertIn("rdkit", required_skills)
+        self.assertIn("pubchem", required_skills)
+        self.assertIn("opsin", required_skills)
+        self.assertIn("chem-calculator", required_skills)
+
+
 class OpenClawResolutionTest(unittest.TestCase):
     def test_resolve_openclaw_executable_falls_back_when_path_is_stripped(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

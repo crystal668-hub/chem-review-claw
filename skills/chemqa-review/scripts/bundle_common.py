@@ -18,6 +18,10 @@ REQUIRED_SKILLS = (
     "paper-access",
     "paper-parse",
     "paper-rerank",
+    "rdkit",
+    "pubchem",
+    "opsin",
+    "chem-calculator",
 )
 
 ENGINE_REQUIRED_FILES = (

@@ -16,6 +16,10 @@ This bundle must be installed beside these sibling skill bundles under the same
 - `paper-access`
 - `paper-parse`
 - `paper-rerank`
+- `rdkit`
+- `pubchem`
+- `opsin`
+- `chem-calculator`
 
 ## Purpose
 
@@ -27,6 +31,8 @@ portable skill bundle:
 - DebateClaw V1 handles the low-level debate transport
 - this bundle injects ChemQA-specific role constraints, prompt assets, and
   artifact reconstruction
+- prompt routing can hand deterministic chemistry subtasks to sibling provider
+  skills for numeric and structure-heavy questions
 
 ## Root Rule
 
@@ -80,6 +86,16 @@ Important:
 - Reviewer lanes must not drift into independent final-answer proposals.
 - The coordinator must emit `chemqa_review_protocol.json` so the artifact
   collector can rebuild the `react_reviewed` protocol surface.
+
+## Prompt Routing Notes
+
+- `FrontierScience` numeric questions should prefer `chem-calculator` before
+  web search when the prompt already provides the needed givens.
+- `SuperChem` structure questions should extract available SMILES or name text
+  first, then route to `rdkit`, `opsin`, and `pubchem` as appropriate.
+- Reviewer lanes should cite script `result.json` files or structured
+  `tool_trace` entries when challenging numeric or structural claims.
+- This phase does not include a dedicated image-reading or OCSR skill.
 
 ## References
 

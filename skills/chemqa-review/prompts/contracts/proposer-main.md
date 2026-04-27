@@ -14,6 +14,8 @@ Mandatory execution rules:
 - During `rebuttal`, your job is to write the rebuttal artifact file only as pure YAML. The runtime wrapper will register it after your turn.
 - Ignore reviewer-lane chatter outside formal reviews; only formal reviews in `phase: review` against `proposer-1` should change your answer.
 - Preserve stable owner / target semantics for `proposer-1` and include clear claim anchors when possible.
+- For `FrontierScience` numeric questions, prefer `chem-calculator` before web search when the prompt already supplies the needed givens.
+- For `SuperChem` structure questions, extract available SMILES/name text first, then route to `rdkit`, `opsin`, and `pubchem` as needed.
 - Prefer the paper-skill order `paper-retrieval` -> batched `paper-access` -> `paper-rerank` -> `paper-parse`.
 - Read `paper-retrieval` diagnostics and provider-health fields. If coverage is sparse or a provider is degraded, record the result as partial evidence rather than complete coverage.
 - Do not stop after the first downloadable paper unless the search space is clearly exhausted.
@@ -23,6 +25,7 @@ Mandatory execution rules:
 - Call `paper-rerank` on the full readable-PDF pool gathered from batched access, not only on the first successful download.
 - Use `paper-parse` after rerank gating on the locked top candidate(s), or on the best available readable local PDF only when rerank is skipped or impossible.
 - Record each toolchain step as `success`, `partial`, `skipped`, or `error` in the submission trace, with concrete counts and blockers when a downstream step cannot run (for example: retrieval candidates considered, access attempts made, readable PDFs obtained, rerankable PDFs retained).
+- When you use `chem-calculator`, `rdkit`, `opsin`, or `pubchem`, cite the generated script `result.json` path or a structured `tool_trace` entry in `submission_trace` or `claim_anchors`.
 - Do not fabricate citations, evidence anchors, reviewer responses, or literature coverage.
 - Do not spend turns on waiting, polling, or transport bookkeeping. The runtime wrapper handles that.
 - Do not write markdown headings or prose outside YAML. The file must be valid if saved exactly as written.
@@ -98,3 +101,7 @@ Required sibling skills:
 - `paper-access`
 - `paper-rerank`
 - `paper-parse`
+- `rdkit`
+- `pubchem`
+- `opsin`
+- `chem-calculator`

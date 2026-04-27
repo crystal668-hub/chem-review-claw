@@ -17,6 +17,7 @@
   - `DONE`: Drive ChemQA reviewer/proposer/coordinator loops on top of DebateClaw state via `workspace/skills/chemqa-review/scripts/chemqa_review_openclaw_driver.py`.
   - `DONE`: Recover stalled ChemQA runs, respawn dead workers, and repair invalid protocol state via `workspace/skills/chemqa-review/scripts/recover_run.py`.
   - `DONE`: Collect ChemQA protocol outputs into `qa_result.json` plus artifact files via `workspace/skills/chemqa-review/scripts/collect_artifacts.py`.
+  - `DONE`: Provide deterministic chemistry provider skills for local structure reasoning, name resolution, public compound lookup, and numeric chemistry calculations via `workspace/skills/rdkit`, `workspace/skills/opsin`, `workspace/skills/pubchem`, and `workspace/skills/chem-calculator`.
   - `DONE`: Retrieve literature candidates from OpenAlex, Semantic Scholar, and Crossref via `workspace/skills/paper-retrieval/scripts/paper_retrieval.py`.
   - `DONE`: Resolve accessible paper artifacts using direct OA URLs and optional Unpaywall lookup via `workspace/skills/paper-access/scripts/paper_access.py`.
   - `DONE`: Parse local PDF/text documents with MinerU or PyMuPDF fallback via `workspace/skills/paper-parse/scripts/paper_parse.py`.
@@ -79,7 +80,9 @@
     - Owns preset compilation/materialization, slot provisioning, launch helpers, runtime checks, model profiles, and live debate state CLI.
   - `chemqa-review/`
     - Installable ChemQA review protocol bundle layered on top of DebateClaw V1.
-    - Owns ChemQA launch pipeline, driver loop, artifact reconstruction, liveness/recovery tooling, and a minimal native workflow package.
+    - Owns ChemQA launch pipeline, driver loop, artifact reconstruction, liveness/recovery tooling, a minimal native workflow package, and prompt/runtime dependency wiring for sibling chemistry provider skills.
+  - `rdkit/`, `pubchem/`, `opsin/`, `chem-calculator/`
+    - First-batch chemistry provider bundles used for deterministic structure, nomenclature, compound lookup, and numeric subproblems.
   - `benchmark-cleanroom/`
     - Run-scoped cleanup manifests and lease management plus cleanup executor.
   - `paper-retrieval/`, `paper-access/`, `paper-parse/`, `paper-rerank/`
@@ -268,6 +271,38 @@
   - Implementation location: `workspace/skills/chemqa-review/scripts/check_run_liveness.py`
   - Status: `DONE`
 
+- Name: RDKit provider skill
+  - Description: Runs deterministic local cheminformatics helpers for canonicalization, descriptors, substructure, stereochemistry, similarity, reactions, conformers, and symmetry heuristics.
+  - Input / Output:
+    - Input: request JSON plus output directory.
+    - Output: stable `result.json` payloads with structured diagnostics/tool traces.
+  - Implementation location: `workspace/skills/rdkit/*`
+  - Status: `DONE`
+
+- Name: PubChem provider skill
+  - Description: Resolves names, CIDs, formulas, properties, synonyms, and similarity lookups through PubChem PUG REST.
+  - Input / Output:
+    - Input: request JSON plus output directory.
+    - Output: stable `result.json` payloads with provider health, source traces, and structured diagnostics.
+  - Implementation location: `workspace/skills/pubchem/*`
+  - Status: `DONE`
+
+- Name: OPSIN provider skill
+  - Description: Resolves systematic chemical names to structures through OPSIN with structured diagnostics and optional RDKit validation handoff.
+  - Input / Output:
+    - Input: request JSON plus output directory.
+    - Output: stable `result.json` payloads with parse diagnostics and optional validation status.
+  - Implementation location: `workspace/skills/opsin/*`
+  - Status: `DONE`
+
+- Name: Chemistry calculator skill
+  - Description: Runs deterministic local chemistry calculations for stoichiometry, concentration, equilibria, acid/base, gas-law, electrochemistry, units, and answer checks.
+  - Input / Output:
+    - Input: request JSON plus output directory.
+    - Output: stable `result.json` payloads with structured calculation traces and diagnostics.
+  - Implementation location: `workspace/skills/chem-calculator/*`
+  - Status: `DONE`
+
 - Name: Native ChemQA workflow package
   - Description: Declares workflow package class with hooks for initialize/next-action/submit/advance/status/summary/finalize.
   - Input / Output:
@@ -400,6 +435,10 @@
   - The operational state machine is `workspace/skills/debateclaw-v1/scripts/debate_state.py`, not `workspace/skills/chemqa-review/runtime/workflow.py`.
   - `chemqa_review_openclaw_driver.py` loops by repeatedly calling `debate_state.py` subcommands in subprocesses.
   - The driver updates ClawTeam task state, saves sessions, opens/removes cleanup leases, and emits role-specific artifacts.
+  - `chemqa-review/scripts/bundle_common.py` and the prompt pack now treat `rdkit`, `pubchem`, `opsin`, and `chem-calculator` as required sibling skills alongside DebateClaw and the paper pipeline.
+  - Prompt routing now tells `proposer-1` to prefer `chem-calculator` for `FrontierScience` numeric questions before web search, and to extract available SMILES/name text before routing `SuperChem` structure questions to `rdkit`, `opsin`, and `pubchem`.
+  - Reviewer prompt contracts now require numeric and structural challenges to cite script `result.json` artifacts or structured `tool_trace` entries instead of unsupported tool-use claims.
+  - This integration phase does not add a dedicated image-reading or OCSR skill to ChemQA prompt routing.
   - Recovery is externalized:
     - `recover_run.py` inspects the same runtime files and database,
     - repairs invalid review phases,

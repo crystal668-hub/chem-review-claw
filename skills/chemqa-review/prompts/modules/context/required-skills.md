@@ -5,6 +5,10 @@ Required sibling skills:
 - `paper-access`
 - `paper-parse`
 - `paper-rerank`
+- `rdkit`
+- `pubchem`
+- `opsin`
+- `chem-calculator`
 
 Resolve these bundles from the same parent `skills/` directory as this bundle.
 Do not assume repository-relative paths.
