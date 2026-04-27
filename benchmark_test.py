@@ -2383,22 +2383,59 @@ def count_per_record_outputs(output_root: Path, *, group_ids: list[str]) -> dict
 def load_group_record_result(path: Path) -> GroupRecordResult:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if "schema_version" not in payload:
+        runner_meta = payload.get("runner_meta") or {}
+        raw = payload.get("raw") or {}
         evaluation = payload.get("evaluation") or {}
         primary_metric = str(evaluation.get("primary_metric") or "")
+        fallback_used = bool(runner_meta.get("fallback_used"))
+        fallback_source = str(runner_meta.get("fallback_source") or "")
+        run_status_present = isinstance(raw.get("run_status"), dict)
         scored = primary_metric != "execution_error"
+        if fallback_used:
+            run_lifecycle_status = "completed" if scored else "failed"
+            protocol_completion_status = "failed" if run_status_present else "missing"
+            answer_availability = (
+                "preview_only"
+                if fallback_source == "run-status-final-answer-preview"
+                else "recovered_candidate"
+            )
+            answer_reliability = (
+                "low_confidence_recovered"
+                if fallback_source == "run-status-final-answer-preview"
+                else "high_confidence_recovered"
+            )
+            evaluable = scored
+            recovery_mode = fallback_source or "none"
+            degraded_execution = True
+        elif scored:
+            run_lifecycle_status = "completed"
+            protocol_completion_status = "completed"
+            answer_availability = "native_final"
+            answer_reliability = "native"
+            evaluable = True
+            recovery_mode = "none"
+            degraded_execution = False
+        else:
+            run_lifecycle_status = "failed"
+            protocol_completion_status = "failed" if run_status_present else "missing"
+            answer_availability = "missing"
+            answer_reliability = "none"
+            evaluable = False
+            recovery_mode = "none"
+            degraded_execution = True
         payload = {
             **payload,
             # Upconvert schema-v1 per-record payloads so historical outputs remain loadable.
             "schema_version": 2,
-            "run_lifecycle_status": "completed",
-            "protocol_completion_status": "completed",
+            "run_lifecycle_status": run_lifecycle_status,
+            "protocol_completion_status": protocol_completion_status,
             "protocol_acceptance_status": None,
-            "answer_availability": "native_final" if scored else "missing",
-            "answer_reliability": "native" if scored else "none",
-            "evaluable": scored,
+            "answer_availability": answer_availability,
+            "answer_reliability": answer_reliability,
+            "evaluable": evaluable,
             "scored": scored,
-            "recovery_mode": "none",
-            "degraded_execution": False if scored else True,
+            "recovery_mode": recovery_mode,
+            "degraded_execution": degraded_execution,
             "execution_error_kind": None if scored else "execution_error",
         }
     return GroupRecordResult(**payload)
@@ -2540,13 +2577,18 @@ def materialize_group_failure_results(
     return [GroupRecordResult(**asdict(entry)) for entry in entries]
 
 
+def normalize_run_status_value(status: Any) -> str:
+    return str(getattr(status, "value", status) or "").strip()
+
+
 def build_result_axes_from_runner(run_result: Any) -> dict[str, Any]:
     status = getattr(run_result, "status", None)
+    normalized_status = normalize_run_status_value(status)
     runner_meta = getattr(run_result, "runner_meta", None) or {}
     raw = getattr(run_result, "raw", None) or {}
     recovery = getattr(run_result, "recovery", None)
     scored = bool(run_result.should_score())
-    run_lifecycle_status = "completed" if status in (RunStatus.COMPLETED, RunStatus.RECOVERED) else "failed"
+    run_lifecycle_status = "completed" if normalized_status in {"completed", "recovered"} else "failed"
 
     terminal_state = runner_meta.get("terminal_state")
     if terminal_state == "completed":
@@ -2578,7 +2620,7 @@ def build_result_axes_from_runner(run_result: Any) -> dict[str, Any]:
             degraded_execution=True,
         )
     else:
-        status_is_completed = status is RunStatus.COMPLETED
+        status_is_completed = normalized_status == "completed"
         if status_is_completed:
             axes.update(
                 answer_availability="native_final",
