@@ -1687,14 +1687,26 @@ Points: 0.5, Item: Second criterion
                             "artifact_contract_version: react-reviewed-v2",
                             "terminal_state: failed",
                             "acceptance_status: failed",
-                            "candidate_submission:",
-                            "  owner: proposer-1",
-                            "  direct_answer: CCO",
-                            "  summary: recovered answer",
-                            "  submission_trace:",
-                            "    - step: structural_reasoning",
-                            "      status: success",
-                            "      detail: reconstructed from proposer artifact",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                proposal_path = protocol_dir / "debate" / "artifacts" / "proposals" / "epoch-001" / "proposer-1.md"
+                proposal_path.parent.mkdir(parents=True, exist_ok=True)
+                proposal_path.write_text(
+                    "\n".join(
+                        [
+                            "artifact_kind: candidate_submission",
+                            "artifact_contract_version: react-reviewed-v2",
+                            "phase: propose",
+                            "owner: proposer-1",
+                            "direct_answer: CCO",
+                            "summary: recovered answer",
+                            "submission_trace:",
+                            "  - step: structural_reasoning",
+                            "    status: success",
+                            "    detail: reconstructed from proposer artifact",
                         ]
                     )
                     + "\n",
@@ -1713,7 +1725,7 @@ Points: 0.5, Item: Second criterion
                 self.assertTrue(out.runner_meta["fallback_used"])
                 self.assertEqual("proposer-1-proposal", out.runner_meta["fallback_source"])
                 self.assertIn("proposal_path", out.raw["fallback"])
-                self.assertTrue(str(out.raw["fallback"]["proposal_path"]).endswith("proposer-1.md"))
+                self.assertEqual(str(proposal_path.resolve()), str(Path(out.raw["fallback"]["proposal_path"]).resolve()))
         finally:
             benchmark_test.run_subprocess = original_run_subprocess
             benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
@@ -2162,7 +2174,7 @@ Points: 0.5, Item: Second criterion
             runner_meta={
                 "run_id": "demo-run",
                 "fallback_used": True,
-                "fallback_source": "candidate_submission",
+                "fallback_source": "proposer-1-proposal",
                 "error": "ChemQA run `demo-run` terminated as failed (reason=stalled)",
             },
             recovery=benchmark_test.RecoveryInfo(
@@ -2230,6 +2242,8 @@ Points: 0.5, Item: Second criterion
             self.assertTrue(entry.evaluation["passed"])
             self.assertEqual("fallback-answer", entry.short_answer_text)
             self.assertEqual("FINAL ANSWER: fallback-answer", entry.full_response_text)
+            self.assertEqual("proposer-1-proposal", entry.runner_meta["fallback_source"])
+            self.assertEqual({"status": "done", "terminal_state": "failed"}, entry.raw["run_status"])
         finally:
             if original_build_runner is None:
                 delattr(benchmark_test, "build_runner")
