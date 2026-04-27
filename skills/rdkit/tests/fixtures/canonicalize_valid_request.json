@@ -1,0 +1,6 @@
+{
+  "molecule": {
+    "format": "smiles",
+    "value": "OCC"
+  }
+}

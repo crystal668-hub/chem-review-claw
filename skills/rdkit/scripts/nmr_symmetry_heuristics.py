@@ -1,0 +1,8 @@
+from __future__ import annotations
+
+from rdkit_capabilities import nmr_symmetry_heuristics
+from rdkit_skill_common import run_named_capability
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_named_capability("nmr_symmetry_heuristics", nmr_symmetry_heuristics))
