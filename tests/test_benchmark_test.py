@@ -1810,6 +1810,7 @@ Points: 0.5, Item: Second criterion
                 out = runner.run(record, benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"])
 
                 self.assertEqual(benchmark_test.RunStatus.FAILED, out.status)
+                self.assertFalse(out.should_score())
                 self.assertTrue(out.runner_meta["fallback_used"])
                 self.assertEqual("run-status-final-answer-preview", out.runner_meta["fallback_source"])
                 self.assertIs(out.runner_meta["evaluable"], False)
