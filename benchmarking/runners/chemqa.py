@@ -435,15 +435,21 @@ class ChemQARunner:
                 "details": fallback_meta,
             }
         recovery_mode = str(fallback_meta.get("fallback_source") or "candidate_submission")
-        reliability = (
-            "high_confidence_recovered"
-            if recovery_mode != "run-status-final-answer-preview"
-            else "low_confidence_recovered"
-        )
+        if recovery_mode == "run-status-final-answer-preview":
+            return {
+                "evaluable": False,
+                "scored": False,
+                "reliability": "low_confidence_recovered",
+                "recovery_mode": recovery_mode,
+                "reason": "preview_requires_strict_validation",
+                "short_answer_text": short_text,
+                "full_response_text": full_response_text,
+                "details": fallback_meta,
+            }
         return {
             "evaluable": True,
             "scored": True,
-            "reliability": reliability,
+            "reliability": "high_confidence_recovered",
             "recovery_mode": recovery_mode,
             "reason": "",
             "short_answer_text": short_text,
@@ -704,19 +710,21 @@ class ChemQARunner:
                     run_status=run_status,
                     archive_meta=archive_meta,
                 )
-                if recovery_assessment is not None and recovery_assessment.get("evaluable"):
+                if recovery_assessment is not None:
                     recovery_details = self._deep_copy_jsonish(recovery_assessment.get("details") or {})
                     runner_meta.update(
                         {
                             "fallback_used": True,
                             **recovery_details,
-                            "evaluable": True,
-                            "scored": True,
-                            "recovery_mode": str(recovery_assessment["recovery_mode"]),
-                            "answer_reliability": str(recovery_assessment["reliability"]),
+                            "evaluable": bool(recovery_assessment.get("evaluable")),
+                            "scored": bool(recovery_assessment.get("scored")),
+                            "recovery_mode": str(recovery_assessment.get("recovery_mode") or "none"),
+                            "answer_reliability": str(recovery_assessment.get("reliability") or "none"),
                             "degraded_execution": True,
+                            "recovery_reason": str(recovery_assessment.get("reason") or ""),
                         }
                     )
+                if recovery_assessment is not None and recovery_assessment.get("evaluable"):
                     return RunnerResult(
                         status=RunStatus.RECOVERED,
                         answer=AnswerPayload(
