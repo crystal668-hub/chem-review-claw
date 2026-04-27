@@ -241,6 +241,30 @@ def _summary_from_text_body(text: str) -> str:
     return _collapse_text_lines(_non_metadata_prose_lines(text))
 
 
+def _looks_like_narrative_direct_answer(value: str) -> bool:
+    text = _clean_text(value)
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith(
+        (
+            "revised proposal",
+            "revised candidate",
+            "revised design",
+            "updated proposal",
+            "updated candidate",
+            "updated design",
+        )
+    ):
+        return True
+    sentence_markers = sum(text.count(marker) for marker in (". ", "; ", ": "))
+    if sentence_markers >= 1 and len(text.split()) >= 12:
+        return True
+    if len(text.splitlines()) > 1 and len(text.split()) >= 8:
+        return True
+    return False
+
+
 def _review_items_from_legacy_text(text: str, verdict: str) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for raw_line in text.splitlines():
@@ -494,6 +518,8 @@ def check_candidate_submission(text: str, *, owner: str = CANDIDATE_OWNER) -> Ar
     errors: list[str] = []
     if _clean_text(canonical["direct_answer"]) == "":
         errors.append("candidate submission is missing `direct_answer`")
+    elif _looks_like_narrative_direct_answer(canonical["direct_answer"]):
+        errors.append("candidate submission `direct_answer` must be a concise final answer, not a revision narrative")
     if not canonical["summary"]:
         errors.append("candidate submission is missing `summary`")
     for index, item in enumerate(canonical["submission_trace"], start=1):

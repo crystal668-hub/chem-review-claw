@@ -149,6 +149,38 @@ reasoning: Product C best matches the mechanism and substituent pattern implied 
         self.assertIn("Product C best matches", checked.payload["summary"])
         self.assertEqual(1, len(checked.payload["submission_trace"]))
 
+    def test_candidate_submission_rejects_narrative_direct_answer_for_scalar_answer_tasks(self) -> None:
+        candidate = """
+artifact_kind: candidate_submission
+phase: propose
+owner: proposer-1
+direct_answer: Revised proposal for 2-fluoroethylamine (NCCF) as the target molecule. This epoch addresses the prior review items with a fuller narrative justification.
+summary: Revised candidate after considering reviewer feedback.
+submission_trace:
+- step: structural_reasoning
+  status: success
+  detail: Re-ran the analysis and rewrote the candidate explanation.
+""".strip()
+        checked = transport.check_candidate_submission(candidate, owner="proposer-1")
+        self.assertFalse(checked.ok)
+        self.assertIn("direct_answer", " ".join(checked.errors))
+
+    def test_candidate_submission_rejects_revised_design_direct_answer(self) -> None:
+        candidate = """
+artifact_kind: candidate_submission
+phase: propose
+owner: proposer-1
+direct_answer: 'Revised design: 2-mercaptobenzonitrile addresses the epoch-1 acceptor-count violation.'
+summary: Revised design after reviewer feedback.
+submission_trace:
+- step: structural_reasoning
+  status: success
+  detail: Re-ran the structural analysis and rewrote the candidate explanation.
+""".strip()
+        checked = transport.check_candidate_submission(candidate, owner="proposer-1")
+        self.assertFalse(checked.ok)
+        self.assertIn("direct_answer", " ".join(checked.errors))
+
     def test_formal_review_prose_recovers_summary_and_review_items(self) -> None:
         review = """
 artifact_kind: formal_review
@@ -436,10 +468,10 @@ class MaterializeRunplanTest(unittest.TestCase):
                     "stop_loss": {
                         "stale_timeout_seconds": 300,
                         "respawn_cooldown_seconds": 120,
-                        "max_model_attempts": 1,
+                        "max_model_attempts": 2,
                         "lane_retry_budget": 2,
-                        "phase_repair_budget": 1,
-                        "max_respawns_per_role_phase_signature": 1,
+                        "phase_repair_budget": 2,
+                        "max_respawns_per_role_phase_signature": 2,
                     }
                 }
             },
@@ -468,9 +500,12 @@ class MaterializeRunplanTest(unittest.TestCase):
         self.assertIn("--respawn-cooldown-seconds", command)
         self.assertIn("120", command)
         self.assertIn("--max-model-attempts", command)
+        self.assertIn("2", command[command.index("--max-model-attempts") + 1])
         self.assertIn("--lane-retry-budget", command)
         self.assertIn("--phase-repair-budget", command)
+        self.assertIn("2", command[command.index("--phase-repair-budget") + 1])
         self.assertIn("--max-respawns-per-role-phase-signature", command)
+        self.assertIn("2", command[command.index("--max-respawns-per-role-phase-signature") + 1])
 
 
 class NativeWorkflowStateTest(unittest.TestCase):

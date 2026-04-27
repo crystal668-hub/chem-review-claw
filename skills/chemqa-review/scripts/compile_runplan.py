@@ -193,10 +193,10 @@ def main() -> int:
                 "stop_loss": {
                     "stale_timeout_seconds": 300,
                     "respawn_cooldown_seconds": 120,
-                    "max_model_attempts": 1,
+                    "max_model_attempts": 2,
                     "lane_retry_budget": 2,
-                    "phase_repair_budget": 1,
-                    "max_respawns_per_role_phase_signature": 1,
+                    "phase_repair_budget": 2,
+                    "max_respawns_per_role_phase_signature": 2,
                     "stagnation_basis": "phase_signature",
                     "terminal_failure_artifact": "chemqa_review_failure.yaml"
                 },
