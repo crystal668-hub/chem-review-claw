@@ -347,6 +347,58 @@ Points: 0.5, Item: Second criterion
             self.assertEqual("demo-record", loaded[0].record_id)
             self.assertEqual("A", loaded[0].short_answer_text)
 
+    def test_load_results_from_output_root_upconverts_legacy_per_record_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            group_dir = root / "per-record" / "single_llm_web_on"
+            group_dir.mkdir(parents=True, exist_ok=True)
+            legacy_payload = {
+                "group_id": "single_llm_web_on",
+                "group_label": "单一 LLM + 启用 websearch plugin",
+                "runner": "single_llm",
+                "websearch": True,
+                "record_id": "legacy-record",
+                "subset": "chembench",
+                "dataset": "chembench",
+                "source_file": "/tmp/demo.jsonl",
+                "eval_kind": "chembench_open_ended",
+                "prompt": "Q",
+                "reference_answer": "A",
+                "answer_text": "A",
+                "evaluation": {
+                    "eval_kind": "chembench_open_ended",
+                    "score": 1.0,
+                    "max_score": 1.0,
+                    "normalized_score": 1.0,
+                    "passed": True,
+                    "primary_metric": "exact_str_match",
+                    "primary_metric_direction": "higher_is_better",
+                    "details": {},
+                },
+                "runner_meta": {},
+                "raw": {},
+                "elapsed_seconds": 1.0,
+                "error": None,
+                "short_answer_text": "A",
+                "full_response_text": "FINAL ANSWER: A",
+            }
+            (group_dir / "legacy-record.json").write_text(json.dumps(legacy_payload), encoding="utf-8")
+            loaded = benchmark_test.load_results_from_output_root(root, group_ids=["single_llm_web_on"])
+            self.assertEqual(1, len(loaded))
+            entry = loaded[0]
+            self.assertEqual("legacy-record", entry.record_id)
+            self.assertEqual(2, entry.schema_version)
+            self.assertEqual("completed", entry.run_lifecycle_status)
+            self.assertEqual("completed", entry.protocol_completion_status)
+            self.assertIsNone(entry.protocol_acceptance_status)
+            self.assertEqual("native_final", entry.answer_availability)
+            self.assertEqual("native", entry.answer_reliability)
+            self.assertTrue(entry.evaluable)
+            self.assertTrue(entry.scored)
+            self.assertEqual("none", entry.recovery_mode)
+            self.assertFalse(entry.degraded_execution)
+            self.assertIsNone(entry.execution_error_kind)
+
     def test_build_run_scoped_config_payload_uses_explicit_single_and_judge_models(self) -> None:
         base = {
             "agents": {"list": []},
@@ -2348,6 +2400,71 @@ Points: 0.5, Item: Second criterion
             self.assertEqual("proposer-1-proposal", entry.runner_meta["fallback_source"])
             self.assertEqual({"status": "done", "terminal_state": "failed"}, entry.raw["run_status"])
             self.assertEqual("ChemQA run `demo-run` terminated as failed (reason=stalled)", entry.error)
+        finally:
+            if original_build_runner is None:
+                delattr(benchmark_test, "build_runner")
+            else:
+                benchmark_test.build_runner = original_build_runner
+            benchmark_test.evaluate_answer = original_evaluate_answer
+
+    def test_run_group_failed_result_axes_for_non_recovery(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="failed-record",
+            dataset="chembench",
+            source_file="/tmp/demo.jsonl",
+            eval_kind="chembench_open_ended",
+            prompt="Q",
+            reference_answer="A",
+            payload={},
+        )
+        failed_result = benchmark_test.RunnerResult(
+            status=benchmark_test.RunStatus.FAILED,
+            answer=benchmark_test.AnswerPayload(short_answer_text="", full_response_text=""),
+            raw={"run_status": {"status": "done", "terminal_state": "failed"}},
+            runner_meta={"run_id": "demo-run"},
+            failure=benchmark_test.FailureInfo(code="failed", message="runner failed"),
+        )
+
+        class StubRunner:
+            def run(self, record: object, group: object) -> benchmark_test.RunnerResult:
+                return failed_result
+
+        original_build_runner = getattr(benchmark_test, "build_runner", None)
+        original_evaluate_answer = benchmark_test.evaluate_answer
+        try:
+            benchmark_test.build_runner = lambda **kwargs: StubRunner()
+
+            def fail_evaluate_answer(*args, **kwargs):
+                raise AssertionError("evaluate_answer should not be called for failed non-recovery results")
+
+            benchmark_test.evaluate_answer = fail_evaluate_answer
+            with tempfile.TemporaryDirectory() as tmpdir:
+                results = benchmark_test.run_group(
+                    group=benchmark_test.EXPERIMENT_GROUPS["chemqa_web_off"],
+                    records=[record],
+                    output_root=Path(tmpdir),
+                    single_timeout=10,
+                    chemqa_timeout=10,
+                    judge=object(),
+                    config_path=Path(tmpdir) / "cfg.json",
+                    single_agent="unused",
+                    chemqa_root=Path(tmpdir),
+                    chemqa_model_profile="unused",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                )
+            self.assertEqual(1, len(results))
+            entry = results[0]
+            self.assertEqual("failed", entry.run_lifecycle_status)
+            self.assertEqual("failed", entry.protocol_completion_status)
+            self.assertEqual("missing", entry.answer_availability)
+            self.assertEqual("none", entry.answer_reliability)
+            self.assertFalse(entry.evaluable)
+            self.assertFalse(entry.scored)
+            self.assertEqual("none", entry.recovery_mode)
+            self.assertTrue(entry.degraded_execution)
+            self.assertEqual("execution_error", entry.execution_error_kind)
+            self.assertEqual("runner failed", entry.error)
         finally:
             if original_build_runner is None:
                 delattr(benchmark_test, "build_runner")

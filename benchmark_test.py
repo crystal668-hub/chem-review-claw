@@ -2382,6 +2382,25 @@ def count_per_record_outputs(output_root: Path, *, group_ids: list[str]) -> dict
 
 def load_group_record_result(path: Path) -> GroupRecordResult:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if "schema_version" not in payload:
+        evaluation = payload.get("evaluation") or {}
+        primary_metric = str(evaluation.get("primary_metric") or "")
+        scored = primary_metric != "execution_error"
+        payload = {
+            **payload,
+            # Upconvert schema-v1 per-record payloads so historical outputs remain loadable.
+            "schema_version": 2,
+            "run_lifecycle_status": "completed",
+            "protocol_completion_status": "completed",
+            "protocol_acceptance_status": None,
+            "answer_availability": "native_final" if scored else "missing",
+            "answer_reliability": "native" if scored else "none",
+            "evaluable": scored,
+            "scored": scored,
+            "recovery_mode": "none",
+            "degraded_execution": False if scored else True,
+            "execution_error_kind": None if scored else "execution_error",
+        }
     return GroupRecordResult(**payload)
 
 
@@ -2560,14 +2579,24 @@ def build_result_axes_from_runner(run_result: Any) -> dict[str, Any]:
         )
     else:
         status_is_completed = status is RunStatus.COMPLETED
-        axes.update(
-            answer_availability="native_final",
-            answer_reliability="native" if status_is_completed else "none",
-            evaluable=scored,
-            scored=scored,
-            recovery_mode="none",
-            degraded_execution=not status_is_completed,
-        )
+        if status_is_completed:
+            axes.update(
+                answer_availability="native_final",
+                answer_reliability="native",
+                evaluable=scored,
+                scored=scored,
+                recovery_mode="none",
+                degraded_execution=False,
+            )
+        else:
+            axes.update(
+                answer_availability="missing",
+                answer_reliability="none",
+                evaluable=False,
+                scored=False,
+                recovery_mode="none",
+                degraded_execution=True,
+            )
 
     axes["execution_error_kind"] = None if axes["scored"] else "execution_error"
     return axes
