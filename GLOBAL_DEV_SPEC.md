@@ -113,8 +113,16 @@
     - Input: benchmark root or dataset files, group list, timeouts, config path, model/profile overrides.
     - Output: `results.json`, `results.partial.json`, `runtime-manifest.json`, `runtime-config/*.json`, `per-record/*/*.json`, CSV summaries.
     - Per-record JSON entries are on schema version `2` and include explicit evaluability axes such as run lifecycle status, protocol completion/acceptance status, answer availability/reliability, evaluable/scored flags, recovery mode, degraded execution, and execution error kind.
+    - Aggregate summaries in `results.json` and CSV exports retain legacy score fields and also expose operational counters such as completed vs failed runs, protocol completion, evaluable/scored counts, recovered-evaluable counts, and degraded execution counts.
   - Implementation location: `workspace/benchmark_test.py`, `workspace/benchmarking/*`
   - Status: `DONE`
+
+### Benchmark Result Status Axes
+- `results.json` now carries top-level `schema_version = 2` and a `status_axes_description` block that documents the evaluability axes used by per-record entries.
+- `run_lifecycle_status` reports whether the benchmark run finished operationally, while `protocol_completion_status` reports whether the ChemQA protocol itself completed, failed, or is missing.
+- `answer_availability` and `answer_reliability` distinguish native final answers from recovered candidate answers, preview-only fallbacks, and missing answers.
+- `evaluable` means the system preserved a trustworthy answer that should count for benchmark scoring. `scored` means the evaluator actually ran. `passed` remains the task-quality outcome inside `evaluation`.
+- `pass_count` remains a legacy score summary and should not be treated as an operational stability metric. Operational reporting should use the explicit status/evaluability counters instead.
 
 - Name: Benchmark record normalization
   - Description: Loads JSONL records, validates prompt/answer presence, derives grading config and subset labels.

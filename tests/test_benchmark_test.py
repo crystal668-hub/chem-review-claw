@@ -1317,6 +1317,99 @@ Points: 0.5, Item: Second criterion
         self.assertEqual(3.0, summary["groups"]["g1"]["avg_elapsed_seconds"])
         self.assertEqual(0.5, summary["groups"]["g1"]["avg_normalized_score"])
 
+    def test_aggregate_results_tracks_evaluable_and_degraded_counts(self) -> None:
+        sample = [
+            benchmark_test.GroupRecordResult(
+                schema_version=2,
+                group_id="g1",
+                group_label="Group 1",
+                runner="chemqa",
+                websearch=True,
+                record_id="r1",
+                subset="chembench",
+                dataset="d1",
+                source_file="/tmp/a.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="Q1",
+                reference_answer="1",
+                answer_text="1",
+                evaluation={
+                    "eval_kind": "chembench_open_ended",
+                    "score": 1.0,
+                    "max_score": 1.0,
+                    "normalized_score": 1.0,
+                    "passed": True,
+                    "primary_metric": "exact_str_match",
+                    "primary_metric_direction": "higher_is_better",
+                    "details": {},
+                },
+                runner_meta={},
+                raw={},
+                elapsed_seconds=2.0,
+                run_lifecycle_status="completed",
+                protocol_completion_status="failed",
+                protocol_acceptance_status="rejected",
+                answer_availability="recovered_candidate",
+                answer_reliability="high_confidence_recovered",
+                evaluable=True,
+                scored=True,
+                recovery_mode="candidate_submission",
+                degraded_execution=True,
+                execution_error_kind=None,
+            ),
+            benchmark_test.GroupRecordResult(
+                schema_version=2,
+                group_id="g1",
+                group_label="Group 1",
+                runner="chemqa",
+                websearch=True,
+                record_id="r2",
+                subset="chembench",
+                dataset="d1",
+                source_file="/tmp/a.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="Q2",
+                reference_answer="2",
+                answer_text="",
+                evaluation={
+                    "eval_kind": "chembench_open_ended",
+                    "score": 0.0,
+                    "max_score": 1.0,
+                    "normalized_score": 0.0,
+                    "passed": False,
+                    "primary_metric": "execution_error",
+                    "primary_metric_direction": "higher_is_better",
+                    "details": {},
+                },
+                runner_meta={},
+                raw={},
+                elapsed_seconds=4.0,
+                run_lifecycle_status="failed",
+                protocol_completion_status="missing",
+                protocol_acceptance_status=None,
+                answer_availability="missing",
+                answer_reliability="none",
+                evaluable=False,
+                scored=False,
+                recovery_mode="none",
+                degraded_execution=False,
+                execution_error_kind="execution_error",
+                error="missing answer",
+            ),
+        ]
+        summary = benchmark_test.aggregate_results(sample)
+        bucket = summary["groups"]["g1"]
+        self.assertEqual(1, bucket["run_completed_count"])
+        self.assertEqual(1, bucket["run_failed_count"])
+        self.assertEqual(0, bucket["protocol_completed_count"])
+        self.assertEqual(1, bucket["protocol_failed_count"])
+        self.assertEqual(1, bucket["evaluable_count"])
+        self.assertEqual(1, bucket["scored_count"])
+        self.assertEqual(1, bucket["recovered_evaluable_count"])
+        self.assertEqual(0, bucket["native_evaluable_count"])
+        self.assertEqual(1, bucket["non_evaluable_count"])
+        self.assertEqual(1, bucket["degraded_execution_count"])
+
     def test_aggregate_results_includes_superchem_metrics(self) -> None:
         sample = [
             benchmark_test.GroupRecordResult(
@@ -1449,6 +1542,62 @@ Points: 0.5, Item: Second criterion
         self.assertIn("g1", summary["groups"])
         self.assertIn("g1::chembench", summary["group_subset"])
 
+    def test_results_json_payload_adds_schema_version_without_dropping_legacy_keys(self) -> None:
+        sample = [
+            benchmark_test.GroupRecordResult(
+                schema_version=2,
+                group_id="g1",
+                group_label="Group 1",
+                runner="single_llm",
+                websearch=False,
+                record_id="r1",
+                subset="chembench",
+                dataset="d1",
+                source_file="/tmp/a.jsonl",
+                eval_kind="chembench_open_ended",
+                prompt="Q1",
+                reference_answer="1",
+                answer_text="1",
+                evaluation={
+                    "eval_kind": "chembench_open_ended",
+                    "score": 1.0,
+                    "max_score": 1.0,
+                    "normalized_score": 1.0,
+                    "passed": True,
+                    "primary_metric": "exact_str_match",
+                    "primary_metric_direction": "higher_is_better",
+                    "details": {},
+                },
+                runner_meta={},
+                raw={},
+                elapsed_seconds=2.0,
+                run_lifecycle_status="completed",
+                protocol_completion_status="completed",
+                protocol_acceptance_status=None,
+                answer_availability="native_final",
+                answer_reliability="native",
+                evaluable=True,
+                scored=True,
+                recovery_mode="none",
+                degraded_execution=False,
+                execution_error_kind=None,
+            )
+        ]
+        summary = benchmark_test.aggregate_results(sample)
+        payload = {
+            "schema_version": 2,
+            "status_axes_description": {
+                "evaluable": "whether a record has a trustworthy scoreable answer",
+            },
+            "results": [benchmark_test.asdict(item) for item in sample],
+            "summary": summary,
+            "errors": [],
+        }
+        self.assertEqual(2, payload["schema_version"])
+        self.assertIn("results", payload)
+        self.assertIn("summary", payload)
+        self.assertIn("errors", payload)
+
     def test_group_record_result_includes_evaluability_axes(self) -> None:
         result = benchmark_test.GroupRecordResult(
             schema_version=2,
@@ -1501,6 +1650,16 @@ Points: 0.5, Item: Second criterion
                     "websearch": False,
                     "count": 2,
                     "pass_count": 1,
+                    "run_completed_count": 2,
+                    "run_failed_count": 0,
+                    "protocol_completed_count": 2,
+                    "protocol_failed_count": 0,
+                    "evaluable_count": 2,
+                    "scored_count": 2,
+                    "recovered_evaluable_count": 0,
+                    "native_evaluable_count": 2,
+                    "degraded_execution_count": 0,
+                    "non_evaluable_count": 0,
                     "avg_normalized_score": 0.5,
                     "avg_answer_accuracy": 1.0,
                     "avg_rpf": 0.75,
@@ -1514,6 +1673,16 @@ Points: 0.5, Item: Second criterion
                     "subset": "chembench",
                     "count": 2,
                     "pass_count": 1,
+                    "run_completed_count": 2,
+                    "run_failed_count": 0,
+                    "protocol_completed_count": 2,
+                    "protocol_failed_count": 0,
+                    "evaluable_count": 2,
+                    "scored_count": 2,
+                    "recovered_evaluable_count": 0,
+                    "native_evaluable_count": 2,
+                    "degraded_execution_count": 0,
+                    "non_evaluable_count": 0,
                     "avg_normalized_score": 0.5,
                     "avg_answer_accuracy": None,
                     "avg_rpf": None,
@@ -1535,6 +1704,16 @@ Points: 0.5, Item: Second criterion
                     "websearch",
                     "count",
                     "pass_count",
+                    "run_completed_count",
+                    "run_failed_count",
+                    "protocol_completed_count",
+                    "protocol_failed_count",
+                    "evaluable_count",
+                    "scored_count",
+                    "recovered_evaluable_count",
+                    "native_evaluable_count",
+                    "degraded_execution_count",
+                    "non_evaluable_count",
                     "avg_normalized_score",
                     "avg_answer_accuracy",
                     "avg_rpf",
@@ -1546,10 +1725,38 @@ Points: 0.5, Item: Second criterion
             self.assertEqual("0.5", rows[0]["avg_normalized_score"])
             self.assertEqual("1.0", rows[0]["avg_answer_accuracy"])
             self.assertEqual("0.75", rows[0]["avg_rpf"])
+            self.assertEqual("2", rows[0]["run_completed_count"])
+            self.assertEqual("2", rows[0]["evaluable_count"])
+            self.assertEqual("0", rows[0]["degraded_execution_count"])
 
             with (root / "summary_by_group_and_subset.csv").open(newline="", encoding="utf-8") as handle:
                 subset_rows = list(csv.DictReader(handle))
+            self.assertEqual(
+                [
+                    "group_id",
+                    "runner",
+                    "websearch",
+                    "subset",
+                    "count",
+                    "pass_count",
+                    "run_completed_count",
+                    "run_failed_count",
+                    "protocol_completed_count",
+                    "protocol_failed_count",
+                    "evaluable_count",
+                    "scored_count",
+                    "recovered_evaluable_count",
+                    "native_evaluable_count",
+                    "degraded_execution_count",
+                    "non_evaluable_count",
+                    "avg_normalized_score",
+                    "avg_answer_accuracy",
+                    "avg_rpf",
+                ],
+                list(subset_rows[0].keys()),
+            )
             self.assertEqual("chembench", subset_rows[0]["subset"])
+            self.assertEqual("2", subset_rows[0]["scored_count"])
 
     def test_judge_client_invokes_openclaw_with_high_thinking(self) -> None:
         captured: dict[str, object] = {}
