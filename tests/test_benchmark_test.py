@@ -218,6 +218,28 @@ class BenchmarkTestModuleTests(unittest.TestCase):
         self.assertEqual("42", benchmark_test.extract_final_answer_line(text))
         self.assertEqual("42", benchmark_test.extract_candidate_short_answer(text))
 
+    def test_runner_result_should_score_when_recovery_is_evaluable(self) -> None:
+        result = benchmark_test.RunnerResult(
+            status=benchmark_test.RunStatus.RECOVERED,
+            answer=benchmark_test.AnswerPayload(
+                short_answer_text="CCO",
+                full_response_text="FINAL ANSWER: CCO",
+            ),
+            raw={"run_status": {"status": "done", "terminal_state": "failed"}},
+            runner_meta={"run_id": "demo-run"},
+            recovery=benchmark_test.RecoveryInfo(
+                source="candidate_submission",
+                scored=True,
+                details={
+                    "evaluable": True,
+                    "reliability": "high_confidence_recovered",
+                    "recovery_mode": "candidate_submission",
+                },
+            ),
+        )
+
+        self.assertTrue(result.should_score())
+
     def test_parse_frontierscience_research_rubric(self) -> None:
         rubric = """
 Points: 1.0, Item: First criterion
@@ -1602,6 +1624,99 @@ Points: 0.5, Item: Second criterion
             benchmark_test.ChemQARunner._build_candidate_submission_fallback = original_build_candidate_submission_fallback
             benchmark_test.ChemQARunner._collect_artifacts_from_source = original_collect_artifacts
 
+    def test_chemqa_runner_failed_terminal_with_candidate_fallback_returns_scored_recovered_result(self) -> None:
+        original_run_subprocess = benchmark_test.run_subprocess
+        original_ensure_runtime_bundle = benchmark_test.ensure_runtime_bundle
+        original_wait_for_terminal_status = benchmark_test.ChemQARunner._wait_for_terminal_status
+        original_collect_artifacts = benchmark_test.ChemQARunner._collect_artifacts_from_source
+        original_invoke_cleanroom_cleanup = benchmark_test.invoke_cleanroom_cleanup
+        try:
+            benchmark_test.run_subprocess = lambda command, *, env=None, cwd=None, timeout=None: benchmark_test.subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"run_id": "demo", "launch_mode": "run", "launched": {"returncode": 0}}),
+                stderr="",
+            )
+            benchmark_test.ensure_runtime_bundle = lambda record, bundle_root: None
+            benchmark_test.invoke_cleanroom_cleanup = lambda manifest_path: {"status": "cleaned", "manifest_path": str(manifest_path)}
+            benchmark_test.ChemQARunner._wait_for_terminal_status = lambda self, run_id, timeout_seconds: {
+                "status": "done",
+                "terminal_state": "failed",
+                "terminal_reason_code": "stalled",
+                "artifact_collection": {},
+                "protocol_path": str(self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id / "chemqa_review_protocol.yaml"),
+            }
+
+            def fake_collect_artifacts(self, *, source_dir, output_dir, env):
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "final_answer.md").write_text("FINAL ANSWER: CCO\n", encoding="utf-8")
+
+            benchmark_test.ChemQARunner._collect_artifacts_from_source = fake_collect_artifacts
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                output_root = Path(tmpdir) / "benchmark-output"
+                launch_root = output_root / "chemqa-launch"
+                chemqa_root = Path(tmpdir) / "chemqa-root"
+                runner = benchmark_test.ChemQARunner(
+                    chemqa_root=chemqa_root,
+                    timeout_seconds=30,
+                    config_path=Path(tmpdir) / "config.json",
+                    slot_set="A",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                    model_profile="profile-x",
+                    runtime_bundle_root=Path(tmpdir) / "bundles",
+                    launch_workspace_root=launch_root,
+                )
+                record = benchmark_test.BenchmarkRecord(
+                    record_id="chembench-0001",
+                    dataset="chembench",
+                    source_file="/tmp/demo.jsonl",
+                    eval_kind="chembench_open_ended",
+                    prompt="Return ethanol.",
+                    reference_answer="CCO",
+                    payload={},
+                )
+                run_id = "benchmark-chemqa_web_on-chembench-0001-20260427-000000"
+                protocol_dir = chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id
+                protocol_dir.mkdir(parents=True, exist_ok=True)
+                (protocol_dir / "chemqa_review_protocol.yaml").write_text(
+                    "\n".join(
+                        [
+                            "artifact_kind: coordinator_protocol",
+                            "artifact_contract_version: react-reviewed-v2",
+                            "terminal_state: failed",
+                            "acceptance_status: failed",
+                            "candidate_submission:",
+                            "  owner: proposer-1",
+                            "  direct_answer: CCO",
+                            "  summary: recovered answer",
+                            "  submission_trace:",
+                            "    - step: structural_reasoning",
+                            "      status: success",
+                            "      detail: reconstructed from proposer artifact",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                runner._now_stamp = lambda: "20260427-000000"
+
+                out = runner.run(record, benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"])
+
+                self.assertEqual(benchmark_test.RunStatus.RECOVERED, out.status)
+                self.assertEqual("CCO", out.short_answer_text)
+                self.assertIn("FINAL ANSWER: CCO", out.full_response_text)
+                self.assertTrue(out.should_score())
+                self.assertTrue(out.recovery.scored)
+                self.assertEqual("candidate_submission", out.recovery.source)
+        finally:
+            benchmark_test.run_subprocess = original_run_subprocess
+            benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
+            benchmark_test.invoke_cleanroom_cleanup = original_invoke_cleanroom_cleanup
+            benchmark_test.ChemQARunner._wait_for_terminal_status = original_wait_for_terminal_status
+            benchmark_test.ChemQARunner._collect_artifacts_from_source = original_collect_artifacts
+
     def test_chemqa_runner_reconciles_failed_run_status_with_completed_archived_rejection(self) -> None:
         original_run_subprocess = benchmark_test.run_subprocess
         original_ensure_runtime_bundle = benchmark_test.ensure_runtime_bundle
@@ -2016,6 +2131,85 @@ Points: 0.5, Item: Second criterion
             self.assertEqual("proposer-1-proposal", entry.runner_meta["fallback_source"])
             self.assertEqual({"status": "done", "terminal_state": "failed"}, entry.raw["run_status"])
             self.assertEqual("ChemQA run `demo-run` terminated as failed (reason=stalled)", entry.error)
+        finally:
+            if original_build_runner is None:
+                delattr(benchmark_test, "build_runner")
+            else:
+                benchmark_test.build_runner = original_build_runner
+            benchmark_test.evaluate_answer = original_evaluate_answer
+
+    def test_run_group_scores_evaluable_recovery(self) -> None:
+        record = benchmark_test.BenchmarkRecord(
+            record_id="recovered-record",
+            dataset="chembench",
+            source_file="/tmp/demo.jsonl",
+            eval_kind="chembench_open_ended",
+            prompt="Q",
+            reference_answer="fallback-answer",
+            payload={},
+        )
+        recovered_result = benchmark_test.RunnerResult(
+            status=benchmark_test.RunStatus.RECOVERED,
+            answer=benchmark_test.AnswerPayload(
+                short_answer_text="fallback-answer",
+                full_response_text="FINAL ANSWER: fallback-answer",
+            ),
+            raw={"run_status": {"status": "done", "terminal_state": "failed"}},
+            runner_meta={
+                "run_id": "demo-run",
+                "fallback_used": True,
+                "fallback_source": "candidate_submission",
+                "error": "ChemQA run `demo-run` terminated as failed (reason=stalled)",
+            },
+            recovery=benchmark_test.RecoveryInfo(
+                source="candidate_submission",
+                scored=True,
+                details={
+                    "evaluable": True,
+                    "reliability": "high_confidence_recovered",
+                    "recovery_mode": "candidate_submission",
+                },
+            ),
+        )
+
+        class StubRunner:
+            def run(self, record: object, group: object) -> benchmark_test.RunnerResult:
+                return recovered_result
+
+        original_build_runner = getattr(benchmark_test, "build_runner", None)
+        original_evaluate_answer = benchmark_test.evaluate_answer
+        try:
+            benchmark_test.build_runner = lambda **kwargs: StubRunner()
+            benchmark_test.evaluate_answer = lambda *args, **kwargs: benchmark_test.EvaluationResult(
+                eval_kind="chembench_open_ended",
+                score=1.0,
+                max_score=1.0,
+                normalized_score=1.0,
+                passed=True,
+                primary_metric="exact_str_match",
+                primary_metric_direction="higher_is_better",
+                details={},
+            )
+            with tempfile.TemporaryDirectory() as tmpdir:
+                results = benchmark_test.run_group(
+                    group=benchmark_test.EXPERIMENT_GROUPS["chemqa_web_off"],
+                    records=[record],
+                    output_root=Path(tmpdir),
+                    single_timeout=10,
+                    chemqa_timeout=10,
+                    judge=object(),
+                    config_path=Path(tmpdir) / "cfg.json",
+                    single_agent="unused",
+                    chemqa_root=Path(tmpdir),
+                    chemqa_model_profile="unused",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                )
+            entry = results[0]
+            self.assertIsNone(entry.error)
+            self.assertTrue(entry.evaluation["passed"])
+            self.assertEqual("fallback-answer", entry.short_answer_text)
+            self.assertEqual("FINAL ANSWER: fallback-answer", entry.full_response_text)
         finally:
             if original_build_runner is None:
                 delattr(benchmark_test, "build_runner")
