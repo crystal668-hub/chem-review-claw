@@ -208,7 +208,7 @@
   - Status: `DONE`
 
 - Name: ChemQA benchmark runner
-  - Description: Launches ChemQA preset flow, derives an immutable benchmark answer kind, waits for benchmark-visible terminal run-status, prefers canonical Artifact Flow paths, archives artifacts, keeps legacy reconstruction/fallback for compatibility, marks evaluable recovered candidate submissions as scoreable degraded executions, and writes cleanup manifest.
+  - Description: Launches ChemQA preset flow, derives an immutable benchmark answer kind, waits for benchmark-visible terminal run-status, triggers bounded recovery when run-status stops changing, prefers canonical Artifact Flow paths, archives artifacts, keeps legacy reconstruction/fallback for compatibility, marks evaluable recovered candidate submissions as scoreable degraded executions, and writes cleanup manifest.
   - Input / Output:
     - Input: benchmark record, ChemQA skill root, config path, slot set, profile/round overrides.
     - Output: `RunnerResult` plus archived artifact tree including canonical final/failure artifacts when available.
@@ -264,7 +264,7 @@
   - Status: `DONE`
 
 - Name: ChemQA run recovery
-  - Description: Repairs invalid review state, respawns missing workers, replays placeholder transport reviews, advances stalled runs. Respawn budget tracking is stored in `spawn_registry.json` and is updated while iterating a snapshot of role entries so missing worker recovery can initialize budget metadata without aborting the recovery pass.
+  - Description: Repairs invalid review state, respawns missing workers and a dead coordinator control loop, replays placeholder transport reviews, advances stalled runs. Respawn budget tracking is stored in `spawn_registry.json` and is updated while iterating a snapshot of role entries so missing process recovery can initialize budget metadata without aborting the recovery pass.
   - Input / Output:
     - Input: team id, workspace/runtime roots, max steps/respawn budget.
     - Output: JSON recovery summary plus runtime mutations.
@@ -434,6 +434,7 @@
   - For `chemqa_*` groups:
     - The runner shells out to ChemQA skill scripts to compile/materialize/launch the run.
     - It monitors run status via files under `chemqa-review/control/run-status/`.
+    - If run-status remains unchanged across polling intervals, it invokes `chemqa-review/scripts/recover_run.py` with the run-scoped `CLAWTEAM_DATA_DIR`; repeated recovery attempts are rate-limited while the status signature remains unchanged.
     - It treats DebateClaw `phase=done/status=done` as protocol terminal only while Artifact Flow is still `finalizing`; benchmark-visible `status=done/terminal_state=completed|failed` is published only after canonical final/failure artifacts, manifest, and `qa_result.json` are readable.
     - It prefers canonical `qa_result_path`, `final_answer_artifact_path`, `failure_artifact_path`, and `artifact_manifest_path` from run status. If artifacts are missing, it tries to rebuild them from protocol files with `collect_artifacts.py`.
     - If the final `qa_result.json` is still missing or unusable, it can fall back to the latest archived `proposer-1` proposal or `final_answer_preview`.
@@ -453,7 +454,8 @@
   - Recovery is externalized:
     - `recover_run.py` inspects the same runtime files and database,
     - repairs invalid review phases,
-    - respawns missing role processes from `spawn_registry.json`,
+    - respawns missing role processes from `spawn_registry.json`, including the coordinator when the protocol is not terminal and the coordinator action is `advance` or `wait`,
+    - writes respawn stdout/stderr to per-role files under `spawn-logs/`,
     - may inject placeholder/transport artifacts to keep the run moving.
 
 - Real DebateClaw control path

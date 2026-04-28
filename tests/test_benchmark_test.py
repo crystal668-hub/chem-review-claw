@@ -675,7 +675,7 @@ Points: 0.5, Item: Second criterion
             runner.chemqa_root = Path(tmpdir)
             original_time = benchmark_test.time.time
             original_sleep = benchmark_test.time.sleep
-            times = iter([100.0, 99.0, 101.5])
+            times = iter([100.0, 99.0, 99.5, 101.5])
             try:
                 benchmark_test.time.time = lambda: next(times)
                 benchmark_test.time.sleep = lambda _seconds: None
@@ -684,6 +684,35 @@ Points: 0.5, Item: Second criterion
             finally:
                 benchmark_test.time.time = original_time
                 benchmark_test.time.sleep = original_sleep
+
+    def test_chemqa_wait_for_terminal_status_attempts_recovery_on_stagnant_status(self) -> None:
+        runner = benchmark_test.ChemQARunner.__new__(benchmark_test.ChemQARunner)
+        statuses = iter(
+            [
+                {"status": "planned", "updated_at": "2026-04-28T15:51:48Z"},
+                {"status": "planned", "updated_at": "2026-04-28T15:51:48Z"},
+                {"status": "done", "terminal_state": "failed", "terminal_reason_code": "terminal_failure"},
+            ]
+        )
+        recovery_calls: list[tuple[str, dict[str, object]]] = []
+        runner._read_run_status = lambda _run_id: next(statuses)
+        runner._recover_stalled_run = lambda run_id, last_status: recovery_calls.append((run_id, dict(last_status))) or {"status": "running"}
+        original_time = benchmark_test.time.time
+        original_sleep = benchmark_test.time.sleep
+        times = iter([100.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0])
+        try:
+            benchmark_test.time.time = lambda: next(times)
+            benchmark_test.time.sleep = lambda _seconds: None
+            payload = benchmark_test.ChemQARunner._wait_for_terminal_status(runner, "demo-run", timeout_seconds=10)
+        finally:
+            benchmark_test.time.time = original_time
+            benchmark_test.time.sleep = original_sleep
+
+        self.assertEqual("done", payload["status"])
+        self.assertEqual(
+            [("demo-run", {"status": "planned", "updated_at": "2026-04-28T15:51:48Z"})],
+            recovery_calls,
+        )
 
     def test_build_chemqa_response_from_submission_uses_direct_answer(self) -> None:
         short_text, full_text = benchmark_test.build_chemqa_response_from_submission(

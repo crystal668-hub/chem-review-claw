@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_ROOT / "scripts"
@@ -235,6 +236,70 @@ updated_direct_answer: Revised answer after addressing the review comments.
         self.assertFalse(transport.check_candidate_submission("", owner="proposer-1").ok)
         self.assertFalse(transport.check_formal_review("", reviewer="proposer-2", target="proposer-1").ok)
         self.assertFalse(transport.check_rebuttal("", owner="proposer-1").ok)
+
+
+class RecoverRunRespawnTest(unittest.TestCase):
+    def test_respawn_actionable_roles_respawns_dead_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "clawteam-data"
+            team = "chemqa-dead-coordinator"
+            team_dir = data_dir / "teams" / team
+            team_dir.mkdir(parents=True)
+            (team_dir / "spawn_registry.json").write_text(
+                json.dumps(
+                    {
+                        "debate-coordinator": {
+                            "backend": "subprocess",
+                            "pid": 999999,
+                            "slot": "debateA-coordinator",
+                            "command": ["/bin/echo", "coordinator"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                skill_root=str(SKILL_ROOT),
+                team=team,
+                runtime_dir=str(DEBATECLAW_SCRIPTS_DIR),
+                workspace_root=str(root / "workspaces"),
+                max_steps=1,
+                max_respawns_per_role_phase_signature=1,
+                json=True,
+            )
+            launched: list[dict[str, object]] = []
+
+            class FakePopen:
+                pid = 4242
+
+                def __init__(self, command, **kwargs) -> None:
+                    launched.append({"command": list(command), **kwargs})
+
+            with mock.patch.dict(os.environ, {"CLAWTEAM_DATA_DIR": str(data_dir)}), \
+                mock.patch.object(recover_run.subprocess, "Popen", FakePopen):
+                recoverer = recover_run.RunRecoverer(args)
+                recoverer.current_phase_signature = lambda: "phase=review;missing=4"  # type: ignore[method-assign]
+                recoverer.next_action = lambda role: {  # type: ignore[method-assign]
+                    "action": "wait" if role == "debate-coordinator" else "none",
+                    "phase": "review",
+                }
+
+                self.assertTrue(recoverer.respawn_actionable_roles())
+
+            self.assertEqual(1, len(launched))
+            launch = launched[0]
+            self.assertEqual(["/bin/echo", "coordinator"], launch["command"])
+            self.assertEqual(
+                (root / "workspaces" / "debateA-coordinator").resolve(),
+                Path(str(launch["cwd"])).resolve(),
+            )
+            self.assertEqual(recover_run.subprocess.STDOUT, launch["stderr"])
+            self.assertTrue(launch["text"])
+            self.assertTrue(launch["start_new_session"])
+            registry = json.loads((team_dir / "spawn_registry.json").read_text(encoding="utf-8"))
+            self.assertEqual(4242, registry["debate-coordinator"]["pid"])
+            self.assertEqual("recover_run_actionable_role", registry["debate-coordinator"]["last_respawn_reason"])
 
 
 class ProtocolReconstructionTest(unittest.TestCase):

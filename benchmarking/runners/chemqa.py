@@ -122,15 +122,86 @@ class ChemQARunner:
             return {}
         return self._normalize_chemqa_run_status(json.loads(status_path.read_text(encoding="utf-8")))
 
+    def _run_status_progress_signature(self, payload: dict[str, Any]) -> str:
+        progress_payload = {
+            "status": payload.get("status"),
+            "legacy_status": payload.get("legacy_status"),
+            "terminal_state": payload.get("terminal_state"),
+            "protocol_terminal_state": payload.get("protocol_terminal_state"),
+            "artifact_flow_state": payload.get("artifact_flow_state"),
+            "benchmark_terminal_state": payload.get("benchmark_terminal_state"),
+            "phase": payload.get("phase"),
+            "review_round": payload.get("review_round"),
+            "rebuttal_round": payload.get("rebuttal_round"),
+            "phase_progress": payload.get("phase_progress"),
+            "updated_at": payload.get("updated_at"),
+        }
+        return json.dumps(progress_payload, sort_keys=True, ensure_ascii=False, default=str)
+
+    def _recover_stalled_run(self, run_id: str, last_status: dict[str, Any]) -> dict[str, Any]:
+        recover_script = self.chemqa_root / "scripts" / "recover_run.py"
+        if not recover_script.is_file():
+            return {"status": "skipped", "reason": f"missing recover script: {recover_script}"}
+        data_dir = self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id
+        command = [
+            self._current_python(),
+            str(recover_script),
+            "--skill-root",
+            str(self.chemqa_root),
+            "--team",
+            run_id,
+            "--runtime-dir",
+            str(self.runtime_dir),
+            "--workspace-root",
+            str(self._chemqa_workspace_roots[self.slot_set]),
+            "--max-steps",
+            "6",
+            "--max-respawns-per-role-phase-signature",
+            "2",
+            "--json",
+        ]
+        env = os.environ.copy()
+        env["CLAWTEAM_DATA_DIR"] = str(data_dir)
+        result = self._run_subprocess(command, env=env, cwd=self.chemqa_root, timeout=120)
+        if result.returncode != 0:
+            return {
+                "status": "error",
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "last_status": self._deep_copy_jsonish(last_status),
+            }
+        output = (result.stdout or "").strip() or (result.stderr or "").strip()
+        if not output:
+            return {"status": "ok", "empty_output": True}
+        try:
+            return self._deep_copy_jsonish(json.loads(output))
+        except json.JSONDecodeError:
+            return {"status": "ok", "raw_output": output}
+
     def _wait_for_terminal_status(self, run_id: str, *, timeout_seconds: int) -> dict[str, Any]:
         import time
 
         deadline = time.time() + timeout_seconds
         last_status: dict[str, Any] = {}
+        last_signature = ""
+        unchanged_polls = 0
+        last_recovery_attempt_at = 0.0
         while time.time() < deadline:
+            now = time.time()
             last_status = self._read_run_status(run_id)
             if self._is_chemqa_terminal_status(last_status):
                 return last_status
+            signature = self._run_status_progress_signature(last_status)
+            if signature and signature == last_signature:
+                unchanged_polls += 1
+            else:
+                unchanged_polls = 0
+                last_signature = signature
+                last_recovery_attempt_at = 0.0
+            if unchanged_polls >= 1 and (last_recovery_attempt_at <= 0.0 or now - last_recovery_attempt_at >= 120):
+                last_recovery_attempt_at = now
+                self._recover_stalled_run(run_id, last_status)
             time.sleep(30)
         error_message = (
             f"ChemQA run `{run_id}` did not reach a terminal state within {timeout_seconds}s. Last status: {last_status}"

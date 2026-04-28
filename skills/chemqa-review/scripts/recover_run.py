@@ -237,6 +237,20 @@ class RunRecoverer:
         joined = raw.replace("\x00", " ")
         return "chemqa_review_openclaw_driver.py" in joined and self.args.team in joined and role in joined
 
+    def role_should_be_running(self, role: str, payload: dict[str, Any]) -> bool:
+        action = str(payload.get("action") or "")
+        phase = str(payload.get("phase") or "")
+        status = str(payload.get("status") or "")
+        if action == "stop" or phase == "done" or status == "done":
+            return False
+        if role == "debate-coordinator":
+            return action in {"advance", "wait"} or phase in {"propose", "review", "rebuttal"}
+        if role == CANDIDATE_OWNER:
+            return action in {"propose", "rebuttal"}
+        if role in REVIEWER_ROLES:
+            return action in {"propose", "review"}
+        return action in {"propose", "review", "rebuttal"}
+
     def respawn_actionable_roles(self) -> bool:
         changed = False
         registry = self.load_spawn_registry()
@@ -249,11 +263,8 @@ class RunRecoverer:
         for role, entry in list(registry.items()):
             if role == "_budget_state":
                 continue
-            if role == "debate-coordinator":
-                continue
             payload = self.next_action(role)
-            action = str(payload.get("action") or "")
-            if action not in {"propose", "review", "rebuttal"}:
+            if not self.role_should_be_running(role, payload):
                 continue
             if self.role_process_is_running(role, entry):
                 continue
@@ -264,11 +275,13 @@ class RunRecoverer:
                 continue
             log_path = team_dir / "spawn-logs" / f"{role}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
+            env = self.env.copy()
+            env.setdefault("PYTHONUNBUFFERED", "1")
             with log_path.open("a", encoding="utf-8") as handle:
                 proc = subprocess.Popen(
                     command,
                     cwd=str(self.workspace_for(role)),
-                    env=self.env,
+                    env=env,
                     stdout=handle,
                     stderr=subprocess.STDOUT,
                     text=True,
