@@ -18,7 +18,9 @@
 2. **Artifact Flow**
    负责 artifact 生命周期，包括 typed artifact 校验、candidate view 派生、review item 开闭状态、rebuttal 是否形成答案修订、final answer projection、`qa_result.json` 持久化，以及失败时的结构化 `FailureArtifact`。
 
-双层架构的核心边界是：Protocol Flow 可以请求 Artifact Flow 判断“当前 phase 的 artifact 是否齐备、是否可推进、是否可最终化”，但 Protocol Flow 不读取 artifact 正文来推断 benchmark 答案；Artifact Flow 是唯一能够产出 `FinalAnswerArtifact`、`FailureArtifact` 和 `qa_result.json` 的层。
+双层架构的核心边界是：Protocol Flow 只按已注册的角色提交推进 phase；Artifact Flow 负责判断提交内容是否类型正确、是否形成可用候选答案、是否需要 rebuttal、是否可最终化。Protocol Flow 不读取 artifact 正文来推断 benchmark 答案；Artifact Flow 是唯一能够产出 `FinalAnswerArtifact`、`FailureArtifact` 和 `qa_result.json` 的层。
+
+终态需要显式分层：DebateClaw SQLite 里的 `phase=done/status=done` 只表示内部协议已经走到 `protocol_done`；ChemQA benchmark 的外部 `terminal_state=completed` 只能在 Artifact Flow 已经原子写入 final artifact、manifest 和 `qa_result.json` 后发布。这样既保留现有 DebateClaw 状态机，又避免 runner 把“协议结束”误判为“可评估结果已持久化”。
 
 落地目标不是让 ChemQA 立刻变成更复杂的多候选综合系统，而是先让现有“集思广益”机制稳定生效：reviewer 的反馈必须通过结构化 review/rebuttal artifact 更新当前候选答案；最终评测必须消费 durable、typed、validated 的 final artifact；失败也必须留下可诊断、可统计的结构化原因。
 
@@ -72,7 +74,7 @@ These are architecture symptoms rather than isolated prompt or timeout issues. T
 
 1. Preserve the current collaboration topology while clarifying ownership boundaries.
 2. Make artifact validity independent from protocol phase progression.
-3. Make finalization atomic: a run is not `completed` until final artifacts are written and readable.
+3. Make finalization atomic: a ChemQA benchmark run is not externally `completed` until final artifacts are written and readable, even if the underlying DebateClaw protocol state is already `done`.
 4. Treat task answer shape as typed data, not as one universal `direct_answer` string.
 5. Let reviewer feedback modify the current candidate only through structured artifact transitions.
 6. Keep benchmark runner behavior simple: launch, wait for terminal final artifact, score or record failure.
@@ -118,8 +120,8 @@ It answers:
 
 - What phase is the run in?
 - Which role should act next?
-- Which roles have submitted required phase artifacts?
-- Is the phase complete?
+- Which roles have registered submissions for the phase?
+- Is the phase complete by protocol counting rules?
 - Should the run advance to the next phase?
 - Did the protocol exhaust its round, retry, or liveness budget?
 
@@ -160,6 +162,7 @@ It answers:
 - Is the artifact valid for its role, phase, and benchmark answer kind?
 - What is the current candidate view after proposal and rebuttal updates?
 - Which blocking review items remain open?
+- Does the candidate view require another rebuttal round before the protocol may close?
 - Can the run be finalized?
 - What exact payload should be written to `qa_result.json`?
 - What diagnostic artifact should be written if finalization fails?
@@ -177,6 +180,13 @@ Protocol Flow may request finalization, but it does not write final benchmark ou
 
 Protocol Flow communicates with Artifact Flow through narrow state summaries.
 
+The boundary is intentionally asymmetric:
+
+- Protocol Flow is authoritative for phase counters, role scheduling, round limits, epoch changes, and submission registration.
+- Artifact Flow is authoritative for artifact schema validity, answer-kind validity, semantic blocking items, candidate-view derivation, final answer projection, failure projection, and benchmark-visible terminal output.
+- Protocol Flow may ask Artifact Flow whether semantic gates allow an advance or finalization, but it must not inspect artifact bodies itself.
+- Artifact Flow may report semantic gates, but it must not create new phase participants or directly advance DebateClaw rounds.
+
 Protocol Flow submits phase events:
 
 ```json
@@ -193,15 +203,100 @@ Artifact Flow returns artifact state:
 
 ```json
 {
-  "phase_artifacts_complete": true,
+  "artifact_valid": true,
   "current_candidate_valid": true,
-  "blocking_items_open": 0,
-  "finalizable": true,
+  "semantic_blockers_open": 0,
+  "requires_rebuttal": false,
+  "finalizable_by_artifact_rules": true,
   "artifact_errors": []
 }
 ```
 
 Protocol Flow can use this state to decide whether to advance. It does not inspect raw artifact bodies except for transport-level registration.
+
+This means phase completion has two inputs in ChemQA:
+
+1. Protocol completion: required lanes have registered their submissions in DebateClaw state.
+2. Artifact semantic gate: Artifact Flow has accepted or rejected the submitted contents for the current answer kind and phase.
+
+The first input lives in Protocol Flow. The second input lives in Artifact Flow.
+
+## State Authority and Storage
+
+The first implementation should not introduce a second protocol event source.
+
+Authoritative storage is split as follows:
+
+| State | Owner | Storage |
+| --- | --- | --- |
+| Raw proposal/review/rebuttal submissions | Protocol Flow | Existing DebateClaw SQLite tables and `artifacts` table |
+| Phase, epoch, review round, rebuttal round | Protocol Flow | Existing DebateClaw SQLite meta |
+| Artifact validation records | Artifact Flow | Derived records under the ChemQA generated artifact directory; may be indexed by existing artifact IDs |
+| Current candidate view | Artifact Flow | Derived `candidate_view` artifact plus manifest entry |
+| Final answer / failure artifact | Artifact Flow | Canonical final artifact directory plus manifest |
+| Benchmark-visible run terminal state | Artifact Flow via ChemQA run-status overlay | `control/run-status/<run_id>.json` |
+
+Existing DebateClaw artifact metadata is the transport ledger. Artifact Flow consumes it and writes derived typed artifacts. It must not fork protocol truth by inventing a separate list of who acted in which phase.
+
+The canonical final artifact directory for a run should be:
+
+```text
+workspace/skills/chemqa-review/generated/artifacts/<run_id>/
+```
+
+Required final files in that directory are:
+
+- `artifact_manifest.json`
+- either `final_answer_artifact.json` or `failure_artifact.json`
+- `qa_result.json`
+- compact diagnostics such as `validation_summary.json` and `candidate_view.json`
+
+Benchmark archives may copy those files elsewhere, but these generated artifacts remain the source directory referenced by run status before cleanup.
+
+## Terminal State Contract
+
+There are two terminal concepts:
+
+1. DebateClaw internal protocol terminal state.
+2. ChemQA benchmark-visible terminal state.
+
+DebateClaw may continue to set:
+
+```json
+{
+  "phase": "done",
+  "status": "done",
+  "terminal_state": "completed"
+}
+```
+
+inside its SQLite state when protocol phase progression ends. In the two-layer ChemQA design, that state means `protocol_done`, not benchmark completion.
+
+ChemQA run status should expose a separate overlay:
+
+```json
+{
+  "status": "running|done",
+  "protocol_terminal_state": "completed",
+  "artifact_flow_state": "finalizing|finalized|finalization_failed",
+  "benchmark_terminal_state": "running|completed|failed",
+  "terminal_state": "running|completed|failed"
+}
+```
+
+Compatibility rule:
+
+- The legacy run-status field `status` mirrors whether the ChemQA benchmark-visible run is terminal, not whether DebateClaw's internal protocol is done.
+- While Artifact Flow is finalizing, legacy `status` must remain `running`. It must not be written as `done`, because the current runner terminal predicate treats `status == "done"` as terminal.
+- Only after Artifact Flow writes and verifies final artifacts may legacy `status` become `done`.
+- The legacy run-status field `terminal_state` mirrors `benchmark_terminal_state`, not DebateClaw's internal terminal state.
+- While DebateClaw is `done` but Artifact Flow has not finished, ChemQA run status remains non-terminal for the runner, for example `artifact_flow_state = finalizing` and `terminal_state = running`.
+- `terminal_state = completed` is published only after `FinalAnswerArtifact`, `artifact_manifest.json`, and `qa_result.json` have all been written and reopened successfully.
+- `terminal_state = failed` is published after a readable `FailureArtifact` and manifest have been written, unless the system cannot write even the failure artifact. In that last case the runner reports `artifact_finalization_failed_without_failure_artifact`.
+
+This avoids changing DebateClaw V1's core state machine in the first phase while making benchmark terminal semantics reliable.
+
+Later implementation may tighten `is_chemqa_terminal_status()` to prefer `benchmark_terminal_state` and canonical artifact paths, but the Phase 1 invariant is still that run-status must not expose legacy `status=done` until benchmark terminal artifacts exist.
 
 ## Artifact Model
 
@@ -233,6 +328,8 @@ Every artifact should carry:
 
 Each benchmark record should resolve to an answer kind before the first candidate artifact is requested.
 
+The source of truth is the benchmark runner. `ChemQARunner` derives an immutable `answer_kind` from `BenchmarkRecord` and grading metadata before launch, writes it into the ChemQA launch context, and passes it to Artifact Flow as run metadata. Artifact Flow may validate that `answer_kind` is present, but it must not infer a different answer kind from model text or reviewer feedback.
+
 Initial answer kinds:
 
 - `numeric_short_answer`
@@ -245,6 +342,23 @@ Initial answer kinds:
 The answer kind controls candidate and final answer validation.
 
 This avoids forcing all benchmark families through a single `direct_answer must be concise` rule.
+
+If no narrower kind can be derived, the runner uses `generic_semantic_answer`. This keeps the six-kind surface explicit and prevents open-ended research records from falling back to numeric/short-answer validation.
+
+### Artifact Kind Compatibility
+
+The new typed names should map onto current artifact names during migration:
+
+| Artifact Flow kind | Current / legacy name | Notes |
+| --- | --- | --- |
+| `candidate` | `candidate_submission`, `proposal` | Produced by `proposer-1`; stored as DebateClaw proposal artifact |
+| `review` | `formal_review`, `transport_review` | Only formal reviewer-lane reviews count for ChemQA acceptance |
+| `rebuttal` | `rebuttal` | Adds explicit `mode` while preserving current concession flag |
+| `candidate_view` | none | New derived artifact; never directly authored by an agent |
+| `final_answer` | `coordinator_protocol.final_answer`, `qa_result.final_answer` | New canonical success artifact projected into legacy shape |
+| `failure` | `terminal_failure`, failure protocol payload | New canonical failure artifact projected into runner failure/recovery axes |
+
+The compatibility table is part of the migration contract. Existing names may remain in file names or prompts while the Artifact Flow API uses the new typed names internally.
 
 ### Candidate Artifact
 
@@ -315,6 +429,28 @@ If `mode = response_only`, Artifact Flow records the response but does not chang
 
 If `mode = concession`, Protocol Flow may advance to a new epoch or fail according to existing round limits.
 
+### Review Item Identity and Closure
+
+Review item state must be deterministic enough for multiple rounds.
+
+Every blocking review item receives a stable key:
+
+```text
+<epoch>:<review_round>:<reviewer_lane>:<item_id-or-content-hash>
+```
+
+Reviewer-provided `item_id` is used when present. If it is missing or duplicated, Artifact Flow generates a content hash from reviewer lane, target field, severity, finding, and requested change.
+
+Closure authority is:
+
+- `open`: created by a valid blocking `ReviewArtifact`.
+- `addressed_by_revision`: set by Artifact Flow when a valid `answer_revision` changes the targeted answer/view field and references the review item.
+- `addressed_by_response`: set by Artifact Flow when a `response_only` rebuttal references the item and gives a validation-acceptable reason no answer change is needed.
+- `waived_by_reviewer`: reserved for a later explicit reviewer waiver artifact; not required in the first phase.
+- `unresolved_at_terminal`: set by Artifact Flow during finalization for any still-open item.
+
+Later reviewer confirmation is not required for `addressed_by_revision` in the first phase. A later review round may reopen the issue by creating a new item if the revision is still insufficient. This keeps the current one-proposer/four-reviewer loop usable without adding a second reviewer-approval protocol.
+
 ### Current Candidate View
 
 Artifact Flow maintains a derived `CurrentCandidateView`.
@@ -368,6 +504,14 @@ It should include:
   "failure_code": "candidate_validation_failed|artifact_finalization_failed|protocol_stalled|missing_required_artifact",
   "failure_message": "...",
   "last_valid_candidate_view": {},
+  "answer_projection": null,
+  "recovery_eligibility": {
+    "evaluable": false,
+    "scored": false,
+    "reliability": "none",
+    "recovery_mode": "none",
+    "reason": "no_valid_answer_projection"
+  },
   "missing_artifacts": [],
   "validation_errors": [],
   "open_review_items": [],
@@ -381,6 +525,24 @@ A failed protocol should still leave enough structured data for benchmark report
 - an answer existed but was invalid for the answer kind
 - protocol ended before finalization
 - final artifact persistence failed
+
+A `FailureArtifact` may carry `answer_projection` only when Artifact Flow can derive a policy-approved answer from a valid `CurrentCandidateView` or last valid candidate artifact. That projection is not a success artifact. It exists to preserve the prior recovery design's evaluability semantics without forcing the runner to scrape transcripts.
+
+When `answer_projection` is present:
+
+```json
+{
+  "answer_kind": "multiple_choice",
+  "evaluator_answer": "B",
+  "display_answer": "B",
+  "full_answer": "Recovered from last valid proposer-1 candidate view.",
+  "source_candidate_view_id": "..."
+}
+```
+
+Artifact Flow must also set `recovery_eligibility` so the runner can map the failure to `RunStatus.RECOVERED` without guessing.
+
+When `answer_projection` is absent or `recovery_eligibility.evaluable = false`, the runner maps the record to `RunStatus.FAILED`.
 
 ## Finalization Semantics
 
@@ -403,7 +565,7 @@ Artifact Flow writes final artifact and qa_result.json to a temp path
 Artifact Flow fsyncs / renames into final location
 Artifact Flow writes manifest
 Artifact Flow updates run status with qa_result path and artifact manifest path
-Protocol Flow marks done only after finalization succeeds
+ChemQA run-status publishes benchmark terminal_state only after finalization succeeds
 ```
 
 If finalization fails, Artifact Flow writes a `FailureArtifact` and terminal status points to that failure artifact.
@@ -415,6 +577,69 @@ The runner should wait for:
 
 It should not rebuild success artifacts after the protocol is terminal except as a temporary compatibility fallback during migration.
 
+Finalization caller:
+
+- In Phase 1, `chemqa_review_openclaw_driver.py` should call Artifact Flow finalization after DebateClaw reports protocol `done`.
+- A dedicated artifact-controller command may be introduced later, but it should use the same Artifact Flow APIs and must not create a second terminal-state policy.
+- `debate_state.py` does not need to stop writing its internal `done`; the driver must translate that into `protocol_terminal_state` and keep benchmark `terminal_state` non-terminal until finalization completes.
+
+## Legacy `qa_result.json` Projection
+
+Phase 1 must keep the current benchmark runner and reporting code working. Artifact Flow therefore writes both canonical artifacts and a legacy-compatible `qa_result.json`.
+
+For `FinalAnswerArtifact`, `qa_result.json` must include:
+
+```json
+{
+  "terminal_state": "completed",
+  "acceptance_status": "accepted|rejected",
+  "answer_kind": "numeric_short_answer",
+  "final_answer": {
+    "direct_answer": "7.59",
+    "answer": "7.59",
+    "value": "7.59",
+    "display_answer": "7.59 micrograms",
+    "full_answer": "..."
+  },
+  "artifact_paths": {
+    "final_answer_artifact": ".../final_answer_artifact.json",
+    "artifact_manifest": ".../artifact_manifest.json",
+    "candidate_view": ".../candidate_view.json"
+  }
+}
+```
+
+Mapping rules:
+
+- `final_answer.direct_answer`, `final_answer.answer`, and `final_answer.value` mirror `FinalAnswerArtifact.evaluator_answer` for compatibility with existing extraction code.
+- `final_answer.display_answer` mirrors `display_answer`.
+- `final_answer.full_answer` mirrors `full_answer`.
+- `artifact_paths` contains canonical final artifact paths, not only legacy collector outputs.
+- New canonical fields may be duplicated at top level, but evaluators should continue reading through the existing runner contract until the migration removes compatibility reconstruction.
+
+For `FailureArtifact`, `qa_result.json` should still be written when possible and include:
+
+```json
+{
+  "terminal_state": "failed",
+  "failure_code": "protocol_stalled",
+  "answer_projection": null,
+  "recovery_eligibility": {
+    "evaluable": false,
+    "scored": false,
+    "reliability": "none",
+    "recovery_mode": "none",
+    "reason": "protocol_stalled"
+  },
+  "artifact_paths": {
+    "failure_artifact": ".../failure_artifact.json",
+    "artifact_manifest": ".../artifact_manifest.json"
+  }
+}
+```
+
+If `answer_projection` is present, `qa_result.json` must include the same projection fields as a final answer under `answer_projection`, not under `final_answer`. This prevents failed-but-recovered runs from being misclassified as native completed runs.
+
 ## Proposed Module Responsibilities
 
 ### New or Refactored Artifact Flow Module
@@ -425,7 +650,7 @@ Suggested location:
 
 Responsibilities:
 
-- resolve answer kind from benchmark metadata / goal payload
+- read immutable answer kind from benchmark metadata / goal payload
 - validate candidate, review, rebuttal, final, and failure artifacts
 - maintain current candidate view
 - track review item open / closed state
@@ -451,18 +676,28 @@ Responsibilities:
 - pass submitted artifacts to Artifact Flow
 - ask Artifact Flow for phase artifact status
 - ask Artifact Flow to finalize when Protocol Flow reaches terminal conditions
+- publish ChemQA benchmark-visible run status from Artifact Flow output, not directly from DebateClaw internal `done`
 
 ### Runner
 
 `benchmarking/runners/chemqa.py` should eventually:
 
 - launch ChemQA
-- wait for terminal final artifact status
+- wait for ChemQA benchmark-visible terminal status
 - read `qa_result.json`
 - archive artifact directory
 - report result
 
 It should not need to know how to rebuild ChemQA protocol artifacts from slot workspaces in the normal success path.
+
+Normal runner behavior after Phase 2:
+
+1. Poll `control/run-status/<run_id>.json`.
+2. Treat `terminal_state=completed` as success only when `qa_result_path`, `artifact_manifest_path`, and `final_answer_artifact_path` are readable.
+3. Treat `terminal_state=failed` with readable `failure_artifact_path` as a structured failure; if recovery eligibility is present and scoreable, return `RunStatus.RECOVERED`.
+4. Treat `protocol_terminal_state=completed` with non-terminal benchmark state as still running until the artifact timeout expires.
+5. Prefer `benchmark_terminal_state` and canonical paths over legacy `status` when deciding terminality.
+6. Use legacy reconstruction only when run status marks `artifact_flow_state` as absent or compatibility mode for old runs.
 
 ## Data Flow
 
@@ -509,16 +744,19 @@ This design should be rolled out in phases.
 - Add artifact-flow validation and current-candidate-view logic.
 - Continue producing current `qa_result.json` shape, but make it originate from Artifact Flow.
 - Add compatibility fields so existing reports still work.
+- Keep DebateClaw internal `done` behavior, but add ChemQA run-status overlay fields for `protocol_terminal_state`, `artifact_flow_state`, and `benchmark_terminal_state`.
+- Enforce the benchmark-visible terminal invariant immediately: ChemQA run-status legacy `status` remains `running` during `artifact_flow_state=finalizing` and becomes `done` only after final artifacts are readable.
 
 ### Phase 2: Move Finalization Ownership
 
-- Stop marking ChemQA run success until Artifact Flow finalization succeeds.
+- Make runner normal path prefer canonical Artifact Flow paths and benchmark terminal fields.
 - Make run status include canonical paths:
   - `final_answer_artifact_path`
   - `failure_artifact_path`
   - `qa_result_path`
   - `artifact_manifest_path`
 - Make normal runner path read these paths instead of searching candidate source directories.
+- Keep post-terminal reconstruction only for old runs whose status lacks Artifact Flow fields.
 
 ### Phase 3: Tighten Cleanup and Diagnostics
 
@@ -593,6 +831,14 @@ Required:
 - structure payload or string accepted by the relevant evaluator
 - normalized representation when deterministic tooling is available
 
+### `generic_semantic_answer`
+
+Required:
+
+- non-empty `evaluator_answer` or `full_answer`
+- answer text suitable for the generic semantic evaluator
+- no unresolved placeholder language
+
 ## Review-to-Revision Semantics
 
 Blocking review items should not merely cause more debate turns. Artifact Flow should track whether each item has been addressed.
@@ -626,13 +872,53 @@ The runner should eventually map Artifact Flow terminal outputs to existing benc
 
 Expected mappings:
 
-| Artifact terminal state | Evaluability |
-| --- | --- |
-| valid `FinalAnswerArtifact`, accepted | native evaluable |
-| valid `FinalAnswerArtifact`, rejected but scoreable | native or degraded evaluable depending policy |
-| valid `FinalAnswerArtifact`, forced quorum | degraded evaluable |
-| `FailureArtifact` with last valid candidate and policy-approved projection | recovered evaluable |
-| `FailureArtifact` with no valid answer projection | non-evaluable |
+| Artifact terminal state | RunnerResult | Result axes |
+| --- | --- | --- |
+| valid `FinalAnswerArtifact`, accepted | `RunStatus.COMPLETED`, `should_score=True` | `run_lifecycle_status=completed`, `protocol_completion_status=completed`, `answer_availability=native_final`, `answer_reliability=native`, `evaluable=True`, `scored=True`, `recovery_mode=none`, `degraded_execution=False` |
+| valid `FinalAnswerArtifact`, rejected but scoreable | `RunStatus.COMPLETED`, `should_score=True` | `run_lifecycle_status=completed`, `protocol_completion_status=completed`, `answer_availability=native_final`, `answer_reliability=native`, `evaluable=True`, `scored=True`, `recovery_mode=none`, `degraded_execution` follows rejection/acceptance policy |
+| valid `FinalAnswerArtifact`, forced quorum | `RunStatus.COMPLETED`, `should_score=True` | `answer_availability=native_final`, `answer_reliability=native`, `degraded_execution=True`, `recovery_mode=none` |
+| `FailureArtifact` with `answer_projection` and `recovery_eligibility.scored=true` | `RunStatus.RECOVERED`, `should_score=True` | `run_lifecycle_status=failed`, `protocol_completion_status` from failure artifact, `answer_availability=recovered_candidate`, `answer_reliability` from `recovery_eligibility.reliability`, `evaluable=True`, `scored=True`, `recovery_mode` from `recovery_eligibility.recovery_mode`, `degraded_execution=True` |
+| `FailureArtifact` with no scoreable projection | `RunStatus.FAILED`, `should_score=False` | `run_lifecycle_status=failed`, `answer_availability=missing`, `answer_reliability=none`, `evaluable=False`, `scored=False`, `recovery_mode=none`, `degraded_execution=True` |
+
+Result axes should keep the current schema values:
+
+- `answer_availability`: `native_final`, `recovered_candidate`, `preview_only`, `missing`
+- `answer_reliability`: `native`, `high_confidence_recovered`, `low_confidence_recovered`, `none`
+
+Policy details such as rejection, forced quorum, or finalization warnings should be carried by `degraded_execution`, `terminal_reason_code`, `execution_error_kind`, or runner metadata, not by inventing new axis values.
+
+`FailureArtifact.answer_projection` is the only normal-path source for recovered evaluable answers after Phase 2. The current proposal-scraping fallback remains a legacy compatibility path for old runs and should be reported with a distinct recovery mode.
+
+## Cleanup and Diagnostic Contract
+
+Cleanup must not be able to erase the only copy of a terminal answer or terminal failure reason.
+
+Required ordering:
+
+1. Artifact Flow writes canonical final artifacts to the generated artifact directory.
+2. Artifact Flow reopens the required files and writes `artifact_manifest.json` with file paths, sizes, and content hashes.
+3. ChemQA run status publishes terminal state and canonical paths.
+4. `ChemQARunner` archives the canonical final artifact directory into the per-record benchmark archive.
+5. Cleanroom cleanup may remove disposable runtime state only after the archive attempt has completed.
+
+The cleanup manifest should treat these as preserve/archive roots, not disposable roots:
+
+- generated final artifact directory for the run
+- `qa_result.json`
+- `artifact_manifest.json`
+- `final_answer_artifact.json` or `failure_artifact.json`
+- `candidate_view.json`
+- compact validation and protocol summaries
+
+If archiving fails but canonical final artifacts still exist, the runner should return the result using canonical paths and attach `artifact_archive_status=error`. If canonical final artifacts are missing before archive, the runner should return a finalization or persistence failure rather than attempting to score from transcripts.
+
+Required compact diagnostics:
+
+- `failure_code` and `failure_message` when failed
+- validation error list grouped by artifact id
+- last valid candidate view id/path if any
+- open review item count and item keys
+- canonical path and hash for every final artifact file
 
 ## Testing Strategy
 
@@ -655,6 +941,9 @@ Tests should focus on boundary behavior rather than model quality.
 - one full successful ChemQA protocol produces `qa_result.json` before terminal success
 - completed protocol without final artifact is treated as finalization failure, not silent success
 - runner consumes canonical `qa_result_path` from terminal status
+- DebateClaw internal `done` with `artifact_flow_state=finalizing` remains non-terminal for the ChemQA runner
+- `FailureArtifact` with scoreable `answer_projection` maps to `RunStatus.RECOVERED`
+- legacy `qa_result.json` projection preserves `final_answer.direct_answer`, `answer`, and `value`
 - cleanroom preserves final artifacts and compact diagnostics
 - legacy artifact reconstruction remains available only for compatibility paths
 
@@ -666,6 +955,8 @@ Use fixtures modeled on the temporary benchmark failures:
 - `multi_part_research_answer`: long answer should validate
 - `multiple_choice`: candidate answer recovered from proposal after protocol failure
 - `completed_missing_qa_result`: status cannot become completed until final artifact exists
+- `protocol_done_finalizing`: DebateClaw done is not benchmark terminal until final artifacts exist
+- `failure_with_answer_projection`: failed protocol can still be recovered evaluable through structured projection
 
 ## Acceptance Criteria
 
@@ -677,10 +968,12 @@ The first implementation phase is acceptable when:
 4. Rebuttal can explicitly act as `response_only`, `answer_revision`, or `concession`.
 5. Current candidate view is derived from proposal plus valid answer revisions.
 6. `qa_result.json` is written by Artifact Flow finalization.
-7. Terminal success is impossible without a readable final artifact.
-8. Terminal failure always writes a structured failure artifact.
+7. ChemQA benchmark terminal success is impossible without a readable final artifact, manifest, and `qa_result.json`.
+8. Terminal failure always writes a structured failure artifact when the filesystem is available.
 9. Research-style answers are not rejected by numeric/short-answer concision rules.
 10. Runner can score from the final artifact without transcript inspection in the normal path.
+11. DebateClaw internal `done` and ChemQA benchmark `terminal_state` are explicitly separated in run status.
+12. Recovered evaluable failures are represented by `FailureArtifact.answer_projection`, not by transcript scraping in the normal path.
 
 ## Risks and Mitigations
 
@@ -696,7 +989,7 @@ Mitigation:
 
 Mitigation:
 
-- start with five answer kinds only
+- start with six answer kinds only
 - require every answer kind to project to a common final artifact surface
 - keep evaluator-specific fields under `details`
 
@@ -719,11 +1012,19 @@ Mitigation:
 
 These should be decided in the implementation plan:
 
-1. Whether Artifact Flow state should live in the existing DebateClaw SQLite database, a new JSONL event log, or both.
-2. Whether `answer_kind` should be resolved in `benchmarking/datasets.py`, `ChemQARunner`, or the ChemQA launch payload.
-3. How much of `chemqa_review_artifacts.py` should be preserved versus split into smaller modules.
-4. Whether finalization should be called by the coordinator process or by a dedicated artifact controller command.
-5. How long compatibility reconstruction should remain enabled for old runs.
+1. How much of `chemqa_review_artifacts.py` should be preserved versus split into smaller modules.
+2. Exact answer-kind derivation table from benchmark/evaluator metadata to the six initial answer kinds.
+3. Exact timeout for the runner while `protocol_terminal_state=completed` but `artifact_flow_state=finalizing`.
+4. How long compatibility reconstruction should remain enabled for old runs.
+5. Whether a later dedicated artifact-controller command is worth introducing after the coordinator path is stable.
+
+Resolved architecture decisions before implementation planning:
+
+- Artifact Flow consumes existing DebateClaw SQLite submissions and artifact metadata; it does not create a second protocol ledger.
+- ChemQA benchmark-visible terminal state is an overlay published in run status after Artifact Flow finalization, not the raw DebateClaw internal `done`.
+- `answer_kind` is derived by `ChemQARunner` from `BenchmarkRecord` and grading metadata before launch.
+- Phase 1 finalization is called by the ChemQA coordinator/driver after protocol terminal conditions.
+- `FailureArtifact.answer_projection` plus `recovery_eligibility` is the normal-path source for recovered evaluable failures.
 
 ## Recommended Implementation Order
 
