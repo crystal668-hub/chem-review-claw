@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal", required=True, help="Run goal or motion")
     parser.add_argument("--run-id", help="Optional explicit run id")
     parser.add_argument("--additional-file-workspace", help="Optional run-scoped opaque string for extra file context")
+    parser.add_argument("--answer-kind", help="Resolved answer kind for ChemQA Artifact Flow")
     parser.add_argument("--model-profile", help="Override model profile")
     parser.add_argument("--slot-set", choices=("default", "A", "B"), default="default")
     parser.add_argument("--review-rounds", type=int)
@@ -72,6 +73,8 @@ def main() -> int:
         compile_cmd.extend(["--run-id", args.run_id])
     if args.additional_file_workspace:
         compile_cmd.extend(["--additional-file-workspace", args.additional_file_workspace])
+    if args.answer_kind:
+        compile_cmd.extend(["--answer-kind", args.answer_kind])
     if args.model_profile:
         compile_cmd.extend(["--model-profile", args.model_profile])
     if args.slot_set:

@@ -449,7 +449,7 @@ def render_terminal_failure(*, team: str, role: str, reason: str, phase: str, ph
     return yaml_dump(payload)
 
 
-def check_candidate_submission(text: str, *, owner: str = CANDIDATE_OWNER) -> ArtifactCheck:
+def check_candidate_submission(text: str, *, owner: str = CANDIDATE_OWNER, answer_kind: str = "") -> ArtifactCheck:
     payload = _load_yaml_mapping(text)
     warnings: list[str] = []
     if payload is None:
@@ -516,9 +516,10 @@ def check_candidate_submission(text: str, *, owner: str = CANDIDATE_OWNER) -> Ar
     if isinstance(payload.get("overall_confidence"), dict):
         canonical["overall_confidence"] = payload["overall_confidence"]
     errors: list[str] = []
+    resolved_answer_kind = _clean_text(answer_kind)
     if _clean_text(canonical["direct_answer"]) == "":
         errors.append("candidate submission is missing `direct_answer`")
-    elif _looks_like_narrative_direct_answer(canonical["direct_answer"]):
+    elif resolved_answer_kind != "multi_part_research_answer" and _looks_like_narrative_direct_answer(canonical["direct_answer"]):
         errors.append("candidate submission `direct_answer` must be a concise final answer, not a revision narrative")
     if not canonical["summary"]:
         errors.append("candidate submission is missing `summary`")
@@ -531,12 +532,12 @@ def check_candidate_submission(text: str, *, owner: str = CANDIDATE_OWNER) -> Ar
     return ArtifactCheck(canonical, normalized_text, errors, warnings)
 
 
-def repair_candidate_submission_text(text: str, *, owner: str = CANDIDATE_OWNER) -> str:
-    return check_candidate_submission(text, owner=owner).normalized_text
+def repair_candidate_submission_text(text: str, *, owner: str = CANDIDATE_OWNER, answer_kind: str = "") -> str:
+    return check_candidate_submission(text, owner=owner, answer_kind=answer_kind).normalized_text
 
 
-def validate_candidate_submission_shape(text: str) -> list[str]:
-    return check_candidate_submission(text).errors
+def validate_candidate_submission_shape(text: str, *, answer_kind: str = "") -> list[str]:
+    return check_candidate_submission(text, answer_kind=answer_kind).errors
 
 
 def check_formal_review(text: str, *, reviewer: str, target: str) -> ArtifactCheck:
@@ -643,16 +644,36 @@ def check_rebuttal(text: str, *, owner: str = CANDIDATE_OWNER) -> ArtifactCheck:
             warnings.append("Recovered rebuttal from legacy text format.")
     if payload is None:
         payload = {}
+    mode = _clean_text(payload.get("mode")).lower()
+    if not mode:
+        if _boolish(payload.get("concede"), default=False):
+            mode = "concession"
+        elif payload.get("updated_answer") is not None or payload.get("updated_direct_answer") is not None or payload.get("updated_submission_trace") is not None:
+            mode = "answer_revision"
+        else:
+            mode = "response_only"
+    updated_answer_payload = payload.get("updated_answer") if isinstance(payload.get("updated_answer"), dict) else {}
+    updated_direct_answer = (
+        updated_answer_payload.get("evaluator_answer")
+        or updated_answer_payload.get("direct_answer")
+        or payload.get("updated_direct_answer")
+        or payload.get("direct_answer")
+        or payload.get("final_answer")
+    )
     canonical = {
         "artifact_kind": "rebuttal",
         "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
         "phase": "rebuttal",
         "owner": owner,
         "concede": _boolish(payload.get("concede"), default=False),
+        "mode": mode,
         "response_summary": _clean_text(payload.get("response_summary") or payload.get("summary") or payload.get("rebuttal_summary")),
+        "addressed_review_items": [_clean_text(item) for item in _as_list(payload.get("addressed_review_items")) if _clean_text(item)],
         "response_items": _canonical_review_items(payload.get("response_items") or payload.get("responses"), verdict="non_blocking"),
-        "updated_direct_answer": payload.get("updated_direct_answer") or payload.get("direct_answer") or payload.get("final_answer"),
+        "updated_answer": updated_answer_payload if updated_answer_payload else None,
+        "updated_direct_answer": updated_direct_answer,
         "updated_submission_trace": _canonical_trace(payload.get("updated_submission_trace") or payload.get("submission_trace")),
+        "remaining_open_items": [_clean_text(item) for item in _as_list(payload.get("remaining_open_items")) if _clean_text(item)],
     }
     if not canonical["response_summary"]:
         canonical["response_summary"] = _clean_text(canonical["updated_direct_answer"])
@@ -667,6 +688,10 @@ def check_rebuttal(text: str, *, owner: str = CANDIDATE_OWNER) -> ArtifactCheck:
         if canonical["response_summary"]:
             warnings.append("Recovered `response_summary` from prose body.")
     errors: list[str] = []
+    if canonical["mode"] not in {"response_only", "answer_revision", "concession"}:
+        errors.append("rebuttal `mode` must be response_only, answer_revision, or concession")
+    if canonical["mode"] == "concession":
+        canonical["concede"] = True
     if not canonical["response_summary"] and not canonical["response_items"] and not canonical["concede"]:
         errors.append("rebuttal must include `response_summary`, `response_items`, or `concede: true`")
     normalized_text = yaml_dump(canonical)

@@ -631,6 +631,22 @@ Points: 0.5, Item: Second criterion
         self.assertEqual("boom", payload["terminal_reason"])
         self.assertEqual("terminal_failure", payload["legacy_status"])
 
+    def test_normalize_chemqa_run_status_keeps_artifact_finalizing_non_terminal(self) -> None:
+        payload = benchmark_test.normalize_chemqa_run_status(
+            {
+                "status": "done",
+                "protocol_terminal_state": "completed",
+                "artifact_flow_state": "finalizing",
+                "benchmark_terminal_state": "running",
+                "terminal_state": "running",
+            }
+        )
+        self.assertEqual("running", payload["status"])
+        self.assertEqual("completed", payload["protocol_terminal_state"])
+        self.assertEqual("finalizing", payload["artifact_flow_state"])
+        self.assertEqual("running", payload["benchmark_terminal_state"])
+        self.assertFalse(benchmark_test.is_chemqa_terminal_status(payload))
+
     def test_normalize_chemqa_run_status_maps_abandoned(self) -> None:
         payload = benchmark_test.normalize_chemqa_run_status({"status": "abandoned"})
         self.assertEqual("done", payload["status"])
@@ -1166,6 +1182,32 @@ Points: 0.5, Item: Second criterion
             self.assertIn("Probe A needs esterase cleavage", full_text)
             self.assertIn("Reasoning / submission trace:", full_text)
             self.assertIn("FINAL ANSWER: F", full_text)
+
+    def test_build_chemqa_full_response_uses_canonical_final_answer_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            final_artifact_path = temp_dir / "final_answer_artifact.json"
+            final_artifact_path.write_text(
+                json.dumps(
+                    {
+                        "terminal_state": "completed",
+                        "answer_kind": "multi_part_research_answer",
+                        "evaluator_answer": "Catalysis proceeds through the two-step pathway.",
+                        "display_answer": "Two-step catalytic pathway",
+                        "full_answer": "Detailed pathway rationale.",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            qa_result = {
+                "terminal_state": "completed",
+                "artifact_paths": {"final_answer_artifact": str(final_artifact_path)},
+            }
+
+            short_text, full_text = benchmark_test.build_chemqa_full_response(qa_result=qa_result)
+
+            self.assertEqual("Catalysis proceeds through the two-step pathway.", short_text)
+            self.assertEqual("Detailed pathway rationale.", full_text)
 
     def test_build_chemqa_full_response_rejected_blob_does_not_return_blob_as_short_answer(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -2012,6 +2054,108 @@ Points: 0.5, Item: Second criterion
             benchmark_test.ChemQARunner._wait_for_terminal_status = original_wait_for_terminal_status
             benchmark_test.ChemQARunner._ensure_artifacts = original_ensure_artifacts
 
+    def test_chemqa_runner_uses_canonical_qa_result_path_from_terminal_status(self) -> None:
+        original_run_subprocess = benchmark_test.run_subprocess
+        original_ensure_runtime_bundle = benchmark_test.ensure_runtime_bundle
+        original_wait_for_terminal_status = benchmark_test.ChemQARunner._wait_for_terminal_status
+        original_ensure_artifacts = benchmark_test.ChemQARunner._ensure_artifacts
+        original_invoke_cleanroom_cleanup = benchmark_test.invoke_cleanroom_cleanup
+        try:
+            benchmark_test.run_subprocess = lambda command, *, env=None, cwd=None, timeout=None: benchmark_test.subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"run_id": "demo", "launch_mode": "run", "launched": {"returncode": 0}}),
+                stderr="",
+            )
+            benchmark_test.ensure_runtime_bundle = lambda record, bundle_root: None
+            benchmark_test.invoke_cleanroom_cleanup = lambda manifest_path: {"status": "cleaned", "manifest_path": str(manifest_path)}
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                canonical_dir = Path(tmpdir) / "chemqa-root" / "generated" / "artifacts" / "status-run"
+                canonical_dir.mkdir(parents=True, exist_ok=True)
+                qa_result_path = canonical_dir / "qa_result.json"
+                final_artifact_path = canonical_dir / "final_answer_artifact.json"
+                manifest_path = canonical_dir / "artifact_manifest.json"
+                final_artifact_path.write_text(
+                    json.dumps(
+                        {
+                            "terminal_state": "completed",
+                            "answer_kind": "numeric_short_answer",
+                            "evaluator_answer": "7.59",
+                            "display_answer": "7.59 micrograms",
+                            "full_answer": "FINAL ANSWER: 7.59",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                manifest_path.write_text(json.dumps({"files": {}}), encoding="utf-8")
+                qa_result_path.write_text(
+                    json.dumps(
+                        {
+                            "terminal_state": "completed",
+                            "acceptance_status": "accepted",
+                            "answer_kind": "numeric_short_answer",
+                            "final_answer": {"direct_answer": "7.59", "answer": "7.59", "value": "7.59", "full_answer": "FINAL ANSWER: 7.59"},
+                            "artifact_paths": {
+                                "qa_result": str(qa_result_path),
+                                "final_answer_artifact": str(final_artifact_path),
+                                "artifact_manifest": str(manifest_path),
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                benchmark_test.ChemQARunner._wait_for_terminal_status = lambda self, run_id, timeout_seconds: {
+                    "run_id": run_id,
+                    "status": "done",
+                    "terminal_state": "completed",
+                    "benchmark_terminal_state": "completed",
+                    "artifact_flow_state": "finalized",
+                    "qa_result_path": str(qa_result_path),
+                    "final_answer_artifact_path": str(final_artifact_path),
+                    "artifact_manifest_path": str(manifest_path),
+                }
+
+                def fail_if_called(self, run_id, *, env, run_status, wait_seconds=120, poll_seconds=5):
+                    raise AssertionError("_ensure_artifacts should not rebuild when canonical qa_result_path is readable")
+
+                benchmark_test.ChemQARunner._ensure_artifacts = fail_if_called
+                output_root = Path(tmpdir) / "benchmark-output"
+                runner = benchmark_test.ChemQARunner(
+                    chemqa_root=Path(tmpdir) / "chemqa-root",
+                    timeout_seconds=30,
+                    config_path=Path(tmpdir) / "config.json",
+                    slot_set="A",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                    model_profile="profile-x",
+                    runtime_bundle_root=Path(tmpdir) / "bundles",
+                    launch_workspace_root=output_root / "chemqa-launch",
+                )
+                record = benchmark_test.BenchmarkRecord(
+                    record_id="chembench-0001",
+                    dataset="chembench",
+                    source_file="/tmp/demo.jsonl",
+                    eval_kind="chembench_open_ended",
+                    prompt="How much product?",
+                    reference_answer="7.59",
+                    payload={},
+                )
+
+                out = runner.run(record, benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"])
+
+                self.assertEqual(benchmark_test.RunStatus.COMPLETED, out.status)
+                self.assertEqual("7.59", out.short_answer_text)
+                self.assertEqual(str(output_root / "artifacts" / "chemqa_web_on" / "chembench-0001" / out.runner_meta["run_id"] / "qa_result.json"), out.runner_meta["qa_result_path"])
+                self.assertIn("final_answer_artifact", out.runner_meta["archived_artifact_paths"])
+        finally:
+            benchmark_test.run_subprocess = original_run_subprocess
+            benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
+            benchmark_test.invoke_cleanroom_cleanup = original_invoke_cleanroom_cleanup
+            benchmark_test.ChemQARunner._wait_for_terminal_status = original_wait_for_terminal_status
+            benchmark_test.ChemQARunner._ensure_artifacts = original_ensure_artifacts
+
     def test_chemqa_runner_archives_protocol_and_rebuilds_qa_result_for_failed_terminal_run(self) -> None:
         original_run_subprocess = benchmark_test.run_subprocess
         original_ensure_runtime_bundle = benchmark_test.ensure_runtime_bundle
@@ -2211,6 +2355,135 @@ Points: 0.5, Item: Second criterion
             benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
             benchmark_test.invoke_cleanroom_cleanup = original_invoke_cleanroom_cleanup
             benchmark_test.ChemQARunner._wait_for_terminal_status = original_wait_for_terminal_status
+            benchmark_test.ChemQARunner._collect_artifacts_from_source = original_collect_artifacts
+
+    def test_chemqa_runner_failed_terminal_uses_failure_artifact_answer_projection(self) -> None:
+        original_run_subprocess = benchmark_test.run_subprocess
+        original_ensure_runtime_bundle = benchmark_test.ensure_runtime_bundle
+        original_wait_for_terminal_status = benchmark_test.ChemQARunner._wait_for_terminal_status
+        original_build_candidate_submission_fallback = benchmark_test.ChemQARunner._build_candidate_submission_fallback
+        original_collect_artifacts = benchmark_test.ChemQARunner._collect_artifacts_from_source
+        original_invoke_cleanroom_cleanup = benchmark_test.invoke_cleanroom_cleanup
+        try:
+            benchmark_test.run_subprocess = lambda command, *, env=None, cwd=None, timeout=None: benchmark_test.subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"run_id": "demo", "launch_mode": "run", "launched": {"returncode": 0}}),
+                stderr="",
+            )
+            benchmark_test.ensure_runtime_bundle = lambda record, bundle_root: None
+            benchmark_test.invoke_cleanroom_cleanup = lambda manifest_path: {"status": "cleaned", "manifest_path": str(manifest_path)}
+            benchmark_test.ChemQARunner._build_candidate_submission_fallback = lambda self, run_id, run_status: None
+            benchmark_test.ChemQARunner._wait_for_terminal_status = lambda self, run_id, timeout_seconds: {
+                "status": "done",
+                "terminal_state": "failed",
+                "terminal_reason_code": "protocol_stalled",
+                "artifact_flow_state": "finalization_failed",
+                "benchmark_terminal_state": "failed",
+                "failure_artifact_path": str(self.chemqa_root / "generated" / "artifacts" / run_id / "failure_artifact.json"),
+                "qa_result_path": str(self.chemqa_root / "generated" / "artifacts" / run_id / "qa_result.json"),
+            }
+
+            def fake_collect_artifacts(self, *, source_dir, output_dir, env):
+                output_dir.mkdir(parents=True, exist_ok=True)
+                _ = (self, source_dir, env)
+
+            benchmark_test.ChemQARunner._collect_artifacts_from_source = fake_collect_artifacts
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                output_root = Path(tmpdir) / "benchmark-output"
+                chemqa_root = Path(tmpdir) / "chemqa-root"
+                runner = benchmark_test.ChemQARunner(
+                    chemqa_root=chemqa_root,
+                    timeout_seconds=30,
+                    config_path=Path(tmpdir) / "config.json",
+                    slot_set="A",
+                    review_rounds=None,
+                    rebuttal_rounds=None,
+                    model_profile="profile-x",
+                    runtime_bundle_root=Path(tmpdir) / "bundles",
+                    launch_workspace_root=output_root / "chemqa-launch",
+                )
+                record = benchmark_test.BenchmarkRecord(
+                    record_id="superchem-0001",
+                    dataset="superchem",
+                    source_file="/tmp/demo.jsonl",
+                    eval_kind="superchem_multiple_choice_rpf",
+                    prompt="Pick one.",
+                    reference_answer="B",
+                    payload={"options": {"A": "wrong", "B": "right"}},
+                )
+                run_id = "benchmark-chemqa_web_on-superchem-0001-20260427-000000"
+                artifact_dir = chemqa_root / "generated" / "artifacts" / run_id
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                (artifact_dir / "failure_artifact.json").write_text(
+                    json.dumps(
+                        {
+                            "terminal_state": "failed",
+                            "failure_code": "protocol_stalled",
+                            "failure_message": "review phase stalled",
+                            "answer_projection": {
+                                "answer_kind": "multiple_choice",
+                                "evaluator_answer": "B",
+                                "display_answer": "B",
+                                "full_answer": "Recovered from current candidate view.",
+                            },
+                            "recovery_eligibility": {
+                                "evaluable": True,
+                                "scored": True,
+                                "reliability": "high_confidence_recovered",
+                                "recovery_mode": "failure_artifact_answer_projection",
+                                "reason": "last_valid_candidate_view",
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (artifact_dir / "qa_result.json").write_text(
+                    json.dumps(
+                        {
+                            "terminal_state": "failed",
+                            "failure_code": "protocol_stalled",
+                            "answer_projection": {
+                                "answer_kind": "multiple_choice",
+                                "evaluator_answer": "B",
+                                "display_answer": "B",
+                                "full_answer": "Recovered from current candidate view.",
+                            },
+                            "recovery_eligibility": {
+                                "evaluable": True,
+                                "scored": True,
+                                "reliability": "high_confidence_recovered",
+                                "recovery_mode": "failure_artifact_answer_projection",
+                                "reason": "last_valid_candidate_view",
+                            },
+                            "artifact_paths": {"failure_artifact": str(artifact_dir / "failure_artifact.json")},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                protocol_dir = chemqa_root / "generated" / "clawteam-data" / "runs" / run_id / "teams" / run_id
+                protocol_dir.mkdir(parents=True, exist_ok=True)
+                (protocol_dir / "chemqa_review_protocol.yaml").write_text(
+                    "artifact_kind: coordinator_protocol\nterminal_state: failed\nacceptance_status: failed\nfailure_reason: stalled\n",
+                    encoding="utf-8",
+                )
+                runner._now_stamp = lambda: "20260427-000000"
+
+                out = runner.run(record, benchmark_test.EXPERIMENT_GROUPS["chemqa_web_on"])
+
+                self.assertEqual(benchmark_test.RunStatus.RECOVERED, out.status)
+                self.assertEqual("B", out.short_answer_text)
+                self.assertEqual("failure_artifact", out.recovery.source)
+                self.assertEqual("failure_artifact_answer_projection", out.recovery.recovery_mode)
+                self.assertTrue(out.runner_meta["fallback_used"])
+                self.assertEqual("failure_artifact_answer_projection", out.runner_meta["recovery_mode"])
+        finally:
+            benchmark_test.run_subprocess = original_run_subprocess
+            benchmark_test.ensure_runtime_bundle = original_ensure_runtime_bundle
+            benchmark_test.invoke_cleanroom_cleanup = original_invoke_cleanroom_cleanup
+            benchmark_test.ChemQARunner._wait_for_terminal_status = original_wait_for_terminal_status
+            benchmark_test.ChemQARunner._build_candidate_submission_fallback = original_build_candidate_submission_fallback
             benchmark_test.ChemQARunner._collect_artifacts_from_source = original_collect_artifacts
 
     def test_chemqa_runner_failed_terminal_with_final_answer_preview_stays_failed_and_unscored(self) -> None:

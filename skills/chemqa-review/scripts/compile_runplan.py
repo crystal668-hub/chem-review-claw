@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal", required=True, help="Debate goal or task prompt")
     parser.add_argument("--run-id", help="Optional explicit run id")
     parser.add_argument("--additional-file-workspace", help="Optional extra file workspace locator")
+    parser.add_argument("--answer-kind", help="Resolved answer kind for ChemQA Artifact Flow")
     parser.add_argument("--model-profile", help="Override model profile")
     parser.add_argument("--slot-set", choices=("default", "A", "B"), default="default", help="Debate slot set to bind this run to")
     parser.add_argument("--proposer-count", type=int)
@@ -122,6 +123,7 @@ def main() -> int:
         role_slots["proposer-5"]: safe_session_id("chemqa-review", run_id, "proposer-5"),
     }
     additional_file_workspace = (args.additional_file_workspace or "").strip() or None
+    answer_kind = (args.answer_kind or "generic_semantic_answer").strip() or "generic_semantic_answer"
     prompt_assembly = {
         role_name: {
             "contracts": list(role_contracts.get(role_name, [])),
@@ -137,7 +139,7 @@ def main() -> int:
             "preset_ref": args.preset,
             "goal": args.goal,
             "inputs": {"additional_file_workspace": additional_file_workspace},
-            "metadata": {"priority": args.priority},
+            "metadata": {"priority": args.priority, "answer_kind": answer_kind},
             "overrides": resolved,
         },
         "workflow_ref": f"{workflow['id']}@{workflow['version']}",
@@ -172,6 +174,7 @@ def main() -> int:
         },
         "runtime_context": {
             "additional_file_workspace": additional_file_workspace,
+            "answer_kind": answer_kind,
             "final_decider": resolved.get("final_decider"),
             "backend": resolved.get("backend", "subprocess"),
             "evidence_mode": resolved.get("evidence_mode"),

@@ -11,12 +11,12 @@
   - `DONE`: Score outputs with registered evaluators for ChemBench, FrontierScience Olympiad/Research, ConformaBench, SuperChem, and generic semantic matching via `workspace/benchmark_test.py` and `workspace/benchmarking/evaluation.py`.
   - `DONE`: Provision run-scoped OpenClaw configs and DebateClaw/ChemQA slot workspaces via `workspace/benchmarking/config_renderer.py`, `workspace/benchmarking/provisioning.py`, and `workspace/benchmark_test.py`.
   - `DONE`: Run a single-agent OpenClaw baseline by shelling out to `openclaw agent` via `workspace/benchmarking/runners/single_llm.py`.
-  - `DONE`: Run a ChemQA multi-agent workflow by compiling/materializing a ChemQA launch, monitoring run-status, rebuilding artifacts, archiving outputs, and cleaning runtime leftovers via `workspace/benchmarking/runners/chemqa.py`.
+  - `DONE`: Run a ChemQA multi-agent workflow by compiling/materializing a ChemQA launch, monitoring benchmark-visible run-status, consuming canonical Artifact Flow outputs, archiving outputs, and cleaning runtime leftovers via `workspace/benchmarking/runners/chemqa.py`.
   - `DONE`: Manage DebateClaw V1 runtime, slot provisioning, prompt/materialization, and launch commands via `workspace/skills/debateclaw-v1/scripts/*.py`.
   - `DONE`: Maintain live debate protocol state in SQLite and expose CLI commands for init/status/next-action/submit/advance via `workspace/skills/debateclaw-v1/scripts/debate_state.py`.
   - `DONE`: Drive ChemQA reviewer/proposer/coordinator loops on top of DebateClaw state via `workspace/skills/chemqa-review/scripts/chemqa_review_openclaw_driver.py`.
   - `DONE`: Recover stalled ChemQA runs, respawn dead workers, and repair invalid protocol state via `workspace/skills/chemqa-review/scripts/recover_run.py`.
-  - `DONE`: Collect ChemQA protocol outputs into `qa_result.json` plus artifact files via `workspace/skills/chemqa-review/scripts/collect_artifacts.py`.
+  - `DONE`: Collect ChemQA protocol outputs through Artifact Flow into canonical terminal artifacts, `artifact_manifest.json`, and legacy-compatible `qa_result.json` via `workspace/skills/chemqa-review/scripts/chemqa_artifact_flow.py` and `collect_artifacts.py`.
   - `DONE`: Provide deterministic chemistry provider skills for local structure reasoning, name resolution, public compound lookup, and numeric chemistry calculations via `workspace/skills/rdkit`, `workspace/skills/opsin`, `workspace/skills/pubchem`, and `workspace/skills/chem-calculator`.
   - `DONE`: Retrieve literature candidates from OpenAlex, Semantic Scholar, and Crossref via `workspace/skills/paper-retrieval/scripts/paper_retrieval.py`.
   - `DONE`: Resolve accessible paper artifacts using direct OA URLs and optional Unpaywall lookup via `workspace/skills/paper-access/scripts/paper_access.py`.
@@ -99,13 +99,13 @@
   - `benchmark_test.py` -> `benchmarking/*`
     - Uses dataset loading, config rendering, provisioning, runner construction, and reporting.
   - `benchmark_test.py` -> `skills/chemqa-review`
-    - Launches ChemQA preset flow, polls run status, rebuilds artifacts, archives outputs.
+    - Launches ChemQA preset flow, passes resolved `answer_kind`, polls benchmark-visible run status, prefers canonical Artifact Flow paths, archives outputs.
   - `benchmark_test.py` -> `skills/benchmark-cleanroom`
     - Writes cleanup manifests and runs cleanup hooks on exit/failure.
   - `chemqa_review_openclaw_driver.py` -> `debate_state.py`
     - Subprocess-driven control loop; asks for next action, submits artifacts, advances state.
   - `collect_artifacts.py` -> protocol YAML/JSON emitted by coordinator
-    - Converts protocol state into `qa_result.json` and related files.
+    - Converts protocol state through `chemqa_artifact_flow.py` into `final_answer_artifact.json` or `failure_artifact.json`, `artifact_manifest.json`, `candidate_view.json`, diagnostics, and legacy-compatible `qa_result.json`.
   - `paper-rerank.py` -> `paper-access`/`paper-parse` outputs
     - Expects local PDFs and calls GROBID + OpenAI-compatible LLM endpoint.
 
@@ -208,10 +208,10 @@
   - Status: `DONE`
 
 - Name: ChemQA benchmark runner
-  - Description: Launches ChemQA preset flow, waits for terminal run-status, rebuilds/archives artifacts, marks evaluable recovered candidate submissions as scoreable degraded executions, and writes cleanup manifest.
+  - Description: Launches ChemQA preset flow, derives an immutable benchmark answer kind, waits for benchmark-visible terminal run-status, prefers canonical Artifact Flow paths, archives artifacts, keeps legacy reconstruction/fallback for compatibility, marks evaluable recovered candidate submissions as scoreable degraded executions, and writes cleanup manifest.
   - Input / Output:
     - Input: benchmark record, ChemQA skill root, config path, slot set, profile/round overrides.
-    - Output: `RunnerResult` plus archived artifact tree.
+    - Output: `RunnerResult` plus archived artifact tree including canonical final/failure artifacts when available.
   - Implementation location: `workspace/benchmarking/runners/chemqa.py`
   - Status: `DONE`
 
@@ -240,18 +240,26 @@
   - Status: `DONE`
 
 - Name: ChemQA coordinator/worker driver
-  - Description: Runs long-lived coordinator/worker loops for each role, queries debate state, updates task status, saves sessions, writes cleanroom leases.
+  - Description: Runs long-lived coordinator/worker loops for each role, queries debate state, updates task status, saves sessions, writes cleanroom leases, and separates DebateClaw protocol terminal state from ChemQA benchmark terminal state while Artifact Flow finalizes outputs.
   - Input / Output:
     - Input: team, role, slot, session id, prompt/config/runtime paths.
     - Output: live task/session side effects and protocol artifacts.
   - Implementation location: `workspace/skills/chemqa-review/scripts/chemqa_review_openclaw_driver.py`
   - Status: `DONE`
 
+- Name: ChemQA Artifact Flow
+  - Description: Validates typed candidate/review/rebuttal artifacts, resolves answer-kind-specific projections, applies answer-revision rebuttals to a current candidate view, tracks review item closure state, writes canonical final/failure artifacts, writes an artifact manifest with hashes, and projects legacy-compatible `qa_result.json`.
+  - Input / Output:
+    - Input: resolved `answer_kind`, protocol payloads, candidate/review/rebuttal artifacts, finalization metadata.
+    - Output: `final_answer_artifact.json` or `failure_artifact.json`, `candidate_view.json`, `validation_summary.json`, `artifact_manifest.json`, `qa_result.json`, and run-status overlay fields.
+  - Implementation location: `workspace/skills/chemqa-review/scripts/chemqa_artifact_flow.py`, `workspace/skills/chemqa-review/scripts/collect_artifacts.py`
+  - Status: `DONE`
+
 - Name: ChemQA artifact reconstruction
-  - Description: Validates `chemqa_review_protocol` and emits `qa_result.json`, final answer, candidate submission, trajectories, review status files.
+  - Description: Validates `chemqa_review_protocol`, preserves legacy artifact files, and delegates terminal answer/failure projection to Artifact Flow.
   - Input / Output:
     - Input: protocol file/source directory.
-    - Output: normalized artifact directory.
+    - Output: normalized artifact directory with legacy files plus canonical terminal artifacts and manifest.
   - Implementation location: `workspace/skills/chemqa-review/scripts/collect_artifacts.py`
   - Status: `DONE`
 
@@ -426,7 +434,8 @@
   - For `chemqa_*` groups:
     - The runner shells out to ChemQA skill scripts to compile/materialize/launch the run.
     - It monitors run status via files under `chemqa-review/control/run-status/`.
-    - If artifacts are missing, it tries to rebuild them from protocol files with `collect_artifacts.py`.
+    - It treats DebateClaw `phase=done/status=done` as protocol terminal only while Artifact Flow is still `finalizing`; benchmark-visible `status=done/terminal_state=completed|failed` is published only after canonical final/failure artifacts, manifest, and `qa_result.json` are readable.
+    - It prefers canonical `qa_result_path`, `final_answer_artifact_path`, `failure_artifact_path`, and `artifact_manifest_path` from run status. If artifacts are missing, it tries to rebuild them from protocol files with `collect_artifacts.py`.
     - If the final `qa_result.json` is still missing or unusable, it can fall back to the latest archived `proposer-1` proposal or `final_answer_preview`.
   - All per-record outputs are persisted immediately under `per-record/<group>/<slug>.json`.
   - Cleanup manifests are registered and benchmark-cleanroom cleanup runs in `finally`/signal/atexit paths.
@@ -435,6 +444,8 @@
   - The operational state machine is `workspace/skills/debateclaw-v1/scripts/debate_state.py`, not `workspace/skills/chemqa-review/runtime/workflow.py`.
   - `chemqa_review_openclaw_driver.py` loops by repeatedly calling `debate_state.py` subcommands in subprocesses.
   - The driver updates ClawTeam task state, saves sessions, opens/removes cleanup leases, and emits role-specific artifacts.
+  - When DebateClaw reports protocol terminal conditions, the driver publishes `artifact_flow_state=finalizing` while keeping legacy `status=running`; after `collect_artifacts.py` / Artifact Flow writes terminal artifacts, run status carries `artifact_flow_state=finalized|finalization_failed`, `benchmark_terminal_state`, canonical paths, and legacy-compatible terminal fields.
+  - Rebuttal artifacts now carry explicit `mode`: `response_only`, `answer_revision`, or `concession`. Only `answer_revision` updates the Artifact Flow current candidate view.
   - `chemqa-review/scripts/bundle_common.py` and the prompt pack now treat `rdkit`, `pubchem`, `opsin`, and `chem-calculator` as required sibling skills alongside DebateClaw and the paper pipeline.
   - Prompt routing now tells `proposer-1` to prefer `chem-calculator` for `FrontierScience` numeric questions before web search, and to extract available SMILES/name text before routing `SuperChem` structure questions to `rdkit`, `opsin`, and `pubchem`.
   - Reviewer prompt contracts now require numeric and structural challenges to cite script `result.json` artifacts or structured `tool_trace` entries instead of unsupported tool-use claims.
@@ -533,7 +544,7 @@
   - Either add a real web UI/API module for the `web-ui` extras or drop those extras from the project metadata.
   - Either add a ConformaBench pool extraction script or document the dataset as imported/static.
 - Harden artifact and cleanup flows:
-  - Reduce filename/path guessing in ChemQA artifact recovery.
+  - Continue reducing filename/path guessing in legacy ChemQA artifact recovery paths now that canonical Artifact Flow paths exist.
   - Centralize run manifest/session/process metadata contracts used by runners, drivers, and cleanup.
 - Add clearer ownership boundaries:
   - Separate DebateClaw engine logic, ChemQA protocol logic, benchmark orchestration, and paper pipeline into smaller modules with fewer embedded subprocess wrappers.

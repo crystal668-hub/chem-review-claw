@@ -81,16 +81,24 @@ artifact_kind: rebuttal
 artifact_contract_version: react-reviewed-v2
 phase: rebuttal
 owner: proposer-1
+mode: response_only
 concede: false
 response_summary: >-
   One-sentence summary of what changed or why the candidate is conceded.
+addressed_review_items: []
 response_items: []
+updated_answer: null
+remaining_open_items: []
 ```
 
 Rebuttal hard constraints:
 
 - pure YAML only.
 - `response_summary` should be present by default.
+- `mode` must be one of `response_only`, `answer_revision`, or `concession`.
+- Use `mode: answer_revision` when reviewer feedback changes the answer projection; put the new evaluator-facing answer under `updated_answer.evaluator_answer`.
+- Use `mode: response_only` when the answer does not change and cite relevant `addressed_review_items`.
+- Use `mode: concession` with `concede: true` when the current candidate should not be defended.
 - `response_items` may be an empty list.
 - If you concede, set `concede: true` and still include a short `response_summary`.
 - Do not output only `updated_direct_answer` or only free-form prose.

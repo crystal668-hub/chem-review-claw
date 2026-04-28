@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from bundle_common import default_runtime_dir, resolve_python_interpreter, resolve_skill_root
+from chemqa_artifact_flow import resolve_answer_kind
 from control_store import FileControlStore
 from chemqa_review_artifacts import (
     CANDIDATE_OWNER,
@@ -71,6 +72,26 @@ class RunRecoverer:
         if self.data_dir:
             env["CLAWTEAM_DATA_DIR"] = self.data_dir
         return env
+
+    def runtime_answer_metadata(self) -> dict[str, Any]:
+        runplan_path = self.skill_root / "control" / "runplans" / f"{self.args.team}.json"
+        if not runplan_path.is_file():
+            return {}
+        try:
+            runplan = json.loads(runplan_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        request_metadata = ((runplan.get("request_snapshot") or {}).get("metadata") or {})
+        runtime_context = runplan.get("runtime_context") or {}
+        return {
+            "answer_kind": runtime_context.get("answer_kind") or request_metadata.get("answer_kind"),
+            "eval_kind": request_metadata.get("eval_kind"),
+            "dataset": request_metadata.get("dataset"),
+            "track": request_metadata.get("track"),
+        }
+
+    def answer_kind(self) -> str:
+        return resolve_answer_kind(self.runtime_answer_metadata())
 
     @staticmethod
     def _slot_from_registry_entry(entry: dict[str, Any] | None) -> str:
@@ -425,8 +446,9 @@ class RunRecoverer:
                 archived_candidate_text = None
                 if archive_path is not None and archive_path.is_file():
                     archived_candidate_text = check_candidate_submission(
-                        repair_candidate_submission_text(archive_path.read_text(encoding="utf-8"), owner=agent),
+                        repair_candidate_submission_text(archive_path.read_text(encoding="utf-8"), owner=agent, answer_kind=self.answer_kind()),
                         owner=agent,
+                        answer_kind=self.answer_kind(),
                     ).normalized_text
                 checked = None
                 source_path = None
@@ -442,8 +464,8 @@ class RunRecoverer:
                             f"stale candidate proposal source for {agent} belongs to epoch {candidate_epoch}, current epoch is {current_epoch}: {candidate_path}"
                         )
                         continue
-                    repaired = repair_candidate_submission_text(candidate_path.read_text(encoding="utf-8"), owner=agent)
-                    checked = check_candidate_submission(repaired, owner=agent)
+                    repaired = repair_candidate_submission_text(candidate_path.read_text(encoding="utf-8"), owner=agent, answer_kind=self.answer_kind())
+                    checked = check_candidate_submission(repaired, owner=agent, answer_kind=self.answer_kind())
                     if (
                         checked.ok
                         and archived_candidate_text

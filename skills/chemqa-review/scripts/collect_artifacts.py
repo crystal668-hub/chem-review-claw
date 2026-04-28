@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from bundle_common import dump_json, resolve_skill_root, write_text
+from chemqa_artifact_flow import finalization_from_protocol, resolve_answer_kind
 
 REQUIRED_REVIEWER_LANES = ("proposer-2", "proposer-3", "proposer-4", "proposer-5")
 EXPECTED_CANDIDATE_OWNER = "proposer-1"
@@ -37,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-dir", required=True, help="Directory containing chemqa_review_protocol.yaml")
     parser.add_argument("--output-dir", required=True, help="Output directory for rebuilt artifacts")
     parser.add_argument("--protocol-file", help="Optional explicit protocol YAML path")
+    parser.add_argument("--answer-kind", help="Resolved ChemQA answer kind for Artifact Flow validation")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
 
@@ -249,6 +251,15 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     protocol_path = Path(args.protocol_file).expanduser().resolve() if args.protocol_file else find_protocol_file(source_dir)
     protocol = load_protocol(protocol_path)
+    run_id = str(protocol.get("run_id") or output_dir.name).strip() or output_dir.name
+    answer_kind = resolve_answer_kind(
+        {
+            "answer_kind": args.answer_kind or protocol.get("answer_kind"),
+            "eval_kind": protocol.get("eval_kind"),
+            "dataset": protocol.get("dataset"),
+            "track": protocol.get("track"),
+        }
+    )
 
     validation = validate_protocol(protocol)
     if validation["errors"]:
@@ -277,38 +288,49 @@ def main() -> int:
             dump_json(output_dir / "final_submission.json", clone_jsonish(protocol.get("candidate_submission") or {}))
         )
 
-    qa_result = {
-        "question": str(protocol.get("question") or ""),
-        "language": "en",
-        "workflow_mode": "react_reviewed",
-        "acceptance_status": str(protocol.get("acceptance_status") or "rejected"),
-        "terminal_state": str(protocol.get("terminal_state") or "completed"),
-        "final_answer": stringify_final_answer(protocol.get("final_answer")),
-        "sections": clone_jsonish(protocol.get("sections") or []),
-        "citations": clone_jsonish(protocol.get("citations") or []),
-        "claim_trace": clone_jsonish(protocol.get("claim_trace") or []),
-        "submission_trace": clone_jsonish(protocol.get("submission_trace") or []),
-        "review_completion_status": str(review_completion_dict(protocol).get("status") or protocol.get("review_completion_status") or "incomplete"),
-        "overall_confidence": clone_jsonish(
-            protocol.get("overall_confidence")
-            or {"level": "low", "score": 0.0, "rationale": "Protocol did not provide confidence."}
-        ),
-        "section_confidence": clone_jsonish(protocol.get("section_confidence") or []),
-        "insufficient_evidence": bool(protocol.get("insufficient_evidence", False)),
-        "limitations_summary": str(protocol.get("limitations_summary") or protocol.get("failure_reason") or ""),
-        "retrieval_diagnostics_summary": str(protocol.get("retrieval_diagnostics_summary") or ""),
-        "execution_warnings": clone_jsonish(list(protocol.get("execution_warnings") or []) + validation["warnings"]),
-        "artifact_paths": {},
-        "time_elapsed": float(protocol.get("time_elapsed") or 0.0),
-    }
-    artifact_paths["qa_result"] = str(output_dir / "qa_result.json")
-    qa_result["artifact_paths"] = dict(artifact_paths)
+    finalization = finalization_from_protocol(
+        protocol=protocol,
+        output_dir=output_dir,
+        run_id=run_id,
+        answer_kind=answer_kind,
+    )
+    qa_result = dict(finalization.qa_result)
+    qa_result.update(
+        {
+            "question": str(protocol.get("question") or qa_result.get("question") or ""),
+            "language": "en",
+            "workflow_mode": "react_reviewed",
+            "sections": clone_jsonish(protocol.get("sections") or []),
+            "citations": clone_jsonish(protocol.get("citations") or []),
+            "claim_trace": clone_jsonish(protocol.get("claim_trace") or []),
+            "submission_trace": clone_jsonish(protocol.get("submission_trace") or []),
+            "review_completion_status": str(review_completion_dict(protocol).get("status") or protocol.get("review_completion_status") or "incomplete"),
+            "overall_confidence": clone_jsonish(
+                protocol.get("overall_confidence")
+                or {"level": "low", "score": 0.0, "rationale": "Protocol did not provide confidence."}
+            ),
+            "section_confidence": clone_jsonish(protocol.get("section_confidence") or []),
+            "insufficient_evidence": bool(protocol.get("insufficient_evidence", False)),
+            "limitations_summary": str(protocol.get("limitations_summary") or protocol.get("failure_reason") or ""),
+            "retrieval_diagnostics_summary": str(protocol.get("retrieval_diagnostics_summary") or ""),
+            "execution_warnings": clone_jsonish(list(protocol.get("execution_warnings") or []) + validation["warnings"]),
+            "time_elapsed": float(protocol.get("time_elapsed") or 0.0),
+        }
+    )
+    qa_result_artifact_paths = dict(qa_result.get("artifact_paths") or {})
+    qa_result_artifact_paths.update(artifact_paths)
+    qa_result_artifact_paths.update(finalization.artifact_paths)
+    qa_result["artifact_paths"] = qa_result_artifact_paths
     dump_json(output_dir / "qa_result.json", qa_result)
+    artifact_paths.update(finalization.artifact_paths)
 
     payload = {
         "protocol_file": str(protocol_path),
         "output_dir": str(output_dir),
         "artifact_paths": artifact_paths,
+        "answer_kind": answer_kind,
+        "terminal_state": finalization.terminal_state,
+        "status_overlay": finalization.status_overlay,
         "validation": validation,
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))

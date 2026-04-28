@@ -1601,7 +1601,7 @@ class RunStatusShapeTest(unittest.TestCase):
             self.assertIn("duplicate", "\n".join(attempt_prompts[1]).lower())
             self.assertEqual(["progress"], progress_marks)
 
-    def test_sync_run_status_writes_done_and_terminal_state(self) -> None:
+    def test_sync_run_status_keeps_protocol_done_in_artifact_finalizing_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
             driver.args = argparse.Namespace(team="chemqa-review-run-status", role="debate-coordinator")
@@ -1623,8 +1623,11 @@ class RunStatusShapeTest(unittest.TestCase):
             )
 
             payload = json.loads((store.control / "run-status" / "chemqa-review-run-status.json").read_text(encoding="utf-8"))
-            self.assertEqual("done", payload["status"])
-            self.assertEqual("failed", payload["terminal_state"])
+            self.assertEqual("running", payload["status"])
+            self.assertEqual("failed", payload["protocol_terminal_state"])
+            self.assertEqual("finalizing", payload["artifact_flow_state"])
+            self.assertEqual("running", payload["benchmark_terminal_state"])
+            self.assertEqual("running", payload["terminal_state"])
             self.assertEqual("engine_terminal_failure", payload["terminal_reason_code"])
             self.assertEqual("engine stopped", payload["terminal_reason"])
 
