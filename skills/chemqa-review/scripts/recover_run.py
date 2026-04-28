@@ -225,7 +225,7 @@ class RunRecoverer:
         phase_signature = self.current_phase_signature()
         budget_state, budget_changed = self._prepare_respawn_budget_state(registry, phase_signature=phase_signature)
         max_respawns = max(0, int(getattr(self.args, "max_respawns_per_role_phase_signature", 0)))
-        for role, entry in registry.items():
+        for role, entry in list(registry.items()):
             if role == "_budget_state":
                 continue
             if role == "debate-coordinator":

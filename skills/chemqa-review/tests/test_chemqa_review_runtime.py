@@ -1658,6 +1658,38 @@ class RunStatusShapeTest(unittest.TestCase):
 
 
 class RecoveryRespawnBudgetTest(unittest.TestCase):
+    def test_respawn_actionable_roles_can_initialize_budget_state_while_iterating_registry(self) -> None:
+        recoverer = recover_run.RunRecoverer.__new__(recover_run.RunRecoverer)
+        recoverer.args = argparse.Namespace(team="chemqa-review-test-run", max_respawns_per_role_phase_signature=1)
+        recoverer.actions = []
+        recoverer.blockers = []
+        recoverer.data_dir = ""
+        recoverer.team_dir = lambda: Path("/tmp/team-dir")
+        recoverer.workspace_for = lambda _role: Path("/tmp/workspace")
+        recoverer.current_phase_signature = lambda: "propose-epoch-1"
+        registry = {
+            "proposer-1": {"pid": 0, "command": ["python3", "worker.py"]},
+        }
+        recoverer.load_spawn_registry = lambda: registry
+        saved_payloads: list[dict[str, object]] = []
+        recoverer.save_spawn_registry = lambda payload: saved_payloads.append(dict(payload))
+        recoverer.next_action = lambda _role: {"action": "propose", "phase": "propose"}
+        recoverer.role_process_is_running = lambda role, entry: False
+
+        original_popen = recover_run.subprocess.Popen
+        try:
+            class FakeProc:
+                pid = 12345
+
+            recover_run.subprocess.Popen = lambda *args, **kwargs: FakeProc()
+            changed = recover_run.RunRecoverer.respawn_actionable_roles(recoverer)
+        finally:
+            recover_run.subprocess.Popen = original_popen
+
+        self.assertTrue(changed)
+        self.assertEqual(["respawn-role proposer-1 pid=12345"], recoverer.actions)
+        self.assertEqual(1, saved_payloads[-1]["_budget_state"]["respawns_by_role"]["proposer-1"])
+
     def test_respawn_actionable_roles_does_not_respawn_same_role_after_phase_budget_exhausted(self) -> None:
         recoverer = recover_run.RunRecoverer.__new__(recover_run.RunRecoverer)
         recoverer.args = argparse.Namespace(team="chemqa-review-test-run", max_respawns_per_role_phase_signature=1)

@@ -256,7 +256,7 @@
   - Status: `DONE`
 
 - Name: ChemQA run recovery
-  - Description: Repairs invalid review state, respawns missing workers, replays placeholder transport reviews, advances stalled runs.
+  - Description: Repairs invalid review state, respawns missing workers, replays placeholder transport reviews, advances stalled runs. Respawn budget tracking is stored in `spawn_registry.json` and is updated while iterating a snapshot of role entries so missing worker recovery can initialize budget metadata without aborting the recovery pass.
   - Input / Output:
     - Input: team id, workspace/runtime roots, max steps/respawn budget.
     - Output: JSON recovery summary plus runtime mutations.
