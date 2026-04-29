@@ -14,7 +14,7 @@
   - `DONE`: Run a ChemQA multi-agent workflow by compiling/materializing a ChemQA launch, monitoring benchmark-visible run-status, consuming canonical Artifact Flow outputs, archiving outputs, and cleaning runtime leftovers via `workspace/benchmarking/runners/chemqa.py`.
   - `DONE`: Manage DebateClaw V1 runtime, slot provisioning, prompt/materialization, and launch commands via `workspace/skills/debateclaw-v1/scripts/*.py`.
   - `DONE`: Maintain live debate protocol state in SQLite and expose CLI commands for init/status/next-action/submit/advance via `workspace/skills/debateclaw-v1/scripts/debate_state.py`.
-  - `DONE`: Drive ChemQA reviewer/proposer/coordinator loops on top of DebateClaw state via `workspace/skills/chemqa-review/scripts/chemqa_review_openclaw_driver.py`.
+  - `DONE`: Drive ChemQA reviewer/proposer/coordinator loops on top of DebateClaw state via `workspace/skills/chemqa-review/scripts/chemqa_review_openclaw_driver.py`, including phase-scoped multi-turn artifact production, role-phase run-status diagnostics, and deterministic coordinator fallback when model refinement aborts or leaves no valid protocol rewrite.
   - `DONE`: Recover stalled ChemQA runs, respawn dead workers, and repair invalid protocol state via `workspace/skills/chemqa-review/scripts/recover_run.py`.
   - `DONE`: Collect ChemQA protocol outputs through Artifact Flow into canonical terminal artifacts, `artifact_manifest.json`, and legacy-compatible `qa_result.json` via `workspace/skills/chemqa-review/scripts/chemqa_artifact_flow.py` and `collect_artifacts.py`.
   - `DONE`: Provide deterministic chemistry provider skills for local structure reasoning, name resolution, public compound lookup, and numeric chemistry calculations via `workspace/skills/rdkit`, `workspace/skills/opsin`, `workspace/skills/pubchem`, and `workspace/skills/chem-calculator`.
@@ -240,11 +240,19 @@
   - Status: `DONE`
 
 - Name: ChemQA coordinator/worker driver
-  - Description: Runs long-lived coordinator/worker loops for each role, queries debate state, updates task status, saves sessions, writes cleanroom leases, and separates DebateClaw protocol terminal state from ChemQA benchmark terminal state while Artifact Flow finalizes outputs.
+  - Description: Runs long-lived coordinator/worker loops for each role, queries debate state, updates task status, saves sessions, writes cleanroom leases, executes candidate/review/rebuttal work as phase-scoped multi-turn loops inside one OpenClaw session, classifies missing/invalid/stale artifacts separately from true lane failure, and separates DebateClaw protocol terminal state from ChemQA benchmark terminal state while Artifact Flow finalizes outputs.
   - Input / Output:
     - Input: team, role, slot, session id, prompt/config/runtime paths.
-    - Output: live task/session side effects and protocol artifacts.
+    - Output: live task/session side effects, role-phase diagnostics in run status/blocker payloads, and protocol artifacts.
   - Implementation location: `workspace/skills/chemqa-review/scripts/chemqa_review_openclaw_driver.py`
+  - Status: `DONE`
+
+- Name: DebateClaw OpenClaw turn wrapper
+  - Description: Runs one OpenClaw turn for a fixed DebateClaw slot, keeps slot session/workspace isolation, and can emit a structured turn-result sidecar with transcript path, stop reason, tool-call count, and assistant tail for ChemQA driver diagnostics.
+  - Input / Output:
+    - Input: slot id, session id, prompt/message, timeout/thinking overrides, optional `--turn-result-file`.
+    - Output: OpenClaw subprocess exit code plus optional turn-result JSON sidecar.
+  - Implementation location: `workspace/skills/debateclaw-v1/scripts/openclaw_debate_agent.py`
   - Status: `DONE`
 
 - Name: ChemQA Artifact Flow
@@ -435,6 +443,7 @@
     - The runner shells out to ChemQA skill scripts to compile/materialize/launch the run.
     - It monitors run status via files under `chemqa-review/control/run-status/`.
     - If run-status remains unchanged across polling intervals, it invokes `chemqa-review/scripts/recover_run.py` with the run-scoped `CLAWTEAM_DATA_DIR`; repeated recovery attempts are rate-limited while the status signature remains unchanged.
+    - While a worker phase is still in progress, run status may carry a `role_phase` block with turn index, max turns, classification such as `waiting_for_artifact` / `repairing_invalid_artifact` / `repairing_stale_artifact`, and the last structured turn/artifact diagnostics.
     - It treats DebateClaw `phase=done/status=done` as protocol terminal only while Artifact Flow is still `finalizing`; benchmark-visible `status=done/terminal_state=completed|failed` is published only after canonical final/failure artifacts, manifest, and `qa_result.json` are readable.
     - It prefers canonical `qa_result_path`, `final_answer_artifact_path`, `failure_artifact_path`, and `artifact_manifest_path` from run status. If artifacts are missing, it tries to rebuild them from protocol files with `collect_artifacts.py`.
     - If the final `qa_result.json` is still missing or unusable, it can fall back to the latest archived `proposer-1` proposal or `final_answer_preview`.
@@ -444,8 +453,11 @@
 - Real ChemQA control path
   - The operational state machine is `workspace/skills/debateclaw-v1/scripts/debate_state.py`, not `workspace/skills/chemqa-review/runtime/workflow.py`.
   - `chemqa_review_openclaw_driver.py` loops by repeatedly calling `debate_state.py` subcommands in subprocesses.
-  - The driver updates ClawTeam task state, saves sessions, opens/removes cleanup leases, and emits role-specific artifacts.
+  - The driver updates ClawTeam task state, saves sessions, opens/removes cleanup leases, emits role-specific artifacts, and now treats one OpenClaw turn as a turn boundary rather than a phase-failure boundary.
+  - Candidate / formal-review / rebuttal production is phase-scoped: the driver can reuse the same `session_id` across multiple turns, observe the required artifact after each turn, feed back missing/invalid/stale state, and only mark lane failure after phase budget exhaustion or a hard wrapper error.
+  - Materialized ChemQA role prompts now pass `--runtime-dir` to the compact state snapshot helper so compact snapshot and fallback commands resolve the same run-scoped DebateClaw runtime helpers.
   - When DebateClaw reports protocol terminal conditions, the driver publishes `artifact_flow_state=finalizing` while keeping legacy `status=running`; after `collect_artifacts.py` / Artifact Flow writes terminal artifacts, run status carries `artifact_flow_state=finalized|finalization_failed`, `benchmark_terminal_state`, canonical paths, and legacy-compatible terminal fields.
+  - Coordinator protocol generation treats the deterministic protocol scaffold as primary; model refinement is optional quality improvement and falls back to the deterministic scaffold when the refinement turn aborts, times out without a valid rewrite, or leaves invalid protocol output.
   - Rebuttal artifacts now carry explicit `mode`: `response_only`, `answer_revision`, or `concession`. Only `answer_revision` updates the Artifact Flow current candidate view.
   - `chemqa-review/scripts/bundle_common.py` and the prompt pack now treat `rdkit`, `pubchem`, `opsin`, and `chem-calculator` as required sibling skills alongside DebateClaw and the paper pipeline.
   - Prompt routing now tells `proposer-1` to treat chemistry provider routes as execution requirements: numeric / stoichiometric / equilibrium / unit work triggers `chem-calculator`; SMILES / formula / ring / unsaturation / chirality / structural checks trigger `rdkit`; IUPAC/systematic names trigger `opsin` with RDKit validation; common names/CIDs/synonyms/properties trigger `pubchem` with RDKit validation where structure matters.

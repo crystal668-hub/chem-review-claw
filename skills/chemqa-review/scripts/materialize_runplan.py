@@ -191,7 +191,7 @@ def render_role_prompt(
     python = current_python()
     state_snapshot_cmd = (
         f"{python} {root / 'scripts' / 'chemqa_review_state_snapshot.py'} "
-        f"--skill-root {root} --team {{team_name}} --agent {{agent_name}}"
+        f"--skill-root {root} --runtime-dir {runtime_root} --team {{team_name}} --agent {{agent_name}}"
     )
     role_intro = [
         f"You are chemqa-review role `{role_name}`.",

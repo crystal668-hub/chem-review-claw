@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 import hashlib
 import importlib.util
 import json
@@ -89,6 +90,82 @@ class TerminalFailure(RuntimeError):
     pass
 
 
+@dataclass
+class TurnOutcome:
+    returncode: int | None
+    stop_reason: str = ""
+    timed_out: bool = False
+    aborted: bool = False
+    hard_error: str = ""
+    transcript_path: str = ""
+    tool_call_count: int = 0
+    assistant_text_tail: str = ""
+    stdout_preview: str = ""
+    stderr_preview: str = ""
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "returncode": self.returncode,
+            "stop_reason": self.stop_reason,
+            "timed_out": self.timed_out,
+            "aborted": self.aborted,
+            "hard_error": self.hard_error,
+            "transcript_path": self.transcript_path,
+            "tool_call_count": self.tool_call_count,
+            "assistant_text_tail": self.assistant_text_tail,
+            "stdout_preview": self.stdout_preview,
+            "stderr_preview": self.stderr_preview,
+        }
+
+
+@dataclass
+class ArtifactOutcome:
+    state: str
+    filename: str
+    path: str
+    validation_errors: list[str] = field(default_factory=list)
+    normalized_text: str = ""
+    changed_since_turn: bool = False
+    classification: str = ""
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "filename": self.filename,
+            "path": self.path,
+            "validation_errors": list(self.validation_errors),
+            "normalized_text": self.normalized_text,
+            "changed_since_turn": self.changed_since_turn,
+            "classification": self.classification,
+        }
+
+
+@dataclass
+class PhaseAttemptState:
+    role: str
+    phase: str
+    artifact_kind: str
+    turn_index: int
+    max_phase_turns: int
+    classification: str
+    last_turn_outcome: TurnOutcome | None = None
+    last_artifact_outcome: ArtifactOutcome | None = None
+    last_feedback: str = ""
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "role": self.role,
+            "phase": self.phase,
+            "artifact_kind": self.artifact_kind,
+            "turn_index": self.turn_index,
+            "max_phase_turns": self.max_phase_turns,
+            "classification": self.classification,
+            "last_turn": self.last_turn_outcome.as_payload() if self.last_turn_outcome is not None else None,
+            "last_artifact": self.last_artifact_outcome.as_payload() if self.last_artifact_outcome is not None else None,
+            "last_feedback": self.last_feedback,
+        }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ChemQA-specific OpenClaw debate driver.")
     parser.add_argument("--skill-root", default=str(Path(__file__).resolve().parents[1]), help="chemqa-review skill root")
@@ -173,6 +250,8 @@ class ChemQAReviewDriver:
         self.last_recovery_payload: dict[str, Any] = {}
         self.last_respawn_events: list[dict[str, Any]] = []
         self.last_respawn_attempt_at: dict[str, float] = {}
+        self.last_turn_outcome: TurnOutcome | None = None
+        self.current_role_phase_state: PhaseAttemptState | None = None
         self.cleanroom_lease_handle = self._open_cleanroom_lease()
 
     def _lease_dir(self) -> str:
@@ -444,6 +523,9 @@ class ChemQAReviewDriver:
             "lane_failures": self.lane_failures,
             "repair_cycles_without_progress": self.repair_cycles_without_progress,
         }
+        current_role_phase_state = getattr(self, "current_role_phase_state", None)
+        if current_role_phase_state is not None:
+            payload["role_phase"] = current_role_phase_state.as_payload()
         for label, loader in (("status", self.status), ("next_action", self.next_action)):
             try:
                 payload[label] = loader()
@@ -485,9 +567,46 @@ class ChemQAReviewDriver:
             self.resolve_model_timeout_seconds(artifact_kind) + max(0, int(self.args.subprocess_timeout_grace_seconds)),
         )
 
-    def call_model(self, prompt_parts: list[str], *, artifact_kind: str) -> None:
+    @staticmethod
+    def _trim_preview(text: str, limit: int = 240) -> str:
+        stripped = " ".join((text or "").split())
+        if len(stripped) <= limit:
+            return stripped
+        return stripped[: limit - 3] + "..."
+
+    def turn_result_path(self) -> Path:
+        return self.workspace_path(".chemqa-turn-result.json")
+
+    def _load_turn_result(self) -> dict[str, Any]:
+        path = self.turn_result_path()
+        if not path.is_file():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _turn_outcome_from_sidecar(self, *, fallback_returncode: int, stdout: str, stderr: str) -> TurnOutcome:
+        payload = self._load_turn_result()
+        return TurnOutcome(
+            returncode=int(payload.get("returncode")) if payload.get("returncode") is not None else fallback_returncode,
+            stop_reason=str(payload.get("stop_reason") or ""),
+            timed_out=bool(payload.get("timed_out")),
+            aborted=bool(payload.get("aborted")),
+            hard_error=str(payload.get("hard_error") or ""),
+            transcript_path=str(payload.get("transcript_path") or ""),
+            tool_call_count=int(payload.get("tool_call_count") or 0),
+            assistant_text_tail=str(payload.get("assistant_text_tail") or ""),
+            stdout_preview=str(payload.get("stdout_preview") or self._trim_preview(stdout)),
+            stderr_preview=str(payload.get("stderr_preview") or self._trim_preview(stderr)),
+        )
+
+    def call_model(self, prompt_parts: list[str], *, artifact_kind: str) -> TurnOutcome:
         message = "\n\n---\n\n".join(part.strip() for part in self.maybe_include_initial_prompt(prompt_parts) if part.strip())
         model_timeout = self.resolve_model_timeout_seconds(artifact_kind)
+        turn_result_path = self.turn_result_path()
+        turn_result_path.unlink(missing_ok=True)
         command = [
             current_python(),
             str(self.base_wrapper_path),
@@ -501,6 +620,8 @@ class ChemQAReviewDriver:
             str(model_timeout),
             "--message",
             message,
+            "--turn-result-file",
+            str(turn_result_path),
         ]
         if self.args.config_file:
             command.extend(["--config-file", str(self.args.config_file)])
@@ -543,11 +664,18 @@ class ChemQAReviewDriver:
             raise DriverError(f"Failed to launch OpenClaw model turn for {self.args.role}: {exc}") from exc
         if artifact_kind == "candidate_submission":
             self.capture_valid_candidate_submission(self.workspace_path(proposal_filename()))
+        self.last_turn_outcome = self._turn_outcome_from_sidecar(
+            fallback_returncode=int(result.returncode),
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
         if result.returncode != 0:
+            self.last_turn_outcome.hard_error = self.last_turn_outcome.hard_error or "wrapper_nonzero_exit"
             raise DriverError(
                 f"OpenClaw model turn failed ({result.returncode}) for {self.args.role}.\n"
                 f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
             )
+        return self.last_turn_outcome
 
     @staticmethod
     def _is_timeout_error(exc: DriverError) -> bool:
@@ -589,6 +717,9 @@ class ChemQAReviewDriver:
                 "qualifying_candidate_reviews_count": len(qualifying_candidate_reviews(status_payload)),
             }
         )
+        current_role_phase_state = getattr(self, "current_role_phase_state", None)
+        if current_role_phase_state is not None:
+            payload["role_phase"] = current_role_phase_state.as_payload()
         blocker_path = self.workspace_path(BLOCKER_FILENAME)
         dump_json(blocker_path, payload)
         print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
@@ -710,6 +841,9 @@ class ChemQAReviewDriver:
             "repair_cycles_without_progress": self.repair_cycles_without_progress,
             "qualifying_candidate_reviews_count": len(qualifying_candidate_reviews(status_payload)),
         }
+        current_role_phase_state = getattr(self, "current_role_phase_state", None)
+        if current_role_phase_state is not None:
+            payload["role_phase"] = current_role_phase_state.as_payload()
         if engine_done:
             payload["protocol_terminal_state"] = str(status_payload.get("terminal_state") or "completed")
             payload["artifact_flow_state"] = "finalizing"
@@ -992,6 +1126,102 @@ class ChemQAReviewDriver:
             return ""
         return message.split("STDERR:\n", 1)[-1].strip() or message.strip()
 
+    def _build_artifact_feedback(
+        self,
+        *,
+        filename: str,
+        artifact_state: str,
+        last_errors: list[str],
+        minimal_template_lines: list[str] | None,
+    ) -> tuple[list[str], str, str]:
+        if artifact_state == "missing":
+            lines = [
+                "Previous turn ended normally, but the required artifact was not found.",
+                f"Required artifact: `{filename}`.",
+                "This phase is still in progress. Continue from your prior context.",
+                f"When ready, write `{filename}` in the current workspace.",
+            ]
+            return lines, "waiting_for_artifact", "The previous turn did not complete the phase because the artifact is still missing."
+        if artifact_state == "present_stale":
+            lines = [
+                f"The existing `{filename}` appears unchanged from before this turn.",
+                "This phase is still in progress. Continue from your prior context.",
+                f"Rewrite `{filename}` for the current phase instead of reusing the old file unchanged.",
+            ]
+            return lines, "repairing_stale_artifact", f"The existing `{filename}` must be rewritten for the current phase."
+        lines = [
+            f"The previous turn did not complete the phase because `{filename}` is present but still invalid.",
+            "Rewrite the file as pure YAML only.",
+            *(f"- {item}" for item in last_errors),
+        ]
+        if minimal_template_lines:
+            lines.extend([
+                "Use this minimal valid template shape:",
+                *minimal_template_lines,
+            ])
+        return lines, "repairing_invalid_artifact", f"The previous turn left an invalid `{filename}` artifact that still needs repair."
+
+    def _observe_artifact_outcome(
+        self,
+        *,
+        file_path: Path,
+        filename: str,
+        checker: Callable[[str], Any],
+        pre_call_snapshot: tuple[int, int, str] | None,
+        pre_call_normalized: str | None,
+        require_file_change: bool,
+    ) -> ArtifactOutcome:
+        if not file_path.is_file():
+            return ArtifactOutcome(
+                state="missing",
+                filename=filename,
+                path=str(file_path),
+                validation_errors=[],
+                normalized_text="",
+                changed_since_turn=False,
+                classification="incomplete_turn_no_artifact",
+            )
+        raw_text = file_path.read_text(encoding="utf-8")
+        checked = checker(raw_text)
+        normalized_text = str(checked.normalized_text or raw_text)
+        if checked.normalized_text:
+            file_path.write_text(checked.normalized_text, encoding="utf-8")
+        post_snapshot = self._file_snapshot(file_path)
+        changed_since_turn = post_snapshot != pre_call_snapshot
+        if checked.ok:
+            post_normalized = normalized_text.strip()
+            if require_file_change and pre_call_snapshot is not None:
+                if post_snapshot == pre_call_snapshot or (
+                    pre_call_normalized is not None and post_normalized == pre_call_normalized
+                ):
+                    return ArtifactOutcome(
+                        state="present_stale",
+                        filename=filename,
+                        path=str(file_path),
+                        validation_errors=[f"`{filename}` was not updated by model turn"],
+                        normalized_text=post_normalized,
+                        changed_since_turn=changed_since_turn,
+                        classification="artifact_stale",
+                    )
+            return ArtifactOutcome(
+                state="present_valid",
+                filename=filename,
+                path=str(file_path),
+                validation_errors=[],
+                normalized_text=post_normalized,
+                changed_since_turn=changed_since_turn,
+                classification="submitted",
+            )
+        return ArtifactOutcome(
+            state="present_invalid",
+            filename=filename,
+            path=str(file_path),
+            validation_errors=list(checked.errors),
+            normalized_text=normalized_text.strip(),
+            changed_since_turn=changed_since_turn,
+            classification="artifact_invalid",
+        )
+
     def attempt_model_artifact(
         self,
         *,
@@ -1009,6 +1239,7 @@ class ChemQAReviewDriver:
     ) -> Path:
         file_path = self.workspace_path(filename)
         last_errors: list[str] = []
+        last_turn_outcome = getattr(self, "last_turn_outcome", None)
         max_attempts = max(1, int(max_attempts_override or self.args.max_model_attempts))
         for attempt in range(1, max_attempts + 1):
             pre_call_snapshot = self._file_snapshot(file_path)
@@ -1019,19 +1250,21 @@ class ChemQAReviewDriver:
                 flush=True,
             )
             corrective = []
+            classification = "running"
+            feedback = ""
             if attempt > 1:
-                corrective = [
-                    f"Previous turn did not leave a valid pure-YAML `{filename}` file.",
-                    "Rewrite the file as pure YAML only.",
-                    *(f"- {item}" for item in last_errors),
-                ]
-                if minimal_template_lines:
-                    corrective.extend([
-                        "Use this minimal valid template shape:",
-                        *minimal_template_lines,
-                    ])
+                corrective, classification, feedback = self._build_artifact_feedback(
+                    filename=filename,
+                    artifact_state="missing" if not last_errors else (
+                        "present_stale"
+                        if any("not updated by model turn" in item for item in last_errors)
+                        else "present_invalid"
+                    ),
+                    last_errors=last_errors,
+                    minimal_template_lines=minimal_template_lines,
+                )
             try:
-                self.call_model([
+                turn_outcome = self.call_model([
                     *instructions,
                     *corrective,
                     "Behavior constraints for this turn:",
@@ -1041,8 +1274,30 @@ class ChemQAReviewDriver:
                     "Current state excerpt:",
                     pretty_json(next_action_payload),
                 ], artifact_kind=artifact_kind)
+                last_turn_outcome = turn_outcome
             except DriverError as exc:
+                turn_outcome = getattr(self, "last_turn_outcome", None) or last_turn_outcome or TurnOutcome(returncode=None, hard_error=str(exc))
+                last_turn_outcome = turn_outcome
                 if not self._is_timeout_error(exc):
+                    self.current_role_phase_state = PhaseAttemptState(
+                        role=self.args.role,
+                        phase=str(next_action_payload.get("phase") or status_payload.get("phase") or ""),
+                        artifact_kind=artifact_kind,
+                        turn_index=attempt,
+                        max_phase_turns=max_attempts,
+                        classification="failed_hard_error",
+                        last_turn_outcome=turn_outcome,
+                        last_artifact_outcome=ArtifactOutcome(
+                            state="missing",
+                            filename=filename,
+                            path=str(file_path),
+                            validation_errors=[],
+                            normalized_text="",
+                            changed_since_turn=False,
+                            classification="wrapper_hard_error",
+                        ),
+                        last_feedback=str(exc),
+                    )
                     raise
                 salvaged, timeout_errors = self.maybe_salvage_timed_out_artifact(
                     file_path=file_path,
@@ -1050,48 +1305,122 @@ class ChemQAReviewDriver:
                     artifact_kind=artifact_kind,
                 )
                 if salvaged:
+                    self.current_role_phase_state = PhaseAttemptState(
+                        role=self.args.role,
+                        phase=str(next_action_payload.get("phase") or status_payload.get("phase") or ""),
+                        artifact_kind=artifact_kind,
+                        turn_index=attempt,
+                        max_phase_turns=max_attempts,
+                        classification="submitted",
+                        last_turn_outcome=turn_outcome,
+                        last_artifact_outcome=ArtifactOutcome(
+                            state="present_valid",
+                            filename=filename,
+                            path=str(file_path),
+                            validation_errors=[],
+                            normalized_text=file_path.read_text(encoding="utf-8").strip(),
+                            changed_since_turn=True,
+                            classification="turn_timeout_artifact_salvaged",
+                        ),
+                        last_feedback="",
+                    )
                     return file_path
                 last_errors = timeout_errors
+                self.current_role_phase_state = PhaseAttemptState(
+                    role=self.args.role,
+                    phase=str(next_action_payload.get("phase") or status_payload.get("phase") or ""),
+                    artifact_kind=artifact_kind,
+                    turn_index=attempt,
+                    max_phase_turns=max_attempts,
+                    classification="waiting_for_artifact",
+                    last_turn_outcome=turn_outcome,
+                    last_artifact_outcome=ArtifactOutcome(
+                        state="missing",
+                        filename=filename,
+                        path=str(file_path),
+                        validation_errors=list(last_errors),
+                        normalized_text="",
+                        changed_since_turn=False,
+                        classification="turn_timeout_no_artifact",
+                    ),
+                    last_feedback="The previous turn timed out before producing a valid artifact.",
+                )
                 print(
                     f"{self.args.role}: timeout while producing {artifact_kind}: {'; '.join(last_errors)}",
                     file=sys.stderr,
                     flush=True,
                 )
                 continue
-            if not file_path.is_file():
-                last_errors = [f"missing `{filename}` after model turn"]
+            artifact_outcome = self._observe_artifact_outcome(
+                file_path=file_path,
+                filename=filename,
+                checker=checker,
+                pre_call_snapshot=pre_call_snapshot,
+                pre_call_normalized=pre_call_normalized,
+                require_file_change=require_file_change,
+            )
+            if artifact_outcome.state == "present_valid":
+                self.current_role_phase_state = PhaseAttemptState(
+                    role=self.args.role,
+                    phase=str(next_action_payload.get("phase") or status_payload.get("phase") or ""),
+                    artifact_kind=artifact_kind,
+                    turn_index=attempt,
+                    max_phase_turns=max_attempts,
+                    classification="submitted",
+                    last_turn_outcome=turn_outcome,
+                    last_artifact_outcome=artifact_outcome,
+                    last_feedback="",
+                )
+                return file_path
+            last_errors = list(artifact_outcome.validation_errors)
+            corrective, classification, feedback = self._build_artifact_feedback(
+                filename=filename,
+                artifact_state=artifact_outcome.state,
+                last_errors=last_errors,
+                minimal_template_lines=minimal_template_lines,
+            )
+            self.current_role_phase_state = PhaseAttemptState(
+                role=self.args.role,
+                phase=str(next_action_payload.get("phase") or status_payload.get("phase") or ""),
+                artifact_kind=artifact_kind,
+                turn_index=attempt,
+                max_phase_turns=max_attempts,
+                classification=classification,
+                last_turn_outcome=turn_outcome,
+                last_artifact_outcome=artifact_outcome,
+                last_feedback=feedback,
+            )
+            if artifact_outcome.state == "missing":
                 print(
                     f"{self.args.role}: missing `{filename}` after model turn for {artifact_kind}.",
                     file=sys.stderr,
                     flush=True,
                 )
                 continue
-            raw_text = file_path.read_text(encoding="utf-8")
-            checked = checker(raw_text)
-            if checked.normalized_text:
-                file_path.write_text(checked.normalized_text, encoding="utf-8")
-            if checked.ok:
-                if require_file_change and pre_call_snapshot is not None:
-                    post_call_snapshot = self._file_snapshot(file_path)
-                    post_call_normalized = str(checked.normalized_text or raw_text).strip()
-                    if post_call_snapshot == pre_call_snapshot or (
-                        pre_call_normalized is not None and post_call_normalized == pre_call_normalized
-                    ):
-                        last_errors = [f"`{filename}` was not updated by model turn"]
-                        print(
-                            f"{self.args.role}: stale `{filename}` was reused without changes for {artifact_kind}.",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        continue
-                return file_path
-            last_errors = list(checked.errors)
+            if artifact_outcome.state == "present_stale":
+                print(
+                    f"{self.args.role}: stale `{filename}` was reused without changes for {artifact_kind}.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
             print(
                 f"{self.args.role}: invalid {artifact_kind} in `{filename}`: {'; '.join(last_errors)}",
                 file=sys.stderr,
                 flush=True,
             )
         count = self.record_lane_failure(failure_key, reason=failure_reason, problems=last_errors)
+        self.current_role_phase_state = PhaseAttemptState(
+            role=self.args.role,
+            phase=str(next_action_payload.get("phase") or status_payload.get("phase") or ""),
+            artifact_kind=artifact_kind,
+            turn_index=max_attempts,
+            max_phase_turns=max_attempts,
+            classification="failed_budget_exhausted",
+            last_turn_outcome=last_turn_outcome,
+            last_artifact_outcome=getattr(getattr(self, "current_role_phase_state", None), "last_artifact_outcome", None),
+            last_feedback=f"{failure_reason}; phase budget exhausted.",
+        )
         if count >= self.args.lane_retry_budget:
             self.emit_terminal_failure(
                 reason=f"{failure_reason}; lane retry budget exhausted for {failure_key}",
@@ -1323,7 +1652,7 @@ class ChemQAReviewDriver:
                     "  - Based on first-principles NMR equivalence reasoning from the provided structure.",
                     "claim_anchors: []",
                 ],
-                max_attempts_override=1,
+                max_attempts_override=max_attempts,
                 require_file_change=True,
             )
             target = self.best_available_candidate_submission_path()
@@ -1624,6 +1953,12 @@ class ChemQAReviewDriver:
                 ], artifact_kind="coordinator_protocol")
             except DriverError as exc:
                 if not self._is_timeout_error(exc):
+                    last_turn = getattr(self, "last_turn_outcome", None)
+                    if last_turn is not None and last_turn.aborted:
+                        last_errors = [
+                            "coordinator model turn aborted before producing a refined protocol",
+                        ]
+                        break
                     raise
                 timeout_salvaged = True
                 print(

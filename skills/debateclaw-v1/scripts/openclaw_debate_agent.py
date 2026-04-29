@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thinking", choices=("off", "minimal", "low", "medium", "high", "xhigh"))
     parser.add_argument("--timeout", type=int, help="Forward OpenClaw agent timeout override (seconds).")
     parser.add_argument("--json", action="store_true", help="Forward OpenClaw JSON output.")
+    parser.add_argument("--turn-result-file", help="Optional JSON sidecar path for structured turn diagnostics.")
     return parser.parse_args()
 
 
@@ -368,6 +369,60 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             tmp_path.unlink()
 
 
+def load_session_entry_for_slot(slot: str) -> dict[str, Any]:
+    store = load_session_store(session_store_path_for_slot(slot))
+    for session_key in main_session_keys_for_slot(slot):
+        entry = store.get(session_key)
+        if isinstance(entry, dict):
+            return entry
+    return {}
+
+
+def _read_jsonl_lines(path: Path) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if not path.is_file():
+        return items
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            items.append(payload)
+    return items
+
+
+def summarize_turn_transcript(transcript_path: Path) -> dict[str, Any]:
+    stop_reason = ""
+    assistant_text_tail = ""
+    tool_call_count = 0
+    for item in _read_jsonl_lines(transcript_path):
+        message = item.get("message") if isinstance(item.get("message"), dict) else {}
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "") != "assistant":
+            continue
+        if not stop_reason:
+            stop_reason = str(message.get("stopReason") or "")
+        for content in message.get("content") or []:
+            if not isinstance(content, dict):
+                continue
+            if str(content.get("type") or "") == "toolCall":
+                tool_call_count += 1
+            if str(content.get("type") or "") == "text":
+                text = str(content.get("text") or "").strip()
+                if text:
+                    assistant_text_tail = " ".join(text.split())
+    return {
+        "stop_reason": stop_reason,
+        "tool_call_count": tool_call_count,
+        "assistant_text_tail": assistant_text_tail,
+    }
+
+
 def requested_model_for_slot(slot: str, *, config_path: Path | None = None) -> tuple[str | None, str | None]:
     config = load_openclaw_config(config_path or openclaw_config_path())
     agents = config.get("agents", {})
@@ -530,9 +585,34 @@ def main() -> int:
 
     lease_handle = None
     _, lease_handle = write_cleanroom_lease(slot=effective_slot, session_id=str(args.session_id or ""), status="starting")
+    started_at = datetime.now(timezone.utc).isoformat()
+
+    def write_turn_result(returncode: int, *, stdout: str = "", stderr: str = "") -> None:
+        turn_result_file = getattr(args, "turn_result_file", None)
+        if not turn_result_file:
+            return
+        session_entry = load_session_entry_for_slot(effective_slot)
+        transcript_path = Path(str(session_entry.get("sessionFile") or "")).expanduser().resolve() if session_entry.get("sessionFile") else None
+        transcript_summary = summarize_turn_transcript(transcript_path) if transcript_path is not None else {}
+        payload = {
+            "returncode": int(returncode),
+            "stop_reason": str(transcript_summary.get("stop_reason") or ""),
+            "timed_out": False,
+            "aborted": str(transcript_summary.get("stop_reason") or "") == "aborted",
+            "hard_error": "",
+            "transcript_path": str(transcript_path) if transcript_path is not None else "",
+            "tool_call_count": int(transcript_summary.get("tool_call_count") or 0),
+            "assistant_text_tail": str(transcript_summary.get("assistant_text_tail") or ""),
+            "stdout_preview": " ".join((stdout or "").split())[:240],
+            "stderr_preview": " ".join((stderr or "").split())[:240],
+            "started_at": started_at,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        atomic_write_json(Path(str(turn_result_file)).expanduser().resolve(), payload)
 
     try:
         result = subprocess.run(command, env=env, check=False)
+        write_turn_result(int(result.returncode))
         if lease_handle is not None and args.session_id:
             lease_handle.write(
                 run_id=os.environ.get("BENCHMARK_CLEANROOM_RUN_ID", ""),

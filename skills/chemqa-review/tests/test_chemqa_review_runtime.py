@@ -608,6 +608,31 @@ class MaterializeRunplanTest(unittest.TestCase):
         self.assertIn("result.json", prompt)
         self.assertIn("tool_trace", prompt)
 
+    def test_render_role_prompt_compact_snapshot_uses_same_runtime_dir(self) -> None:
+        run_plan = {
+            "run_id": "chemqa-review-test-run",
+            "request_snapshot": {"goal": "Check the state and produce a candidate."},
+            "prompt_assembly": {
+                "proposer-1": {
+                    "semantic_role": "candidate_owner",
+                    "contracts": ["prompts/contracts/proposer-main.md"],
+                    "modules": [],
+                },
+            },
+            "runtime_context": {},
+        }
+
+        prompt = materialize_runplan.render_role_prompt(
+            SKILL_ROOT,
+            run_plan,
+            role_name="proposer-1",
+            runtime_root="/tmp/runtime",
+        )
+
+        self.assertIn("--runtime-dir /tmp/runtime", prompt)
+        self.assertIn("/tmp/runtime/debate_state.py status", prompt)
+        self.assertIn("/tmp/runtime/debate_state.py next-action", prompt)
+
 
 class NativeWorkflowStateTest(unittest.TestCase):
     def test_chemqa_native_progress_and_next_action(self) -> None:
@@ -1208,6 +1233,121 @@ class OpenClawResolutionTest(unittest.TestCase):
         expected_prefix = str((Path("/tmp/node-bin")).resolve()) + os.pathsep
         self.assertTrue(str(captured["path"]).startswith(expected_prefix))
 
+    def test_wrapper_main_writes_turn_result_sidecar_from_session_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_config = Path(tmpdir) / "openclaw.json"
+            base_config.write_text(json.dumps({"agents": {"list": []}}, ensure_ascii=False), encoding="utf-8")
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text("", encoding="utf-8")
+            transcript_path = Path(tmpdir) / "chemqa-turn.jsonl"
+            transcript_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "message",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": "Let me check the current state before writing the artifact."}],
+                                    "stopReason": "stop",
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "type": "message",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{"type": "toolCall", "name": "read", "arguments": {"path": "state.json"}}],
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
+                ) + "\n",
+                encoding="utf-8",
+            )
+            turn_result_path = Path(tmpdir) / "turn-result.json"
+
+            original_parse_args = debate_wrapper_module.parse_args
+            original_parse_env_entries = debate_wrapper_module.parse_env_entries
+            original_reset_workspace = debate_wrapper_module.reset_slot_workspace_if_session_id_changed
+            original_reset_session = debate_wrapper_module.reset_slot_main_session_if_session_id_changed
+            original_create_runtime_config = debate_wrapper_module.create_debate_runtime_config
+            original_resolve_slot = debate_wrapper_module.resolve_effective_slot_id
+            original_resolve_openclaw = getattr(debate_wrapper_module, "resolve_openclaw_executable", None)
+            original_resolve_node = getattr(debate_wrapper_module, "resolve_node_executable", None)
+            original_session_store_path = debate_wrapper_module.session_store_path_for_slot
+            original_write_lease = debate_wrapper_module.write_cleanroom_lease
+            original_run = debate_wrapper_module.subprocess.run
+
+            try:
+                debate_wrapper_module.parse_args = lambda: argparse.Namespace(
+                    slot="debateA-1",
+                    session_id="chemqa-review-test-session",
+                    config_file=str(base_config),
+                    env_file=str(env_file),
+                    prompt=None,
+                    message="probe",
+                    thinking="high",
+                    timeout=None,
+                    json=False,
+                    turn_result_file=str(turn_result_path),
+                )
+                debate_wrapper_module.parse_env_entries = lambda _path: {}
+                debate_wrapper_module.reset_slot_workspace_if_session_id_changed = lambda *args, **kwargs: None
+                debate_wrapper_module.reset_slot_main_session_if_session_id_changed = lambda *args, **kwargs: None
+                debate_wrapper_module.create_debate_runtime_config = lambda *_args, **_kwargs: None
+                debate_wrapper_module.resolve_effective_slot_id = lambda *_args, **_kwargs: "debateA-1"
+                debate_wrapper_module.resolve_openclaw_executable = lambda **_kwargs: "/tmp/resolved-openclaw"
+                debate_wrapper_module.resolve_node_executable = lambda **_kwargs: "/tmp/resolved-node"
+                debate_wrapper_module.session_store_path_for_slot = lambda _slot: Path(tmpdir) / "sessions.json"
+                debate_wrapper_module.write_cleanroom_lease = lambda **_kwargs: (None, None)
+                (Path(tmpdir) / "sessions.json").write_text(
+                    json.dumps(
+                        {
+                            "agent:debatea-1:main": {
+                                "sessionId": "chemqa-review-test-session",
+                                "sessionFile": str(transcript_path),
+                            }
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                def fake_run(command, env=None, check=False):
+                    return subprocess.CompletedProcess(command, 0)
+
+                debate_wrapper_module.subprocess.run = fake_run
+                exit_code = debate_wrapper_module.main()
+            finally:
+                debate_wrapper_module.parse_args = original_parse_args
+                debate_wrapper_module.parse_env_entries = original_parse_env_entries
+                debate_wrapper_module.reset_slot_workspace_if_session_id_changed = original_reset_workspace
+                debate_wrapper_module.reset_slot_main_session_if_session_id_changed = original_reset_session
+                debate_wrapper_module.create_debate_runtime_config = original_create_runtime_config
+                debate_wrapper_module.resolve_effective_slot_id = original_resolve_slot
+                if original_resolve_openclaw is None:
+                    delattr(debate_wrapper_module, "resolve_openclaw_executable")
+                else:
+                    debate_wrapper_module.resolve_openclaw_executable = original_resolve_openclaw
+                if original_resolve_node is None:
+                    delattr(debate_wrapper_module, "resolve_node_executable")
+                else:
+                    debate_wrapper_module.resolve_node_executable = original_resolve_node
+                debate_wrapper_module.session_store_path_for_slot = original_session_store_path
+                debate_wrapper_module.write_cleanroom_lease = original_write_lease
+                debate_wrapper_module.subprocess.run = original_run
+
+                self.assertEqual(0, exit_code)
+                payload = json.loads(turn_result_path.read_text(encoding="utf-8"))
+                self.assertEqual("stop", payload["stop_reason"])
+                self.assertEqual(1, payload["tool_call_count"])
+                self.assertEqual(str(transcript_path.resolve()), payload["transcript_path"])
+                self.assertIn("check the current state", payload["assistant_text_tail"])
+
 
 class WorkerTimeoutSalvageTest(unittest.TestCase):
     def test_call_model_captures_valid_candidate_before_workspace_file_is_deleted(self) -> None:
@@ -1338,6 +1478,135 @@ class WorkerTimeoutSalvageTest(unittest.TestCase):
             self.assertEqual(review_path, recovered)
             self.assertTrue(review_path.is_file())
             self.assertIn("artifact_kind: formal_review", review_path.read_text(encoding="utf-8"))
+
+    def test_ensure_candidate_submission_continues_same_phase_after_missing_artifact_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+            driver.args = argparse.Namespace(
+                role="proposer-1",
+                team="chemqa-phase-loop",
+                lane_retry_budget=2,
+                max_model_attempts=2,
+                model_timeout_seconds=None,
+                candidate_timeout_seconds=None,
+                review_timeout_seconds=None,
+                rebuttal_timeout_seconds=None,
+                coordinator_timeout_seconds=None,
+                subprocess_timeout_grace_seconds=30,
+            )
+            driver.workspace = Path(tmpdir)
+            driver.initial_prompt = ""
+            driver.initial_prompt_used = False
+            driver.last_turn_outcome = None
+            driver.current_role_phase_state = None
+            proposal_path = driver.workspace / transport.proposal_filename()
+
+            turn_calls: list[list[str]] = []
+            lane_failure_calls: list[tuple[str, str, list[str] | None]] = []
+            submit_calls: list[str] = []
+            status_calls = {"count": 0}
+
+            def fake_call_model(prompt_parts: list[str], *, artifact_kind: str):
+                self.assertEqual("candidate_submission", artifact_kind)
+                turn_calls.append(list(prompt_parts))
+                if len(turn_calls) == 1:
+                    return driver_module.TurnOutcome(
+                        returncode=0,
+                        stop_reason="stop",
+                        timed_out=False,
+                        aborted=False,
+                        hard_error="",
+                        transcript_path="/tmp/session-1.jsonl",
+                        tool_call_count=1,
+                        assistant_text_tail="Let me check if the calculator skill is available.",
+                        stdout_preview="",
+                        stderr_preview="",
+                    )
+                proposal_path.write_text(
+                    "\n".join(
+                        [
+                            "artifact_kind: candidate_submission",
+                            "artifact_contract_version: react-reviewed-v2",
+                            "phase: propose",
+                            "owner: proposer-1",
+                            "direct_answer: NCCF",
+                            "summary: Wrote the candidate on the second turn.",
+                            "submission_trace:",
+                            "- step: structural_reasoning",
+                            "  status: success",
+                            "  detail: Completed after one exploratory turn.",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                return driver_module.TurnOutcome(
+                    returncode=0,
+                    stop_reason="stop",
+                    timed_out=False,
+                    aborted=False,
+                    hard_error="",
+                    transcript_path="/tmp/session-1.jsonl",
+                    tool_call_count=0,
+                    assistant_text_tail="Proposal written.",
+                    stdout_preview="",
+                    stderr_preview="",
+                )
+
+            driver.call_model = fake_call_model
+            driver.record_lane_failure = lambda failure_key, *, reason, problems=None: (
+                lane_failure_calls.append((failure_key, reason, problems)) or 1
+            )
+            driver.best_available_candidate_submission_path = lambda: proposal_path if proposal_path.is_file() else None
+            driver.submit_proposal = lambda path: submit_calls.append(path.read_text(encoding="utf-8")) or {"ok": True}
+            driver.status = lambda: (
+                {"phase": "propose", "epoch": 1, "proposals": []}
+                if status_calls.setdefault("count", 0) == 0
+                else {
+                    "phase": "propose",
+                    "epoch": 1,
+                    "proposals": [
+                        {
+                            "epoch": 1,
+                            "proposer": "proposer-1",
+                            "status": "active",
+                            "body": proposal_path.read_text(encoding="utf-8"),
+                        }
+                    ],
+                }
+            )
+            def fake_status():
+                status_calls["count"] += 1
+                if not proposal_path.is_file():
+                    return {"phase": "propose", "epoch": 1, "proposals": []}
+                return {
+                    "phase": "propose",
+                    "epoch": 1,
+                    "proposals": [
+                        {
+                            "epoch": 1,
+                            "proposer": "proposer-1",
+                            "status": "active",
+                            "body": proposal_path.read_text(encoding="utf-8"),
+                        }
+                    ],
+                }
+            driver.status = fake_status
+            progress_marks: list[str] = []
+            driver.mark_progress = lambda: progress_marks.append("progress")
+
+            driver_module.ChemQAReviewDriver.ensure_candidate_submission(
+                driver,
+                {"phase": "propose", "epoch": 1},
+                {"phase": "propose", "action": "propose"},
+            )
+
+            self.assertEqual(2, len(turn_calls))
+            self.assertEqual([], lane_failure_calls)
+            self.assertEqual(1, len(submit_calls))
+            self.assertEqual(["progress"], progress_marks)
+            second_prompt = "\n".join(turn_calls[1])
+            self.assertIn("required artifact", second_prompt.lower())
+            self.assertIn("phase is still in progress", second_prompt.lower())
 
 
 class DriverRespawnTest(unittest.TestCase):
@@ -1682,6 +1951,36 @@ class CoordinatorTimeoutSalvageTest(unittest.TestCase):
             self.assertEqual("high", protocol_payload["overall_confidence"]["level"])
             self.assertTrue(protocol_path.is_file())
 
+    def test_generate_protocol_with_model_falls_back_after_aborted_refinement(self) -> None:
+        helper = ProtocolReconstructionTest()
+        summary_payload = helper.build_summary()
+        deterministic_protocol = transport.build_protocol_from_summary(summary_payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+            driver.args = argparse.Namespace(max_model_attempts=1, role="debate-coordinator")
+            driver.workspace = Path(tmpdir)
+            driver.last_turn_outcome = driver_module.TurnOutcome(
+                returncode=0,
+                stop_reason="aborted",
+                aborted=True,
+            )
+
+            def fake_call_model(_prompt_parts: list[str], *, artifact_kind: str) -> None:
+                self.assertEqual("coordinator_protocol", artifact_kind)
+                raise driver_module.DriverError("Coordinator aborted before writing the refined protocol.")
+
+            driver.call_model = fake_call_model
+
+            protocol_payload, generation_mode = driver_module.ChemQAReviewDriver.generate_protocol_with_model(
+                driver,
+                summary_payload=summary_payload,
+                deterministic_protocol=deterministic_protocol,
+            )
+
+            self.assertEqual("deterministic_fallback", generation_mode)
+            self.assertEqual(deterministic_protocol["acceptance_status"], protocol_payload["acceptance_status"])
+
 
 class RunStatusShapeTest(unittest.TestCase):
     def test_ensure_candidate_submission_retries_after_duplicate_epoch_submission(self) -> None:
@@ -1800,6 +2099,62 @@ class RunStatusShapeTest(unittest.TestCase):
             self.assertEqual("running", payload["terminal_state"])
             self.assertEqual("engine_terminal_failure", payload["terminal_reason_code"])
             self.assertEqual("engine stopped", payload["terminal_reason"])
+
+    def test_sync_run_status_includes_role_phase_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+            driver.args = argparse.Namespace(team="chemqa-review-run-status", role="proposer-1")
+            driver.lane_failures = {}
+            driver.reviewer_exit_state = lambda: {}
+            driver.repair_cycles_without_progress = 0
+            driver.last_recovery_payload = {}
+            driver.last_respawn_events = []
+            driver.all_tasks = lambda: []
+            driver.last_progress_change = 0.0
+            driver.last_progress_key = ""
+            driver.current_role_phase_state = driver_module.PhaseAttemptState(
+                role="proposer-1",
+                phase="propose",
+                artifact_kind="candidate_submission",
+                turn_index=2,
+                max_phase_turns=4,
+                classification="waiting_for_artifact",
+                last_turn_outcome=driver_module.TurnOutcome(
+                    returncode=0,
+                    stop_reason="stop",
+                    timed_out=False,
+                    aborted=False,
+                    hard_error="",
+                    transcript_path="/tmp/sess.jsonl",
+                    tool_call_count=1,
+                    assistant_text_tail="Let me check if the calculator skill is available.",
+                    stdout_preview="",
+                    stderr_preview="",
+                ),
+                last_artifact_outcome=driver_module.ArtifactOutcome(
+                    state="missing",
+                    filename="proposal.yaml",
+                    path="/tmp/proposal.yaml",
+                    validation_errors=[],
+                    normalized_text="",
+                    changed_since_turn=False,
+                    classification="incomplete_turn_no_artifact",
+                ),
+                last_feedback="The previous turn did not complete the phase because the artifact is still missing.",
+            )
+            store = driver_module.FileControlStore(Path(tmpdir))
+            driver.store = store
+
+            driver_module.ChemQAReviewDriver.sync_run_status(
+                driver,
+                {"status": "running", "phase": "propose"},
+                {"action": "propose", "advance_ready": False, "message": "continue"},
+            )
+
+            payload = json.loads((store.control / "run-status" / "chemqa-review-run-status.json").read_text(encoding="utf-8"))
+            self.assertEqual("waiting_for_artifact", payload["role_phase"]["classification"])
+            self.assertEqual("missing", payload["role_phase"]["last_artifact"]["state"])
+            self.assertEqual("stop", payload["role_phase"]["last_turn"]["stop_reason"])
 
     def test_emit_terminal_failure_writes_done_failed_reason_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
