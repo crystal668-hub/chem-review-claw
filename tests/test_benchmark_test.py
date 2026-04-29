@@ -912,62 +912,49 @@ Points: 0.5, Item: Second criterion
         prompt = benchmark_test.build_single_llm_prompt(record, websearch_enabled=False, input_bundle=None)
         self.assertIn("FINAL ANSWER: <SMILES>", prompt)
 
-    def test_build_single_llm_prompt_frontierscience_routes_numeric_work_to_chem_calculator(self) -> None:
-        record = benchmark_test.BenchmarkRecord(
-            record_id="fs-1",
-            dataset="frontierscience",
-            source_file="/tmp/frontierscience.jsonl",
-            eval_kind="frontierscience_olympiad",
-            prompt="Calculate the pH of a buffer from the supplied concentrations.",
-            reference_answer="4.7",
-            payload={"track": "olympiad"},
-        )
+    def test_build_single_llm_prompt_does_not_inject_provider_skill_routing(self) -> None:
+        records = [
+            benchmark_test.BenchmarkRecord(
+                record_id="fs-1",
+                dataset="frontierscience",
+                source_file="/tmp/frontierscience.jsonl",
+                eval_kind="frontierscience_olympiad",
+                prompt="Calculate the pH of a buffer from the supplied concentrations.",
+                reference_answer="4.7",
+                payload={"track": "olympiad"},
+            ),
+            benchmark_test.BenchmarkRecord(
+                record_id="sc-1",
+                dataset="superchem",
+                source_file="/tmp/superchem.jsonl",
+                eval_kind="superchem_multiple_choice_rpf",
+                prompt="Which option matches the molecule shown?",
+                reference_answer="A",
+                payload={"modality": "text_only"},
+            ),
+            benchmark_test.BenchmarkRecord(
+                record_id="cb-1",
+                dataset="conformabench",
+                source_file="/tmp/conformabench.jsonl",
+                eval_kind="conformabench_constructive",
+                prompt="Design a molecule.",
+                reference_answer="Points: 1.0, Item: ok",
+                payload={},
+            ),
+        ]
 
-        prompt = benchmark_test.build_single_llm_prompt(record, websearch_enabled=True, input_bundle=None)
-
-        self.assertIn("chem-calculator", prompt)
-        self.assertIn(str(benchmark_test.runtime_paths.skills_root / "chem-calculator"), prompt)
-        self.assertIn("must use `chem-calculator`", prompt)
-        self.assertIn("If you skip a triggered chemistry skill", prompt)
-        self.assertIn("why it was skipped", prompt)
-
-    def test_build_single_llm_prompt_superchem_routes_structure_work_to_provider_skills(self) -> None:
-        record = benchmark_test.BenchmarkRecord(
-            record_id="sc-1",
-            dataset="superchem",
-            source_file="/tmp/superchem.jsonl",
-            eval_kind="superchem_multiple_choice_rpf",
-            prompt="Which option matches the molecule shown?",
-            reference_answer="A",
-            payload={"modality": "text_only"},
-        )
-
-        prompt = benchmark_test.build_single_llm_prompt(record, websearch_enabled=False, input_bundle=None)
-
-        self.assertIn("must use `rdkit`", prompt)
-        self.assertIn("must use `opsin`", prompt)
-        self.assertIn("must use `pubchem`", prompt)
-        self.assertIn(str(benchmark_test.runtime_paths.skills_root / "rdkit"), prompt)
-        self.assertIn(str(benchmark_test.runtime_paths.skills_root / "opsin"), prompt)
-        self.assertIn(str(benchmark_test.runtime_paths.skills_root / "pubchem"), prompt)
-        self.assertIn("If you skip a triggered chemistry skill", prompt)
-
-    def test_build_single_llm_prompt_conformabench_routes_smiles_work_to_rdkit(self) -> None:
-        record = benchmark_test.BenchmarkRecord(
-            record_id="cb-1",
-            dataset="conformabench",
-            source_file="/tmp/conformabench.jsonl",
-            eval_kind="conformabench_constructive",
-            prompt="Design a molecule.",
-            reference_answer="Points: 1.0, Item: ok",
-            payload={},
-        )
-
-        prompt = benchmark_test.build_single_llm_prompt(record, websearch_enabled=False, input_bundle=None)
-
-        self.assertIn("must use `rdkit`", prompt)
-        self.assertIn(str(benchmark_test.runtime_paths.skills_root / "rdkit"), prompt)
-        self.assertIn("FINAL ANSWER: <SMILES>", prompt)
+        for record in records:
+            with self.subTest(eval_kind=record.eval_kind):
+                prompt = benchmark_test.build_single_llm_prompt(record, websearch_enabled=False, input_bundle=None)
+                self.assertNotIn("Chemistry provider skill routing", prompt)
+                self.assertNotIn("must use `chem-calculator`", prompt)
+                self.assertNotIn("must use `rdkit`", prompt)
+                self.assertNotIn("must use `opsin`", prompt)
+                self.assertNotIn("must use `pubchem`", prompt)
+                self.assertNotIn(str(benchmark_test.runtime_paths.skills_root / "chem-calculator"), prompt)
+                self.assertNotIn(str(benchmark_test.runtime_paths.skills_root / "rdkit"), prompt)
+                self.assertNotIn(str(benchmark_test.runtime_paths.skills_root / "opsin"), prompt)
+                self.assertNotIn(str(benchmark_test.runtime_paths.skills_root / "pubchem"), prompt)
 
     def test_build_chemqa_goal_conformabench_requires_smiles_final_line(self) -> None:
         record = benchmark_test.BenchmarkRecord(

@@ -11,7 +11,6 @@
   - `DONE`: Score outputs with registered evaluators for ChemBench, FrontierScience Olympiad/Research, ConformaBench, SuperChem, and generic semantic matching via `workspace/benchmark_test.py` and `workspace/benchmarking/evaluation.py`.
   - `DONE`: Provision run-scoped OpenClaw configs and DebateClaw/ChemQA slot workspaces via `workspace/benchmarking/config_renderer.py`, `workspace/benchmarking/provisioning.py`, and `workspace/benchmark_test.py`.
   - `DONE`: Run a single-agent OpenClaw baseline by shelling out to `openclaw agent` via `workspace/benchmarking/runners/single_llm.py`.
-  - `DONE`: Inject deterministic chemistry provider routing into single-agent benchmark prompts, including local skill roots and skip-reason requirements for triggered `chem-calculator`, `rdkit`, `opsin`, and `pubchem` usage.
   - `DONE`: Run a ChemQA multi-agent workflow by compiling/materializing a ChemQA launch, monitoring run-status, rebuilding artifacts, archiving outputs, and cleaning runtime leftovers via `workspace/benchmarking/runners/chemqa.py`.
   - `DONE`: Manage DebateClaw V1 runtime, slot provisioning, prompt/materialization, and launch commands via `workspace/skills/debateclaw-v1/scripts/*.py`.
   - `DONE`: Maintain live debate protocol state in SQLite and expose CLI commands for init/status/next-action/submit/advance via `workspace/skills/debateclaw-v1/scripts/debate_state.py`.
@@ -201,7 +200,7 @@
   - Status: `DONE`
 
 - Name: Single-agent OpenClaw baseline runner
-  - Description: Builds prompt, injects chemistry provider skill routing for local deterministic tools, shells out to `openclaw agent --local`, unwraps JSON payload, normalizes answer tracks.
+  - Description: Builds prompt, shells out to `openclaw agent --local`, unwraps JSON payload, normalizes answer tracks.
   - Input / Output:
     - Input: benchmark record, group config, runtime bundle root.
     - Output: `RunnerResult`.
@@ -424,7 +423,6 @@
   - For `single_llm_*` groups:
     - The runner shells out directly to `openclaw agent --local ... --json`.
     - It does not use a native Python OpenClaw API.
-    - `build_single_llm_prompt()` includes local skill roots and explicit trigger rules for `chem-calculator`, `rdkit`, `opsin`, and `pubchem`; if a triggered skill is skipped, the model is instructed to state the trigger and skip reason before the final answer.
   - For `chemqa_*` groups:
     - The runner shells out to ChemQA skill scripts to compile/materialize/launch the run.
     - It monitors run status via files under `chemqa-review/control/run-status/`.

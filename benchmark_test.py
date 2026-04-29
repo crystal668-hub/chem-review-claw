@@ -1345,48 +1345,6 @@ def ensure_runtime_bundle(record: BenchmarkRecord, *, bundle_root: Path) -> Runt
     return RuntimeBundle(bundle_dir=bundle_dir, question_markdown=question_markdown, image_files=image_files)
 
 
-def build_chemistry_provider_routing_lines(record: BenchmarkRecord) -> list[str]:
-    skill_roots = {
-        "chem-calculator": runtime_paths.skills_root / "chem-calculator",
-        "rdkit": runtime_paths.skills_root / "rdkit",
-        "opsin": runtime_paths.skills_root / "opsin",
-        "pubchem": runtime_paths.skills_root / "pubchem",
-    }
-    lines = [
-        "Chemistry provider skill routing:",
-        "These local skill bundles are available. When a route below is triggered, read that bundle's `SKILL.md` before running its scripts and cite the generated `result.json` or structured tool output in your reasoning.",
-        f"- `chem-calculator`: {skill_roots['chem-calculator']}",
-        f"- `rdkit`: {skill_roots['rdkit']}",
-        f"- `opsin`: {skill_roots['opsin']}",
-        f"- `pubchem`: {skill_roots['pubchem']}",
-        "- Numeric, stoichiometric, concentration, equilibrium, acid/base, gas-law, electrochemistry, unit-conversion, or formula-math subproblems with supplied givens -> must use `chem-calculator` before relying on mental arithmetic or web search.",
-        "- SMILES, molecular formula, molecular mass, ring count, unsaturation, chirality, stereochemistry, substructure, conformer, or structure-constraint checks -> must use `rdkit`.",
-        "- IUPAC or systematic names -> must use `opsin`, then validate with `rdkit` when structure matters.",
-        "- Common names, CIDs, synonyms, public compound properties, or external compound identifiers -> must use `pubchem`, then validate with `rdkit` when possible.",
-        "- If you skip a triggered chemistry skill, state which trigger fired and why it was skipped before the FINAL ANSWER line.",
-    ]
-
-    if record.eval_kind == "frontierscience_olympiad":
-        lines.extend(
-            [
-                "- FrontierScience numeric prompts usually trigger `chem-calculator` when the givens are present.",
-            ]
-        )
-    elif record.eval_kind == "superchem_multiple_choice_rpf":
-        lines.extend(
-            [
-                "- For SuperChem, extract available SMILES/name text from the question bundle first, then route structure and nomenclature checks through `rdkit`, `opsin`, and `pubchem` as triggered.",
-            ]
-        )
-    elif record.eval_kind == "conformabench_constructive":
-        lines.extend(
-            [
-                "- ConformaBench constructive prompts require `rdkit` for SMILES validity, topology, valence, stereochemistry, and constraint checks before finalizing the submitted SMILES.",
-            ]
-        )
-    return lines
-
-
 def build_single_llm_prompt(
     record: BenchmarkRecord,
     *,
@@ -1401,7 +1359,6 @@ def build_single_llm_prompt(
         instructions.append("You may use web search if it is genuinely helpful.")
     else:
         instructions.append("Do not use web search or external browsing.")
-    instructions.extend(build_chemistry_provider_routing_lines(record))
 
     if record.eval_kind == "superchem_multiple_choice_rpf":
         instructions.append("This is a chemistry multiple-choice question.")
