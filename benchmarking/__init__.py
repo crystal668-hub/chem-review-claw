@@ -7,6 +7,7 @@ from .contracts import (
 )
 from .datasets import BenchmarkRecord, GradingSpec
 from .evaluation import EVALUATORS, EvaluationRegistryError, evaluate_record, register_evaluator
+from .evaluators import EvaluationResult
 from .experiments import ExperimentSpec
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "BenchmarkRecord",
     "EVALUATORS",
     "EvaluationRegistryError",
+    "EvaluationResult",
     "ExperimentSpec",
     "FailureInfo",
     "GradingSpec",

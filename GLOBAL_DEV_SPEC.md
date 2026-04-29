@@ -8,7 +8,7 @@
 - Current capabilities (ONLY what works)
   - `DONE`: Run benchmark batches across four experiment groups: `chemqa_web_on`, `chemqa_web_off`, `single_llm_web_on`, `single_llm_web_off` via `workspace/benchmark_test.py`.
   - `DONE`: Load benchmark JSONL datasets into a normalized `BenchmarkRecord` model via `workspace/benchmarking/datasets.py`.
-  - `DONE`: Score outputs with registered evaluators for ChemBench, FrontierScience Olympiad/Research, ConformaBench, SuperChem, and generic semantic matching via `workspace/benchmark_test.py` and `workspace/benchmarking/evaluation.py`.
+  - `DONE`: Score outputs with registered evaluators for ChemBench, FrontierScience Olympiad/Research, ConformaBench, SuperChem, and generic semantic matching via `workspace/benchmarking/evaluators.py` and `workspace/benchmarking/evaluation.py`.
   - `DONE`: Provision run-scoped OpenClaw configs and DebateClaw/ChemQA slot workspaces via `workspace/benchmarking/runtime_config.py`, `workspace/benchmarking/config_renderer.py`, and `workspace/benchmarking/provisioning.py`.
   - `DONE`: Run a single-agent OpenClaw baseline by shelling out to `openclaw agent` via `workspace/benchmarking/runners/single_llm.py`.
   - `DONE`: Run a ChemQA multi-agent workflow by compiling/materializing a ChemQA launch, monitoring benchmark-visible run-status, consuming canonical Artifact Flow outputs, archiving outputs, and cleaning runtime leftovers via `workspace/benchmarking/runners/chemqa.py`.
@@ -55,6 +55,8 @@
       - Normalizes benchmark records from JSONL.
     - `evaluation.py`
       - Registry/dispatch for evaluator functions.
+    - `evaluators.py`
+      - Implements benchmark scoring functions, answer parsing helpers, and the `EvaluationResult` payload.
     - `experiments.py`
       - Defines `ExperimentSpec`.
     - `config_renderer.py`
@@ -74,7 +76,7 @@
       - `chemqa.py`: ChemQA launch/monitor/archive/cleanup runner.
   - `workspace/benchmark_test.py`
     - Main four-group benchmark CLI.
-    - Also contains benchmark-specific evaluators, runtime bundle helpers, cleanup registration, runner wiring, and compatibility wrappers for runtime config helpers.
+    - Also contains runtime bundle helpers, cleanup registration, runner wiring, and compatibility wrappers for runtime config and evaluator helpers.
   - `workspace/conformabench_judge.py`
     - RDKit-based hidden judge for constructive molecular answers.
   - `workspace/runtime_paths.py`
@@ -146,7 +148,7 @@
   - Input / Output:
     - Input: `BenchmarkRecord`, short/full answer text, judge object.
     - Output: evaluator payload/dataclass.
-  - Implementation location: `workspace/benchmarking/evaluation.py`
+  - Implementation location: `workspace/benchmarking/evaluation.py`, `workspace/benchmarking/evaluators.py`
   - Status: `DONE`
 
 - Name: ChemBench open-ended scoring
@@ -154,7 +156,7 @@
   - Input / Output:
     - Input: `BenchmarkRecord`, model answer text.
     - Output: `EvaluationResult`.
-  - Implementation location: `workspace/benchmark_test.py`
+  - Implementation location: `workspace/benchmarking/evaluators.py`
   - Status: `DONE`
 
 - Name: FrontierScience Olympiad scoring
@@ -162,7 +164,7 @@
   - Input / Output:
     - Input: record + answer text.
     - Output: `EvaluationResult`.
-  - Implementation location: `workspace/benchmark_test.py`
+  - Implementation location: `workspace/benchmarking/evaluators.py`
   - Status: `DONE`
 
 - Name: FrontierScience Research scoring
@@ -170,7 +172,7 @@
   - Input / Output:
     - Input: record + answer text.
     - Output: `EvaluationResult`.
-  - Implementation location: `workspace/benchmark_test.py`
+  - Implementation location: `workspace/benchmarking/evaluators.py`
   - Status: `DONE`
 
 - Name: SuperChem multimodal scoring
@@ -178,7 +180,7 @@
   - Input / Output:
     - Input: record + answer text.
     - Output: `EvaluationResult`.
-  - Implementation location: `workspace/benchmark_test.py`
+  - Implementation location: `workspace/benchmarking/evaluators.py`
   - Status: `DONE`
 
 - Name: ConformaBench hidden judge
@@ -499,7 +501,7 @@
 
 - Shortcuts, hacks, implicit logic
   - Benchmark scripts duplicate a large amount of logic that also exists in `workspace/benchmarking/*`; the package is not the sole orchestration layer.
-  - `benchmark_test.py` contains direct JSON parsing, subprocess wrappers, cleanup wiring, evaluator implementations, and answer extraction helpers instead of delegating all logic to package modules, though ChemQA run-status normalization/result-axis derivation, benchmark prompt construction, and runtime config orchestration now live in `workspace/benchmarking/status.py`, `workspace/benchmarking/prompts.py`, and `workspace/benchmarking/runtime_config.py`.
+  - `benchmark_test.py` contains direct JSON parsing, subprocess wrappers, cleanup wiring, and runner glue instead of delegating all logic to package modules, though ChemQA run-status normalization/result-axis derivation, benchmark prompt construction, runtime config orchestration, and evaluator implementations now live in `workspace/benchmarking/status.py`, `workspace/benchmarking/prompts.py`, `workspace/benchmarking/runtime_config.py`, and `workspace/benchmarking/evaluators.py`.
   - Native workflow package support exists as inactive scaffold metadata, but current live ChemQA execution bypasses it in favor of CLI/state-script orchestration.
   - Run-scoped OpenClaw configs are produced by mutating a copy of the user’s local `~/.openclaw/openclaw.json`.
   - Recovery and artifact collection rely on specific file naming conventions such as `proposer-1.md`, `chemqa_review_protocol.yaml`, `qa_result.json`.
