@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from bundle_common import default_runtime_dir, dump_json, load_module_from_path, resolve_clawteam_executable, resolve_skill_root
 from bundle_common import resolve_python_interpreter
+from chemqa_artifact_flow import finalize_failure, resolve_answer_kind
 from chemqa_review_artifacts import (
     CANDIDATE_OWNER,
     ROLE_TO_SEMANTIC_ROLE,
@@ -403,7 +404,11 @@ class ChemQAReviewDriver:
         if self.args.role != CANDIDATE_OWNER or not source_path.is_file():
             return None
         try:
-            checked = check_candidate_submission(source_path.read_text(encoding="utf-8"), owner=self.args.role)
+            checked = check_candidate_submission(
+                source_path.read_text(encoding="utf-8"),
+                owner=self.args.role,
+                answer_kind=self.answer_kind(),
+            )
         except OSError:
             return None
         if not checked.ok:
@@ -419,7 +424,7 @@ class ChemQAReviewDriver:
         for path in candidates:
             if not path.is_file():
                 continue
-            checked = check_candidate_submission(path.read_text(encoding="utf-8"), owner=self.args.role)
+            checked = check_candidate_submission(path.read_text(encoding="utf-8"), owner=self.args.role, answer_kind=self.answer_kind())
             if not checked.ok:
                 continue
             if checked.normalized_text and path == self.workspace_path(proposal_filename()):
@@ -632,18 +637,38 @@ class ChemQAReviewDriver:
             }
             protocol_text = check_protocol(json.dumps(protocol_payload, ensure_ascii=False)).normalized_text
             protocol_path.write_text(protocol_text, encoding="utf-8")
+        skill_root = getattr(self, "skill_root", None)
+        output_root = Path(skill_root) if skill_root is not None else self.store.root
+        output_dir = output_root / "generated" / "artifacts" / self.args.team
+        failure = finalize_failure(
+            run_id=self.args.team,
+            output_dir=output_dir,
+            failure_code="terminal_failure",
+            failure_message=reason,
+            missing_artifacts=[],
+            validation_errors=[],
+            open_review_items=[],
+            diagnostic_paths=[str(failure_path)],
+        )
         self.store.update_run_status(
             self.args.team,
             {
                 "run_id": self.args.team,
                 "status": "done",
+                "protocol_terminal_state": "failed",
+                "artifact_flow_state": "finalization_failed",
+                "benchmark_terminal_state": "failed",
                 "terminal_state": "failed",
                 "terminal_reason_code": "terminal_failure",
                 "terminal_reason": reason,
                 "role": self.args.role,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "reason": reason,
-                "failure_artifact_path": str(failure_path),
+                "transport_failure_artifact_path": str(failure_path),
+                "failure_artifact_path": failure.status_overlay["failure_artifact_path"],
+                "artifact_manifest_path": failure.status_overlay["artifact_manifest_path"],
+                "qa_result_path": failure.status_overlay["qa_result_path"],
+                "artifact_paths": failure.artifact_paths,
                 "lane_failures": self.lane_failures,
                 "reviewer_exit_reasons": self.reviewer_exit_state(),
                 "repair_cycles_without_progress": self.repair_cycles_without_progress,
@@ -666,7 +691,7 @@ class ChemQAReviewDriver:
         engine_done = str(status_payload.get("status") or "") == "done"
         payload: dict[str, Any] = {
             "run_id": self.args.team,
-            "status": "done" if engine_done else "running",
+            "status": "running",
             "role": self.args.role,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "phase": status_payload.get("phase"),
@@ -686,11 +711,14 @@ class ChemQAReviewDriver:
             "qualifying_candidate_reviews_count": len(qualifying_candidate_reviews(status_payload)),
         }
         if engine_done:
-            payload["terminal_state"] = str(status_payload.get("terminal_state") or "completed")
+            payload["protocol_terminal_state"] = str(status_payload.get("terminal_state") or "completed")
+            payload["artifact_flow_state"] = "finalizing"
+            payload["benchmark_terminal_state"] = "running"
+            payload["terminal_state"] = "running"
             failure_reason = str(status_payload.get("failure_reason") or "").strip()
             if failure_reason:
                 payload["terminal_reason"] = failure_reason
-                if payload["terminal_state"] == "failed":
+                if payload["protocol_terminal_state"] == "failed":
                     payload["terminal_reason_code"] = "engine_terminal_failure"
         if self.last_recovery_payload:
             payload["last_recovery"] = self.last_recovery_payload
@@ -1147,12 +1175,16 @@ class ChemQAReviewDriver:
         if post["phase_signature"] != pre["phase_signature"]:
             self.mark_progress()
             return None
+        if self.recovery_payload_indicates_progress(recovery):
+            self.mark_progress()
+            return None
 
         blockers = list(recovery.get("blockers") or [])
         missing_lanes = missing_required_reviewer_lanes(refreshed_status)
         candidate_checked = check_candidate_submission(
             self.candidate_submission_text(refreshed_status),
             owner=CANDIDATE_OWNER,
+            answer_kind=self.answer_kind(),
         )
         phase = str(refreshed_next.get("phase") or refreshed_status.get("phase") or "")
         if phase == "review" and missing_lanes and candidate_checked.ok:
@@ -1225,6 +1257,21 @@ class ChemQAReviewDriver:
         self.last_recovery_payload = payload if isinstance(payload, dict) else {}
         return payload
 
+    @staticmethod
+    def recovery_payload_indicates_progress(payload: dict[str, Any]) -> bool:
+        if bool(payload.get("progress_made")):
+            return True
+        actions = [str(item or "").strip() for item in (payload.get("actions") or [])]
+        progress_prefixes = (
+            "respawn-role ",
+            "submit-proposal ",
+            "submit-review ",
+            "submit-rebuttal ",
+            "advance ",
+            "repair-invalid-review-state ",
+        )
+        return any(action.startswith(progress_prefixes) for action in actions)
+
     def ensure_placeholder_submission(self, status_payload: dict[str, Any]) -> None:
         if current_proposal(status_payload, self.args.role):
             return
@@ -1255,7 +1302,7 @@ class ChemQAReviewDriver:
             self.attempt_model_artifact(
                 filename=proposal_filename(),
                 instructions=instructions,
-                checker=lambda text: check_candidate_submission(text, owner=self.args.role),
+                checker=lambda text: check_candidate_submission(text, owner=self.args.role, answer_kind=self.answer_kind()),
                 artifact_kind="candidate_submission",
                 failure_key="propose:candidate",
                 failure_reason=f"{self.args.role} failed to produce a valid candidate submission",
@@ -1626,6 +1673,25 @@ class ChemQAReviewDriver:
             protocol_path.write_text(checked.normalized_text, encoding="utf-8")
 
         output_dir = self.skill_root / "generated" / "artifacts" / self.args.team
+        answer_kind = resolve_answer_kind(self.runtime_answer_metadata())
+        self.store.update_run_status(
+            self.args.team,
+            {
+                "run_id": self.args.team,
+                "status": "running",
+                "role": self.args.role,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "protocol_terminal_state": str(protocol_payload.get("terminal_state") or "completed"),
+                "artifact_flow_state": "finalizing",
+                "benchmark_terminal_state": "running",
+                "terminal_state": "running",
+                "protocol_generation_mode": protocol_generation_mode,
+                "protocol_path": str(protocol_path),
+                "workspace_protocol_path": str(workspace_protocol_path),
+                "artifacts_output_dir": str(output_dir),
+                "answer_kind": answer_kind,
+            },
+        )
         collect_payload: dict[str, Any] = {}
         collect_error = ""
         collect_script = self.skill_root / "scripts" / "collect_artifacts.py"
@@ -1641,6 +1707,8 @@ class ChemQAReviewDriver:
             str(protocol_path),
             "--output-dir",
             str(output_dir),
+            "--answer-kind",
+            answer_kind,
             "--json",
         ]
         result = subprocess.run(command, env=self.env, check=False, capture_output=True, text=True)
@@ -1670,6 +1738,9 @@ class ChemQAReviewDriver:
         run_status_payload = {
             "run_id": self.args.team,
             "status": "done",
+            "protocol_terminal_state": str(protocol_payload.get("terminal_state") or "completed"),
+            "artifact_flow_state": "finalized",
+            "benchmark_terminal_state": "completed",
             "terminal_state": "completed",
             "role": self.args.role,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1680,18 +1751,54 @@ class ChemQAReviewDriver:
             "workspace_protocol_path": str(workspace_protocol_path),
             "artifacts_output_dir": str(output_dir),
             "final_answer_preview": final_answer_preview,
+            "answer_kind": answer_kind,
             "artifact_collection": {
                 "status": "error" if collect_error else "ok",
             },
         }
         if collect_payload:
             run_status_payload["artifact_paths"] = collect_payload.get("artifact_paths") or {}
+            status_overlay = collect_payload.get("status_overlay") if isinstance(collect_payload.get("status_overlay"), dict) else {}
+            for key, value in status_overlay.items():
+                if key in {"status", "protocol_terminal_state", "artifact_flow_state", "benchmark_terminal_state", "terminal_state", "qa_result_path", "final_answer_artifact_path", "failure_artifact_path", "artifact_manifest_path", "candidate_view_path", "artifacts_output_dir", "artifact_paths"}:
+                    run_status_payload[key] = value
         if collect_error:
-            run_status_payload["terminal_reason_code"] = "artifact_collection_error"
-            run_status_payload["terminal_reason"] = collect_error
+            failure = finalize_failure(
+                run_id=self.args.team,
+                output_dir=output_dir,
+                failure_code="artifact_collection_error",
+                failure_message=collect_error,
+                diagnostic_paths=[str(protocol_path)],
+            )
+            run_status_payload.update(failure.status_overlay)
+            run_status_payload["artifact_collection"] = {"status": "error"}
             run_status_payload["artifact_collection_error"] = collect_error
             print(collect_error, file=sys.stderr, flush=True)
         self.store.update_run_status(self.args.team, run_status_payload)
+
+    def runtime_answer_metadata(self) -> dict[str, Any]:
+        skill_root = getattr(self, "skill_root", None)
+        team = str(getattr(getattr(self, "args", None), "team", "") or "").strip()
+        if skill_root is None or not team:
+            return {}
+        runplan_path = Path(skill_root) / "control" / "runplans" / f"{team}.json"
+        if not runplan_path.is_file():
+            return {}
+        try:
+            runplan = json.loads(runplan_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        request_metadata = ((runplan.get("request_snapshot") or {}).get("metadata") or {})
+        runtime_context = runplan.get("runtime_context") or {}
+        return {
+            "answer_kind": runtime_context.get("answer_kind") or request_metadata.get("answer_kind"),
+            "eval_kind": request_metadata.get("eval_kind"),
+            "dataset": request_metadata.get("dataset"),
+            "track": request_metadata.get("track"),
+        }
+
+    def answer_kind(self) -> str:
+        return resolve_answer_kind(self.runtime_answer_metadata())
 
     def ensure_protocol_artifact(self, status_payload: dict[str, Any]) -> None:
         summary_payload = self.summary()

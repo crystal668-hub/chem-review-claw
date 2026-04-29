@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_ROOT / "scripts"
@@ -235,6 +236,70 @@ updated_direct_answer: Revised answer after addressing the review comments.
         self.assertFalse(transport.check_candidate_submission("", owner="proposer-1").ok)
         self.assertFalse(transport.check_formal_review("", reviewer="proposer-2", target="proposer-1").ok)
         self.assertFalse(transport.check_rebuttal("", owner="proposer-1").ok)
+
+
+class RecoverRunRespawnTest(unittest.TestCase):
+    def test_respawn_actionable_roles_respawns_dead_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "clawteam-data"
+            team = "chemqa-dead-coordinator"
+            team_dir = data_dir / "teams" / team
+            team_dir.mkdir(parents=True)
+            (team_dir / "spawn_registry.json").write_text(
+                json.dumps(
+                    {
+                        "debate-coordinator": {
+                            "backend": "subprocess",
+                            "pid": 999999,
+                            "slot": "debateA-coordinator",
+                            "command": ["/bin/echo", "coordinator"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                skill_root=str(SKILL_ROOT),
+                team=team,
+                runtime_dir=str(DEBATECLAW_SCRIPTS_DIR),
+                workspace_root=str(root / "workspaces"),
+                max_steps=1,
+                max_respawns_per_role_phase_signature=1,
+                json=True,
+            )
+            launched: list[dict[str, object]] = []
+
+            class FakePopen:
+                pid = 4242
+
+                def __init__(self, command, **kwargs) -> None:
+                    launched.append({"command": list(command), **kwargs})
+
+            with mock.patch.dict(os.environ, {"CLAWTEAM_DATA_DIR": str(data_dir)}), \
+                mock.patch.object(recover_run.subprocess, "Popen", FakePopen):
+                recoverer = recover_run.RunRecoverer(args)
+                recoverer.current_phase_signature = lambda: "phase=review;missing=4"  # type: ignore[method-assign]
+                recoverer.next_action = lambda role: {  # type: ignore[method-assign]
+                    "action": "wait" if role == "debate-coordinator" else "none",
+                    "phase": "review",
+                }
+
+                self.assertTrue(recoverer.respawn_actionable_roles())
+
+            self.assertEqual(1, len(launched))
+            launch = launched[0]
+            self.assertEqual(["/bin/echo", "coordinator"], launch["command"])
+            self.assertEqual(
+                (root / "workspaces" / "debateA-coordinator").resolve(),
+                Path(str(launch["cwd"])).resolve(),
+            )
+            self.assertEqual(recover_run.subprocess.STDOUT, launch["stderr"])
+            self.assertTrue(launch["text"])
+            self.assertTrue(launch["start_new_session"])
+            registry = json.loads((team_dir / "spawn_registry.json").read_text(encoding="utf-8"))
+            self.assertEqual(4242, registry["debate-coordinator"]["pid"])
+            self.assertEqual("recover_run_actionable_role", registry["debate-coordinator"]["last_respawn_reason"])
 
 
 class ProtocolReconstructionTest(unittest.TestCase):
@@ -1393,6 +1458,56 @@ class CoordinatorStagnationReviewerExitTest(unittest.TestCase):
         self.assertEqual([], terminal_failures)
         self.assertEqual(1, driver.repair_cycles_without_progress)
 
+    def test_maybe_handle_stagnation_treats_respawn_recovery_action_as_progress(self) -> None:
+        stalled_status = {
+            "status": "running",
+            "phase": "propose",
+            "epoch": 1,
+            "phase_progress": {
+                "actual": 0,
+                "complete": False,
+                "expected": 1,
+                "kind": "propose",
+                "targets": ["proposer-1"],
+            },
+            "proposals": [],
+            "reviews": [],
+            "rebuttals": [],
+        }
+
+        driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+        driver.args = argparse.Namespace(stale_timeout_seconds=600, phase_repair_budget=2)
+        driver.current_task = lambda: {"status": "in_progress"}
+        driver.stale_for_seconds = lambda: 600
+        driver.last_repair_signature = ""
+        driver.repair_cycles_without_progress = 0
+        driver.last_recovery_payload = {}
+        driver.reviewer_exits = {}
+        driver.run_recovery_cycle = lambda: {
+            "status": "running",
+            "actions": ["respawn-role proposer-1 pid=12345"],
+            "blockers": ["missing candidate proposal sources for proposer-1"],
+            "progress_made": False,
+        }
+        statuses = [stalled_status, stalled_status]
+        driver.status = lambda: statuses.pop(0)
+        next_actions = [{"phase": "propose", "action": "wait"}, {"phase": "propose", "action": "wait"}]
+        driver.next_action = lambda: next_actions.pop(0)
+        driver.candidate_submission_text = lambda _status: ""
+        progress_marks: list[str] = []
+        driver.mark_progress = lambda: progress_marks.append("progress")
+        driver.force_complete_with_missing_reviews = lambda **_kwargs: self.fail("should not force degraded completion during proposer respawn grace")
+        driver.emit_terminal_failure = lambda **_kwargs: self.fail("should not terminal-fail while recovery respawn is still in flight")
+
+        result = driver_module.ChemQAReviewDriver.maybe_handle_stagnation(
+            driver,
+            stalled_status,
+            {"phase": "propose", "action": "wait"},
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(["progress"], progress_marks)
+
     def test_maybe_handle_stagnation_marks_missing_reviewer_exited_and_continues(self) -> None:
         helper = ProtocolReconstructionTest()
         stalled_status = helper.build_summary()
@@ -1656,7 +1771,7 @@ class RunStatusShapeTest(unittest.TestCase):
             self.assertIn("duplicate", "\n".join(attempt_prompts[1]).lower())
             self.assertEqual(["progress"], progress_marks)
 
-    def test_sync_run_status_writes_done_and_terminal_state(self) -> None:
+    def test_sync_run_status_keeps_protocol_done_in_artifact_finalizing_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
             driver.args = argparse.Namespace(team="chemqa-review-run-status", role="debate-coordinator")
@@ -1678,8 +1793,11 @@ class RunStatusShapeTest(unittest.TestCase):
             )
 
             payload = json.loads((store.control / "run-status" / "chemqa-review-run-status.json").read_text(encoding="utf-8"))
-            self.assertEqual("done", payload["status"])
-            self.assertEqual("failed", payload["terminal_state"])
+            self.assertEqual("running", payload["status"])
+            self.assertEqual("failed", payload["protocol_terminal_state"])
+            self.assertEqual("finalizing", payload["artifact_flow_state"])
+            self.assertEqual("running", payload["benchmark_terminal_state"])
+            self.assertEqual("running", payload["terminal_state"])
             self.assertEqual("engine_terminal_failure", payload["terminal_reason_code"])
             self.assertEqual("engine stopped", payload["terminal_reason"])
 
@@ -1802,6 +1920,46 @@ class RecoveryInvocationTest(unittest.TestCase):
         self.assertEqual("1", command[command.index("--max-steps") + 1])
         self.assertIn("--max-respawns-per-role-phase-signature", command)
         self.assertEqual("1", command[command.index("--max-respawns-per-role-phase-signature") + 1])
+
+    def test_recover_run_counts_respawn_only_cycle_as_progress(self) -> None:
+        recoverer = recover_run.RunRecoverer.__new__(recover_run.RunRecoverer)
+        recoverer.args = argparse.Namespace(team="chemqa-review-test-run", max_steps=1, json=False)
+        recoverer.actions = []
+        recoverer.blockers = []
+
+        running_status = {
+            "status": "running",
+            "phase": "propose",
+            "phase_progress": {
+                "actual": 0,
+                "complete": False,
+                "expected": 1,
+                "kind": "propose",
+                "targets": ["proposer-1"],
+            },
+            "proposals": [],
+            "reviews": [],
+            "rebuttals": [],
+        }
+        statuses = [dict(running_status), dict(running_status)]
+        recoverer.status = lambda: statuses.pop(0)
+        recoverer._phase_signature = lambda _status: "propose-epoch-1"
+        recoverer.repair_invalid_review_state = lambda _status: False
+        recoverer.recover_propose = lambda _status: False
+        recoverer.recover_review = lambda _status: False
+        recoverer.recover_rebuttal = lambda _status: False
+        recoverer.next_action = lambda role: {"action": "wait" if role == "debate-coordinator" else "propose", "phase": "propose"}
+        recoverer.advance = lambda: self.fail("coordinator should not advance in this recovery scenario")
+        recoverer.respawn_actionable_roles = lambda: recoverer.actions.append("respawn-role proposer-1 pid=12345") or True
+        captured_status_writes: list[dict[str, object]] = []
+        recoverer.write_run_status = lambda **kwargs: captured_status_writes.append(dict(kwargs))
+
+        exit_code = recover_run.RunRecoverer.run(recoverer)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(["respawn-role proposer-1 pid=12345"], recoverer.actions)
+        self.assertEqual(1, len(captured_status_writes))
+        self.assertTrue(captured_status_writes[0]["progress_made"])
 
     def test_finalize_protocol_payload_writes_completed_with_artifact_collection_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

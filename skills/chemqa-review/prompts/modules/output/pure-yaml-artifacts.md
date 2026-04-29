@@ -93,15 +93,22 @@ artifact_kind: rebuttal
 artifact_contract_version: react-reviewed-v2
 phase: rebuttal
 owner: proposer-1
+mode: answer_revision
 concede: false
 response_summary: >-
   Added an atom-level anchor for the CH2 hydrogens and clarified that the answer
   relies on stereochemical non-equivalence.
+addressed_review_items:
+  - "1:0:proposer-3:trace-1"
 response_items:
   - item_id: trace-1
     severity: low
     finding: Added the requested anchor and wording fix.
-updated_direct_answer: "6"
+updated_answer:
+  evaluator_answer: "6"
+  display_answer: "6 proton environments"
+  full_answer: "The molecule has 6 distinct proton environments."
+remaining_open_items: []
 
 Positive example — coordinator failure terminal artifact:
 

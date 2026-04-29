@@ -13,6 +13,11 @@ Artifact contract:
   - `review_statuses.json`
   - `final_review_items.json`
   - `qa_result.json`
+- Artifact Flow also writes canonical terminal artifacts:
+  - `final_answer_artifact.json` or `failure_artifact.json`
+  - `artifact_manifest.json`
+  - `candidate_view.json`
+  - `validation_summary.json`
 
 For accepted outputs, the protocol must make the acceptance basis explicit.
 At minimum, include enough structured data for the collector to verify that:
@@ -36,3 +41,4 @@ At minimum, include enough structured data for the collector to verify that:
   - `synthetic`
 
 The reconstructed `qa_result.json` is expected to remain externally compatible with the current `react_reviewed` artifact surface.
+The ChemQA benchmark run is not externally complete until Artifact Flow has written and reopened the canonical terminal artifact, manifest, and `qa_result.json`.

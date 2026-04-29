@@ -45,6 +45,7 @@ class ChemQARunner:
         deep_copy_jsonish,
         ensure_runtime_bundle,
         build_chemqa_goal,
+        resolve_chemqa_answer_kind,
         cleanup_manifest_path,
         build_cleanup_manifest_payload,
         write_cleanup_manifest,
@@ -87,6 +88,7 @@ class ChemQARunner:
         self._deep_copy_jsonish = deep_copy_jsonish
         self._ensure_runtime_bundle = ensure_runtime_bundle
         self._build_chemqa_goal = build_chemqa_goal
+        self._resolve_chemqa_answer_kind = resolve_chemqa_answer_kind
         self._cleanup_manifest_path = cleanup_manifest_path
         self._build_cleanup_manifest_payload = build_cleanup_manifest_payload
         self._write_cleanup_manifest = write_cleanup_manifest
@@ -120,15 +122,86 @@ class ChemQARunner:
             return {}
         return self._normalize_chemqa_run_status(json.loads(status_path.read_text(encoding="utf-8")))
 
+    def _run_status_progress_signature(self, payload: dict[str, Any]) -> str:
+        progress_payload = {
+            "status": payload.get("status"),
+            "legacy_status": payload.get("legacy_status"),
+            "terminal_state": payload.get("terminal_state"),
+            "protocol_terminal_state": payload.get("protocol_terminal_state"),
+            "artifact_flow_state": payload.get("artifact_flow_state"),
+            "benchmark_terminal_state": payload.get("benchmark_terminal_state"),
+            "phase": payload.get("phase"),
+            "review_round": payload.get("review_round"),
+            "rebuttal_round": payload.get("rebuttal_round"),
+            "phase_progress": payload.get("phase_progress"),
+            "updated_at": payload.get("updated_at"),
+        }
+        return json.dumps(progress_payload, sort_keys=True, ensure_ascii=False, default=str)
+
+    def _recover_stalled_run(self, run_id: str, last_status: dict[str, Any]) -> dict[str, Any]:
+        recover_script = self.chemqa_root / "scripts" / "recover_run.py"
+        if not recover_script.is_file():
+            return {"status": "skipped", "reason": f"missing recover script: {recover_script}"}
+        data_dir = self.chemqa_root / "generated" / "clawteam-data" / "runs" / run_id
+        command = [
+            self._current_python(),
+            str(recover_script),
+            "--skill-root",
+            str(self.chemqa_root),
+            "--team",
+            run_id,
+            "--runtime-dir",
+            str(self.runtime_dir),
+            "--workspace-root",
+            str(self._chemqa_workspace_roots[self.slot_set]),
+            "--max-steps",
+            "6",
+            "--max-respawns-per-role-phase-signature",
+            "2",
+            "--json",
+        ]
+        env = os.environ.copy()
+        env["CLAWTEAM_DATA_DIR"] = str(data_dir)
+        result = self._run_subprocess(command, env=env, cwd=self.chemqa_root, timeout=120)
+        if result.returncode != 0:
+            return {
+                "status": "error",
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "last_status": self._deep_copy_jsonish(last_status),
+            }
+        output = (result.stdout or "").strip() or (result.stderr or "").strip()
+        if not output:
+            return {"status": "ok", "empty_output": True}
+        try:
+            return self._deep_copy_jsonish(json.loads(output))
+        except json.JSONDecodeError:
+            return {"status": "ok", "raw_output": output}
+
     def _wait_for_terminal_status(self, run_id: str, *, timeout_seconds: int) -> dict[str, Any]:
         import time
 
         deadline = time.time() + timeout_seconds
         last_status: dict[str, Any] = {}
+        last_signature = ""
+        unchanged_polls = 0
+        last_recovery_attempt_at = 0.0
         while time.time() < deadline:
+            now = time.time()
             last_status = self._read_run_status(run_id)
             if self._is_chemqa_terminal_status(last_status):
                 return last_status
+            signature = self._run_status_progress_signature(last_status)
+            if signature and signature == last_signature:
+                unchanged_polls += 1
+            else:
+                unchanged_polls = 0
+                last_signature = signature
+                last_recovery_attempt_at = 0.0
+            if unchanged_polls >= 1 and (last_recovery_attempt_at <= 0.0 or now - last_recovery_attempt_at >= 120):
+                last_recovery_attempt_at = now
+                self._recover_stalled_run(run_id, last_status)
             time.sleep(30)
         error_message = (
             f"ChemQA run `{run_id}` did not reach a terminal state within {timeout_seconds}s. Last status: {last_status}"
@@ -163,6 +236,11 @@ class ChemQARunner:
         return deduped
 
     def _resolve_existing_qa_result(self, run_id: str, run_status: dict[str, Any]) -> Path | None:
+        explicit_qa_result = str(run_status.get("qa_result_path") or "").strip()
+        if explicit_qa_result:
+            path = Path(explicit_qa_result).expanduser().resolve()
+            if path.is_file():
+                return path
         explicit_output_dir = str(run_status.get("artifacts_output_dir") or "").strip()
         candidate_dirs = []
         if explicit_output_dir:
@@ -249,6 +327,16 @@ class ChemQARunner:
             if not source_path.is_file():
                 continue
             shutil.copy2(source_path, archive_dir / filename)
+        for filename in (
+            "final_answer_artifact.json",
+            "failure_artifact.json",
+            "artifact_manifest.json",
+            "candidate_view.json",
+            "validation_summary.json",
+        ):
+            source_path = source_dir / filename
+            if source_path.is_file():
+                shutil.copy2(source_path, archive_dir / filename)
 
     def _normalize_archived_qa_result(self, archive_dir: Path) -> dict[str, Any] | None:
         qa_result_path = archive_dir / "qa_result.json"
@@ -271,6 +359,11 @@ class ChemQARunner:
             "final_answer": "final_answer.md",
             "final_submission": "final_submission.json",
             "qa_result": "qa_result.json",
+            "final_answer_artifact": "final_answer_artifact.json",
+            "failure_artifact": "failure_artifact.json",
+            "artifact_manifest": "artifact_manifest.json",
+            "candidate_view": "candidate_view.json",
+            "validation_summary": "validation_summary.json",
         }
         for key, filename in key_to_filename.items():
             candidate = archive_dir / filename
@@ -328,6 +421,16 @@ class ChemQARunner:
 
         archived_artifact_paths: dict[str, str] = {}
         for filename in self._ARCHIVABLE_ARTIFACT_FILENAMES:
+            archived_path = archive_dir / filename
+            if archived_path.is_file():
+                archived_artifact_paths[archived_path.stem] = str(archived_path)
+        for filename in (
+            "final_answer_artifact.json",
+            "failure_artifact.json",
+            "artifact_manifest.json",
+            "candidate_view.json",
+            "validation_summary.json",
+        ):
             archived_path = archive_dir / filename
             if archived_path.is_file():
                 archived_artifact_paths[archived_path.stem] = str(archived_path)
@@ -417,7 +520,9 @@ class ChemQARunner:
         run_status: dict[str, Any],
         archive_meta: dict[str, Any],
     ) -> dict[str, Any] | None:
-        _ = archive_meta
+        projection = self._failure_artifact_answer_projection(run_status=run_status, archive_meta=archive_meta)
+        if projection is not None:
+            return projection
         fallback_payload = self._build_candidate_submission_fallback(run_id, run_status)
         if fallback_payload is None:
             return None
@@ -457,6 +562,76 @@ class ChemQARunner:
             "details": fallback_meta,
         }
 
+    def _failure_artifact_answer_projection(
+        self,
+        *,
+        run_status: dict[str, Any],
+        archive_meta: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        candidates: list[Path] = []
+        for key in ("failure_artifact_path",):
+            value = str(run_status.get(key) or "").strip()
+            if value:
+                candidates.append(Path(value).expanduser())
+        archived_paths = archive_meta.get("archived_artifact_paths")
+        if isinstance(archived_paths, dict):
+            value = str(archived_paths.get("failure_artifact") or "").strip()
+            if value:
+                candidates.append(Path(value).expanduser())
+        qa_result_path = str(archive_meta.get("qa_result_path") or run_status.get("qa_result_path") or "").strip()
+        payloads: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                payloads.append(payload)
+        if qa_result_path:
+            path = Path(qa_result_path).expanduser()
+            if path.is_file():
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    payload = {}
+                if isinstance(payload, dict):
+                    payloads.append(payload)
+
+        for payload in payloads:
+            projection = payload.get("answer_projection")
+            recovery = payload.get("recovery_eligibility")
+            if not isinstance(projection, dict) or not isinstance(recovery, dict):
+                continue
+            short_text = self._normalize_space(
+                str(
+                    projection.get("evaluator_answer")
+                    or projection.get("direct_answer")
+                    or projection.get("answer")
+                    or projection.get("value")
+                    or ""
+                )
+            )
+            full_text = str(projection.get("full_answer") or projection.get("display_answer") or short_text).strip()
+            if short_text and full_text == short_text:
+                full_text = f"FINAL ANSWER: {short_text}"
+            return {
+                "evaluable": bool(recovery.get("evaluable")),
+                "scored": bool(recovery.get("scored")),
+                "reliability": str(recovery.get("reliability") or "none"),
+                "recovery_mode": str(recovery.get("recovery_mode") or "failure_artifact_answer_projection"),
+                "reason": str(recovery.get("reason") or ""),
+                "short_answer_text": short_text,
+                "full_response_text": full_text,
+                "details": {
+                    "fallback_source": "failure_artifact",
+                    "answer_projection": self._deep_copy_jsonish(projection),
+                    "recovery_eligibility": self._deep_copy_jsonish(recovery),
+                },
+            }
+        return None
+
     def _collect_artifacts_from_source(self, *, source_dir: Path, output_dir: Path, env: dict[str, str]) -> None:
         command = [
             self._current_python(),
@@ -468,6 +643,9 @@ class ChemQARunner:
             "--output-dir",
             str(output_dir),
         ]
+        answer_kind = str(env.get("CHEMQA_ANSWER_KIND") or "").strip()
+        if answer_kind:
+            command.extend(["--answer-kind", answer_kind])
         result = self._run_subprocess(command, env=env, cwd=self.chemqa_root, timeout=120)
         self._parse_json_stdout(result, command)
 
@@ -529,6 +707,7 @@ class ChemQARunner:
         payload: dict[str, Any] = {}
         run_id = f"benchmark-{group.id}-{self._slugify(record.record_id, limit=40)}-{self._now_stamp()}"
         input_bundle = self._ensure_runtime_bundle(record, bundle_root=self.runtime_bundle_root)
+        answer_kind = self._resolve_chemqa_answer_kind(record)
         goal = self._build_chemqa_goal(record, websearch_enabled=group.websearch, input_bundle=input_bundle)
         launch_root = self.launch_workspace_root / group.id / self._slugify(record.record_id, limit=80)
         launch_home = launch_root / "home"
@@ -576,6 +755,8 @@ class ChemQARunner:
             goal,
             "--run-id",
             run_id,
+            "--answer-kind",
+            answer_kind,
             "--model-profile",
             self.model_profile,
             "--slot-set",
@@ -603,6 +784,7 @@ class ChemQARunner:
         env["OPENCLAW_CONFIG_PATH"] = str(self.config_path)
         env["OPENCLAW_ENV_FILE"] = str(self._default_openclaw_env_file)
         env["OPENCLAW_DEBATE_TRUSTED_PLUGINS"] = "duckduckgo" if group.websearch else "__none__"
+        env["CHEMQA_ANSWER_KIND"] = answer_kind
         env["BENCHMARK_CLEANROOM_RUN_ID"] = run_id
         env["BENCHMARK_CLEANROOM_LEASE_DIR"] = str((self.launch_workspace_root.parent / "cleanroom" / "leases").resolve())
 
@@ -734,7 +916,9 @@ class ChemQARunner:
                         raw={"run_status": run_status, "fallback": recovery_details},
                         runner_meta=runner_meta,
                         recovery=RecoveryInfo(
-                            source="candidate_submission",
+                            source="failure_artifact"
+                            if str(recovery_details.get("fallback_source") or "") == "failure_artifact"
+                            else "candidate_submission",
                             scored=True,
                             evaluable=True,
                             reliability=str(recovery_assessment["reliability"]),
@@ -755,7 +939,9 @@ class ChemQARunner:
                     ),
                 )
 
-            qa_result_path = self._ensure_artifacts(run_id, env=env, run_status=run_status)
+            qa_result_path = self._resolve_existing_qa_result(run_id, run_status)
+            if qa_result_path is None:
+                qa_result_path = self._ensure_artifacts(run_id, env=env, run_status=run_status)
             archive_meta = self._archive_artifacts(
                 run_id=run_id,
                 group_id=group.id,

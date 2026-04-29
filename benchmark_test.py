@@ -977,6 +977,28 @@ def normalize_space(text: str) -> str:
 
 CHEMQA_RUN_LIFECYCLE_STATUSES = {"planned", "running", "done"}
 CHEMQA_TERMINAL_STATES = {"completed", "failed", "cancelled"}
+CHEMQA_ARTIFACT_FLOW_STATES = {"finalizing", "finalized", "finalization_failed"}
+
+
+def resolve_chemqa_answer_kind(record: BenchmarkRecord) -> str:
+    eval_kind = str(getattr(record, "eval_kind", "") or "").strip()
+    dataset = str(getattr(record, "dataset", "") or "").strip()
+    payload = dict(getattr(record, "payload", {}) or {})
+    config = dict(getattr(getattr(record, "grading", None), "config", {}) or {})
+    explicit = str(payload.get("answer_kind") or config.get("answer_kind") or "").strip()
+    if explicit:
+        return explicit
+    if eval_kind in {"chembench_open_ended", "frontierscience_olympiad"}:
+        return "numeric_short_answer"
+    if eval_kind == "frontierscience_research" or str(config.get("track") or payload.get("track") or "").strip().lower() == "research":
+        return "multi_part_research_answer"
+    if eval_kind == "superchem_multiple_choice_rpf":
+        return "multiple_choice"
+    if eval_kind == "conformabench_constructive":
+        return "structure_answer"
+    if dataset == "superchem" and isinstance(config.get("options") or payload.get("options"), dict):
+        return "multiple_choice"
+    return "generic_semantic_answer"
 
 
 def normalize_chemqa_run_status(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -984,6 +1006,8 @@ def normalize_chemqa_run_status(payload: dict[str, Any] | None) -> dict[str, Any
     legacy_status = str(normalized.get("status") or "").strip()
     status = legacy_status
     terminal_state = str(normalized.get("terminal_state") or "").strip()
+    artifact_flow_state = str(normalized.get("artifact_flow_state") or "").strip()
+    benchmark_terminal_state = str(normalized.get("benchmark_terminal_state") or "").strip()
     terminal_reason_code = str(normalized.get("terminal_reason_code") or "").strip()
     terminal_reason = str(normalized.get("terminal_reason") or normalized.get("reason") or "").strip()
 
@@ -994,7 +1018,16 @@ def normalize_chemqa_run_status(payload: dict[str, Any] | None) -> dict[str, Any
         artifact_collection_payload = {}
     artifact_collection_status = str(artifact_collection_payload.get("status") or "").strip()
 
-    if legacy_status == "completed":
+    if artifact_flow_state == "finalizing" or benchmark_terminal_state == "running" or terminal_state == "running":
+        status = "running"
+        terminal_state = "running"
+        if benchmark_terminal_state:
+            normalized["benchmark_terminal_state"] = benchmark_terminal_state
+        normalized["artifact_flow_state"] = artifact_flow_state or "finalizing"
+    elif benchmark_terminal_state in {"completed", "failed", "cancelled"}:
+        status = "done"
+        terminal_state = benchmark_terminal_state
+    elif legacy_status == "completed":
         status = "done"
         terminal_state = terminal_state or "completed"
         artifact_collection_status = artifact_collection_status or "ok"
@@ -1066,7 +1099,10 @@ def normalize_chemqa_run_status(payload: dict[str, Any] | None) -> dict[str, Any
 
 def is_chemqa_terminal_status(payload: dict[str, Any] | None) -> bool:
     normalized = normalize_chemqa_run_status(payload)
-    return str(normalized.get("status") or "") == "done"
+    return (
+        str(normalized.get("status") or "") == "done"
+        and str(normalized.get("terminal_state") or "") in CHEMQA_TERMINAL_STATES
+    )
 
 
 def is_chemqa_success_status(payload: dict[str, Any] | None) -> bool:
@@ -1406,6 +1442,7 @@ def build_chemqa_goal(
         instructions.append("End with exactly one line `FINAL ANSWER: <SMILES>`.")
     elif record.eval_kind in {"chembench_open_ended", "frontierscience_olympiad"}:
         instructions.append("If appropriate, end with a line `FINAL ANSWER: <answer>`.")
+    instructions.append(f"ChemQA Artifact Flow answer kind: {resolve_chemqa_answer_kind(record)}.")
     return "\n".join(instructions) + "\n\nQUESTION:\n" + record.prompt.strip()
 
 
@@ -1514,6 +1551,17 @@ def extract_chemqa_scoreable_answer(value: Any) -> str:
 
 def build_chemqa_full_response(*, qa_result: dict[str, Any]) -> tuple[str, str]:
     artifact_paths = dict(qa_result.get("artifact_paths") or {})
+    final_answer_artifact_path = str(artifact_paths.get("final_answer_artifact") or "").strip()
+    if final_answer_artifact_path:
+        path = Path(final_answer_artifact_path)
+        if path.is_file():
+            try:
+                final_artifact = json.loads(path.read_text(encoding="utf-8"))
+                short_answer_text = extract_chemqa_scoreable_answer(final_artifact.get("evaluator_answer"))
+                full_response_text = str(final_artifact.get("full_answer") or final_artifact.get("display_answer") or "").strip()
+                return normalize_answer_tracks(short_answer_text=short_answer_text, full_response_text=full_response_text)
+            except Exception:
+                pass
     short_answer_text = extract_chemqa_scoreable_answer(qa_result.get("final_answer"))
     final_submission_path = str(artifact_paths.get("final_submission") or "").strip()
     if final_submission_path:
@@ -1640,6 +1688,7 @@ class ChemQARunner(_BenchmarkingChemQARunner):
             deep_copy_jsonish=deep_copy_jsonish,
             ensure_runtime_bundle=ensure_runtime_bundle,
             build_chemqa_goal=build_chemqa_goal,
+            resolve_chemqa_answer_kind=resolve_chemqa_answer_kind,
             cleanup_manifest_path=cleanup_manifest_path,
             build_cleanup_manifest_payload=build_cleanup_manifest_payload,
             write_cleanup_manifest=write_cleanup_manifest,

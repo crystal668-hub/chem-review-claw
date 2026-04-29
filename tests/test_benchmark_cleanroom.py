@@ -171,6 +171,28 @@ class BenchmarkCleanroomTests(unittest.TestCase):
             self.assertEqual("demo-run", loaded["run_id"])
             self.assertEqual("demo-session", loaded["session_assignments"]["debateB-1"])
 
+    def test_atomic_write_json_handles_long_lease_filename(self) -> None:
+        run_id = "benchmark-chemqa_web_on-chembench-analytical-chemistry--46040d0e-20260429-104631"
+        role = "debate-coordinator"
+        slot = "debateA-coordinator"
+        session_id = (
+            "chemqa-review-benchmark-chemqa_web_on-chembench-analytical-chemistry-"
+            "46040d0e-20260429-104631-coordinator"
+        )
+        lease_name = runtime_lease.lease_filename_for_identity(
+            run_id=run_id,
+            role=role,
+            slot=slot,
+            session_id=session_id,
+            pid=33881,
+        )
+        self.assertGreater(len(lease_name), 240)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / lease_name
+            runtime_lease.atomic_write_json(path, {"status": "running"})
+            self.assertEqual({"status": "running"}, runtime_lease.read_json(path))
+
     def test_scrub_session_store_removes_only_matching_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store_path = Path(tmpdir) / "sessions.json"
