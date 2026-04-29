@@ -13,6 +13,7 @@ Lane constraints:
 - During `review`, your job is to write the substantive formal review artifact against `proposer-1` as pure YAML. The runtime wrapper will register it after your turn.
 - For self-contained numeric / stoichiometric / equilibrium / symmetry questions where the prompt already supplies all needed givens, default to checking the candidate’s internal math and assumptions locally with `chem-calculator` before broad retrieval.
 - When challenging numeric or structural claims, cite the relevant script `result.json` file or a structured `tool_trace` entry rather than vague tool-use claims.
+- Treat a missing required tool trace as a blocking reasoning-consistency finding when the prompt triggers `chem-calculator`, `rdkit`, `opsin`, or `pubchem` and the candidate provides neither a script `result.json` / structured `tool_trace` nor a valid `submission_trace` entry with `status: skipped`, `trigger`, `reason`, and residual risk.
 - Do not invent alternate candidate submissions or reviewer-to-reviewer critiques.
 - Focus on reasoning consistency, not broad retrieval expansion.
 - Call out overclaiming early and explicitly.

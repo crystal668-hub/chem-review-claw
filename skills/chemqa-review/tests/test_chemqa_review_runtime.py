@@ -507,6 +507,42 @@ class MaterializeRunplanTest(unittest.TestCase):
         self.assertIn("--max-respawns-per-role-phase-signature", command)
         self.assertIn("2", command[command.index("--max-respawns-per-role-phase-signature") + 1])
 
+    def test_render_role_prompt_includes_chem_provider_routing_rules_for_proposer(self) -> None:
+        run_plan = {
+            "run_id": "chemqa-review-test-run",
+            "request_snapshot": {"goal": "Calculate an equilibrium answer."},
+            "prompt_assembly": {
+                "proposer-1": {
+                    "semantic_role": "candidate_owner",
+                    "contracts": ["prompts/contracts/proposer-main.md"],
+                    "modules": [
+                        "prompts/modules/context/required-skills.md",
+                    ],
+                },
+            },
+            "runtime_context": {
+                "additional_file_workspace": "/tmp/chemqa-files",
+            },
+        }
+
+        prompt = materialize_runplan.render_role_prompt(
+            SKILL_ROOT,
+            run_plan,
+            role_name="proposer-1",
+            runtime_root="/tmp/runtime",
+        )
+
+        self.assertIn("Skill routing rules", prompt)
+        self.assertIn("must use `chem-calculator`", prompt)
+        self.assertIn("must use `rdkit`", prompt)
+        self.assertIn("must use `opsin`", prompt)
+        self.assertIn("must use `pubchem`", prompt)
+        self.assertIn("status: skipped", prompt)
+        self.assertIn("trigger", prompt)
+        self.assertIn("reason", prompt)
+        self.assertIn("result.json", prompt)
+        self.assertIn("tool_trace", prompt)
+
 
 class NativeWorkflowStateTest(unittest.TestCase):
     def test_chemqa_native_progress_and_next_action(self) -> None:
@@ -897,10 +933,24 @@ class ChemProviderIntegrationTest(unittest.TestCase):
         self.assertIn("chem-calculator", proposer)
         self.assertIn("FrontierScience", proposer)
         self.assertIn("SuperChem", proposer)
+        self.assertIn("Skill routing rules", proposer)
+        self.assertIn("must use `chem-calculator`", proposer)
+        self.assertIn("must use `rdkit`", proposer)
+        self.assertIn("must use `opsin`", proposer)
+        self.assertIn("must use `pubchem`", proposer)
+        self.assertIn("status: skipped", proposer)
+        self.assertIn("trigger", proposer)
+        self.assertIn("reason", proposer)
+        self.assertIn("risk", proposer)
         self.assertIn("extract available SMILES/name text first", proposer)
         self.assertIn("rdkit", proposer)
         self.assertIn("opsin", proposer)
         self.assertIn("pubchem", proposer)
+
+        for reviewer_prompt in (reasoning, evidence, counter):
+            self.assertIn("missing required tool trace", reviewer_prompt)
+            self.assertIn("blocking", reviewer_prompt)
+            self.assertIn("status: skipped", reviewer_prompt)
 
         self.assertIn("chem-calculator", reasoning)
         self.assertIn("result.json", reasoning)
@@ -915,6 +965,11 @@ class ChemProviderIntegrationTest(unittest.TestCase):
         self.assertIn("pubchem", required_skills)
         self.assertIn("opsin", required_skills)
         self.assertIn("chem-calculator", required_skills)
+        self.assertIn("Routing table", required_skills)
+        self.assertIn("numeric / stoichiometric / equilibrium / unit", required_skills)
+        self.assertIn("SMILES / formula / ring / unsaturation / chirality", required_skills)
+        self.assertIn("IUPAC / systematic name", required_skills)
+        self.assertIn("common name / CID / synonym / property", required_skills)
 
 
 class OpenClawResolutionTest(unittest.TestCase):

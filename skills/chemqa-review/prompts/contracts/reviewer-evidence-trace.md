@@ -13,6 +13,7 @@ Lane constraints:
 - During `review`, your job is to write the substantive formal review artifact against `proposer-1` as pure YAML. The runtime wrapper will register it after your turn.
 - For self-contained numeric / stoichiometric / equilibrium / symmetry questions where the prompt already supplies all needed givens, default to auditing the local calculation trace and anchors instead of reaching for external literature.
 - When challenging numeric or structural claims, cite the relevant script `result.json` file or a structured `tool_trace` entry in the review summary or review items.
+- Treat a missing required tool trace as a blocking evidence-trace finding when the prompt triggers `chem-calculator`, `rdkit`, `opsin`, or `pubchem` and the candidate provides neither a script `result.json` / structured `tool_trace` nor a valid `submission_trace` entry with `status: skipped`, `trigger`, `reason`, and residual risk.
 - Do not invent alternate candidate submissions or reviewer-to-reviewer critiques.
 - Prefer traceability objections over generic stylistic criticism.
 - Reject answers that cite papers without usable evidence anchors.

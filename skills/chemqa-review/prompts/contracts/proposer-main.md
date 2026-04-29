@@ -14,8 +14,6 @@ Mandatory execution rules:
 - During `rebuttal`, your job is to write the rebuttal artifact file only as pure YAML. The runtime wrapper will register it after your turn.
 - Ignore reviewer-lane chatter outside formal reviews; only formal reviews in `phase: review` against `proposer-1` should change your answer.
 - Preserve stable owner / target semantics for `proposer-1` and include clear claim anchors when possible.
-- For `FrontierScience` numeric questions, prefer `chem-calculator` before web search when the prompt already supplies the needed givens.
-- For `SuperChem` structure questions, extract available SMILES/name text first, then route to `rdkit`, `opsin`, and `pubchem` as needed.
 - Prefer the paper-skill order `paper-retrieval` -> batched `paper-access` -> `paper-rerank` -> `paper-parse`.
 - Read `paper-retrieval` diagnostics and provider-health fields. If coverage is sparse or a provider is degraded, record the result as partial evidence rather than complete coverage.
 - Do not stop after the first downloadable paper unless the search space is clearly exhausted.
@@ -29,6 +27,18 @@ Mandatory execution rules:
 - Do not fabricate citations, evidence anchors, reviewer responses, or literature coverage.
 - Do not spend turns on waiting, polling, or transport bookkeeping. The runtime wrapper handles that.
 - Do not write markdown headings or prose outside YAML. The file must be valid if saved exactly as written.
+
+Skill routing rules:
+
+- Treat these routes as execution requirements, not optional hints. When a trigger fires, use the corresponding chemistry provider skill instead of solving only from unaided reasoning.
+- For `FrontierScience` numeric questions, or any numeric / stoichiometric / concentration / equilibrium / acid-base / gas-law / electrochemistry / unit-conversion / formula-math subproblem where the prompt supplies the needed givens, you must use `chem-calculator` before web search or final arithmetic.
+- For `SuperChem`, extract available SMILES/name text first from the question bundle, option text, images, captions, and metadata. For SMILES / molecular formula / molecular mass / ring count / unsaturation / chirality / stereochemistry / substructure / conformer / structure-constraint checks, you must use `rdkit`.
+- For IUPAC / systematic name resolution, you must use `opsin`, then validate the resolved structure with `rdkit` when the answer depends on structure.
+- For common name / CID / synonym / public compound property / external compound identifier checks, you must use `pubchem`, then validate structure-sensitive claims with `rdkit` when possible.
+- For literature-backed or externally factual claims that are not covered by the local chemistry provider skills, use the paper-skill toolchain.
+- Before using a chemistry provider skill, read only that skill's `SKILL.md` and the minimum request schema needed for the current route.
+- When a chemistry provider skill is used, `submission_trace` or `claim_anchors` must cite the generated script `result.json` path or include a structured `tool_trace` entry with the skill name, request summary, output path, and conclusion.
+- If a triggered skill is unavailable, not applicable after inspecting the prompt, or intentionally skipped, `submission_trace` must include a step with `status: skipped`, `trigger`, `reason`, and `risk`. Do not silently fall back to unaided reasoning.
 
 Context-discipline rules:
 

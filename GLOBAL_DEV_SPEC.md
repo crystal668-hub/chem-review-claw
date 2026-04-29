@@ -11,6 +11,7 @@
   - `DONE`: Score outputs with registered evaluators for ChemBench, FrontierScience Olympiad/Research, ConformaBench, SuperChem, and generic semantic matching via `workspace/benchmark_test.py` and `workspace/benchmarking/evaluation.py`.
   - `DONE`: Provision run-scoped OpenClaw configs and DebateClaw/ChemQA slot workspaces via `workspace/benchmarking/config_renderer.py`, `workspace/benchmarking/provisioning.py`, and `workspace/benchmark_test.py`.
   - `DONE`: Run a single-agent OpenClaw baseline by shelling out to `openclaw agent` via `workspace/benchmarking/runners/single_llm.py`.
+  - `DONE`: Inject deterministic chemistry provider routing into single-agent benchmark prompts, including local skill roots and skip-reason requirements for triggered `chem-calculator`, `rdkit`, `opsin`, and `pubchem` usage.
   - `DONE`: Run a ChemQA multi-agent workflow by compiling/materializing a ChemQA launch, monitoring run-status, rebuilding artifacts, archiving outputs, and cleaning runtime leftovers via `workspace/benchmarking/runners/chemqa.py`.
   - `DONE`: Manage DebateClaw V1 runtime, slot provisioning, prompt/materialization, and launch commands via `workspace/skills/debateclaw-v1/scripts/*.py`.
   - `DONE`: Maintain live debate protocol state in SQLite and expose CLI commands for init/status/next-action/submit/advance via `workspace/skills/debateclaw-v1/scripts/debate_state.py`.
@@ -200,7 +201,7 @@
   - Status: `DONE`
 
 - Name: Single-agent OpenClaw baseline runner
-  - Description: Builds prompt, shells out to `openclaw agent --local`, unwraps JSON payload, normalizes answer tracks.
+  - Description: Builds prompt, injects chemistry provider skill routing for local deterministic tools, shells out to `openclaw agent --local`, unwraps JSON payload, normalizes answer tracks.
   - Input / Output:
     - Input: benchmark record, group config, runtime bundle root.
     - Output: `RunnerResult`.
@@ -423,6 +424,7 @@
   - For `single_llm_*` groups:
     - The runner shells out directly to `openclaw agent --local ... --json`.
     - It does not use a native Python OpenClaw API.
+    - `build_single_llm_prompt()` includes local skill roots and explicit trigger rules for `chem-calculator`, `rdkit`, `opsin`, and `pubchem`; if a triggered skill is skipped, the model is instructed to state the trigger and skip reason before the final answer.
   - For `chemqa_*` groups:
     - The runner shells out to ChemQA skill scripts to compile/materialize/launch the run.
     - It monitors run status via files under `chemqa-review/control/run-status/`.
@@ -436,8 +438,9 @@
   - `chemqa_review_openclaw_driver.py` loops by repeatedly calling `debate_state.py` subcommands in subprocesses.
   - The driver updates ClawTeam task state, saves sessions, opens/removes cleanup leases, and emits role-specific artifacts.
   - `chemqa-review/scripts/bundle_common.py` and the prompt pack now treat `rdkit`, `pubchem`, `opsin`, and `chem-calculator` as required sibling skills alongside DebateClaw and the paper pipeline.
-  - Prompt routing now tells `proposer-1` to prefer `chem-calculator` for `FrontierScience` numeric questions before web search, and to extract available SMILES/name text before routing `SuperChem` structure questions to `rdkit`, `opsin`, and `pubchem`.
-  - Reviewer prompt contracts now require numeric and structural challenges to cite script `result.json` artifacts or structured `tool_trace` entries instead of unsupported tool-use claims.
+  - Prompt routing now tells `proposer-1` to treat chemistry provider routes as execution requirements: numeric / stoichiometric / equilibrium / unit work triggers `chem-calculator`; SMILES / formula / ring / unsaturation / chirality / structural checks trigger `rdkit`; IUPAC/systematic names trigger `opsin` with RDKit validation; common names/CIDs/synonyms/properties trigger `pubchem` with RDKit validation where structure matters.
+  - ChemQA candidate submissions must cite provider `result.json` artifacts or structured `tool_trace` entries when provider skills are used. If a triggered provider skill is skipped, `submission_trace` must include `status: skipped`, `trigger`, `reason`, and residual `risk`.
+  - Reviewer prompt contracts now treat missing required provider traces as blocking findings for triggered numeric and structural checks unless the candidate records a valid skipped-route explanation.
   - This integration phase does not add a dedicated image-reading or OCSR skill to ChemQA prompt routing.
   - Recovery is externalized:
     - `recover_run.py` inspects the same runtime files and database,
