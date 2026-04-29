@@ -21,6 +21,7 @@ __pycache__/
 /state/
 /docs/
 /temp-benchmarks/
+/benchmark-runs/
 
 # Benchmark datasets
 /benchmarks/
