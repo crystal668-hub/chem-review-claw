@@ -264,7 +264,7 @@
   - Status: `DONE`
 
 - Name: ChemQA run recovery
-  - Description: Repairs invalid review state, respawns missing workers and a dead coordinator control loop, replays placeholder transport reviews, advances stalled runs. Respawn budget tracking is stored in `spawn_registry.json` and is updated while iterating a snapshot of role entries so missing process recovery can initialize budget metadata without aborting the recovery pass.
+  - Description: Repairs invalid review state, respawns missing workers and a dead coordinator control loop, replays placeholder transport reviews, advances stalled runs, and reports respawn-only recovery cycles as progress so coordinator stagnation handling does not terminal-fail while replacement workers are still booting. Respawn budget tracking is stored in `spawn_registry.json` and is updated while iterating a snapshot of role entries so missing process recovery can initialize budget metadata without aborting the recovery pass.
   - Input / Output:
     - Input: team id, workspace/runtime roots, max steps/respawn budget.
     - Output: JSON recovery summary plus runtime mutations.
@@ -455,6 +455,7 @@
     - `recover_run.py` inspects the same runtime files and database,
     - repairs invalid review phases,
     - respawns missing role processes from `spawn_registry.json`, including the coordinator when the protocol is not terminal and the coordinator action is `advance` or `wait`,
+    - treats concrete recovery actions such as respawn/submit/advance as protocol progress for coordinator stagnation accounting, even before the DebateClaw phase signature changes,
     - writes respawn stdout/stderr to per-role files under `spawn-logs/`,
     - may inject placeholder/transport artifacts to keep the run moving.
 

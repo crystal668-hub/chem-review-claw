@@ -1175,6 +1175,9 @@ class ChemQAReviewDriver:
         if post["phase_signature"] != pre["phase_signature"]:
             self.mark_progress()
             return None
+        if self.recovery_payload_indicates_progress(recovery):
+            self.mark_progress()
+            return None
 
         blockers = list(recovery.get("blockers") or [])
         missing_lanes = missing_required_reviewer_lanes(refreshed_status)
@@ -1253,6 +1256,21 @@ class ChemQAReviewDriver:
             raise DriverError(f"Recovery command did not return JSON: {result.stdout}\n{result.stderr}") from exc
         self.last_recovery_payload = payload if isinstance(payload, dict) else {}
         return payload
+
+    @staticmethod
+    def recovery_payload_indicates_progress(payload: dict[str, Any]) -> bool:
+        if bool(payload.get("progress_made")):
+            return True
+        actions = [str(item or "").strip() for item in (payload.get("actions") or [])]
+        progress_prefixes = (
+            "respawn-role ",
+            "submit-proposal ",
+            "submit-review ",
+            "submit-rebuttal ",
+            "advance ",
+            "repair-invalid-review-state ",
+        )
+        return any(action.startswith(progress_prefixes) for action in actions)
 
     def ensure_placeholder_submission(self, status_payload: dict[str, Any]) -> None:
         if current_proposal(status_payload, self.args.role):

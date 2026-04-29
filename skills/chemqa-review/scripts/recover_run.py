@@ -658,7 +658,8 @@ class RunRecoverer:
                 self.advance()
                 changed = True
 
-            self.respawn_actionable_roles()
+            if self.respawn_actionable_roles():
+                changed = True
 
             if changed:
                 progress_made = True
