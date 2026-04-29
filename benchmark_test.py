@@ -30,7 +30,6 @@ import yaml
 
 try:
     from benchmarking.contracts import AnswerPayload, FailureInfo, RecoveryInfo, RunStatus, RunnerResult
-    from benchmarking.config_renderer import ConfigRenderError, render_run_config
     from benchmarking.datasets import (
         BenchmarkRecord,
         GradingSpec,
@@ -45,12 +44,6 @@ try:
     from benchmarking.runners import build_runner
     from benchmarking.runners import ChemQARunner as _BenchmarkingChemQARunner
     from benchmarking.runners import SingleLLMRunner as _BenchmarkingSingleLLMRunner
-    from benchmarking.provisioning import (
-        ProvisionedAgent,
-        ProvisionedExperiment,
-        ensure_basic_agent_dirs,
-        provision_slot_workspace,
-    )
     from benchmarking.prompts import build_chemqa_goal, build_single_llm_prompt, resolve_chemqa_answer_kind
     from benchmarking.reporting import (
         GroupRecordResult as _SharedGroupRecordResult,
@@ -67,11 +60,19 @@ try:
         normalize_chemqa_run_status,
         normalize_run_status_value,
     )
+    from benchmarking.runtime_config import (
+        ConfigPool as _RuntimeConfigPool,
+        RuntimeConfigContext,
+        RuntimeConfigError,
+        actual_slot_ids,
+        build_run_scoped_config_payload as _build_run_scoped_config_payload,
+        logical_slot_ids,
+        slot_role_map,
+    )
 except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fallback
     if exc.name != "benchmarking":
         raise
     from workspace.benchmarking.contracts import AnswerPayload, FailureInfo, RecoveryInfo, RunStatus, RunnerResult
-    from workspace.benchmarking.config_renderer import ConfigRenderError, render_run_config
     from workspace.benchmarking.datasets import (
         BenchmarkRecord,
         GradingSpec,
@@ -86,12 +87,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fa
     from workspace.benchmarking.runners import build_runner
     from workspace.benchmarking.runners import ChemQARunner as _BenchmarkingChemQARunner
     from workspace.benchmarking.runners import SingleLLMRunner as _BenchmarkingSingleLLMRunner
-    from workspace.benchmarking.provisioning import (
-        ProvisionedAgent,
-        ProvisionedExperiment,
-        ensure_basic_agent_dirs,
-        provision_slot_workspace,
-    )
     from workspace.benchmarking.prompts import build_chemqa_goal, build_single_llm_prompt, resolve_chemqa_answer_kind
     from workspace.benchmarking.reporting import (
         GroupRecordResult as _SharedGroupRecordResult,
@@ -107,6 +102,15 @@ except ModuleNotFoundError as exc:  # pragma: no cover - package-style import fa
         is_chemqa_terminal_status,
         normalize_chemqa_run_status,
         normalize_run_status_value,
+    )
+    from workspace.benchmarking.runtime_config import (
+        ConfigPool as _RuntimeConfigPool,
+        RuntimeConfigContext,
+        RuntimeConfigError,
+        actual_slot_ids,
+        build_run_scoped_config_payload as _build_run_scoped_config_payload,
+        logical_slot_ids,
+        slot_role_map,
     )
 
 _runner_factory = build_runner
@@ -585,35 +589,6 @@ def slugify(value: str, *, limit: int = 64) -> str:
     return f"{cleaned[: limit - 9]}-{digest}".strip("-")
 
 
-def logical_slot_ids() -> tuple[str, ...]:
-    return ("debate-coordinator", "debate-1", "debate-2", "debate-3", "debate-4", "debate-5")
-
-
-def actual_slot_ids(slot_set: str) -> dict[str, str]:
-    normalized = str(slot_set).strip()
-    prefix = f"debate{normalized}"
-    return {
-        "debate-coordinator": f"{prefix}-coordinator",
-        "debate-1": f"{prefix}-1",
-        "debate-2": f"{prefix}-2",
-        "debate-3": f"{prefix}-3",
-        "debate-4": f"{prefix}-4",
-        "debate-5": f"{prefix}-5",
-    }
-
-
-def slot_role_map(slot_set: str) -> dict[str, str]:
-    slots = actual_slot_ids(slot_set)
-    return {
-        "debate-coordinator": slots["debate-coordinator"],
-        "proposer-1": slots["debate-1"],
-        "proposer-2": slots["debate-2"],
-        "proposer-3": slots["debate-3"],
-        "proposer-4": slots["debate-4"],
-        "proposer-5": slots["debate-5"],
-    }
-
-
 def slot_agents_template_path() -> Path:
     return runtime_paths.skills_root / "debateclaw-v1" / "scripts" / "templates" / "debate-slot-AGENTS.md"
 
@@ -623,24 +598,16 @@ def load_slot_agents_template() -> str:
     return path.read_text(encoding="utf-8").rstrip() + "\n"
 
 
-def _render_run_config_or_raise(
-    *,
-    base_payload: dict[str, Any],
-    spec: ExperimentSpec,
-    provisioned: ProvisionedExperiment,
-    judge_model: str,
-    runner_model: str,
-) -> dict[str, Any]:
-    try:
-        return render_run_config(
-            base_payload=base_payload,
-            spec=spec,
-            provisioned=provisioned,
-            judge_model=judge_model,
-            runner_model=runner_model,
-        )
-    except ConfigRenderError as exc:
-        raise BenchmarkError(str(exc)) from exc
+def runtime_config_context() -> RuntimeConfigContext:
+    return RuntimeConfigContext(
+        baseline_workspace_root=BASELINE_WORKSPACE_ROOT,
+        chemqa_workspace_roots=CHEMQA_WORKSPACE_ROOTS,
+        agents_root=runtime_paths.agents_root,
+        judge_agent_id=JUDGE_AGENT_ID,
+        chemqa_slot_sets=CHEMQA_SLOT_SETS,
+        experiment_specs=EXPERIMENT_SPECS,
+        load_slot_agents_template=load_slot_agents_template,
+    )
 
 
 def build_run_scoped_config_payload(
@@ -651,98 +618,17 @@ def build_run_scoped_config_payload(
     judge_model: str,
     single_agent_id_override: str | None = None,
 ) -> dict[str, Any]:
-    judge_workspace = BASELINE_WORKSPACE_ROOT / JUDGE_AGENT_ID
-    judge_agent_dir = runtime_paths.agents_root / JUDGE_AGENT_ID / "agent"
-    ensure_basic_agent_dirs(judge_workspace, judge_agent_dir)
-    judge = ProvisionedAgent(
-        agent_id=JUDGE_AGENT_ID,
-        workspace=judge_workspace,
-        agent_dir=judge_agent_dir,
-    )
-    runner_agents: list[ProvisionedAgent] = []
-    spec = EXPERIMENT_SPECS.get(
-        group.id,
-        ExperimentSpec(
-            id=group.id,
-            label=group.label,
-            runner_kind=group.runner,
-            websearch_enabled=group.websearch,
-        ),
-    )
-
-    if group.id == "benchmark-judge-runtime":
-        return _render_run_config_or_raise(
-            base_payload=base_payload,
-            spec=spec,
-            provisioned=ProvisionedExperiment(judge=judge, runner_agents=()),
+    try:
+        return _build_run_scoped_config_payload(
+            base_payload,
+            context=runtime_config_context(),
+            group=group,
+            single_agent_model=single_agent_model,
             judge_model=judge_model,
-            runner_model=single_agent_model,
+            single_agent_id_override=single_agent_id_override,
         )
-
-    if group.runner == "single_llm":
-        agent_id = spec.resolve_single_agent_id(single_agent_id_override)
-        if not agent_id:
-            raise BenchmarkError(f"Experiment group `{group.id}` missing single-agent id in experiment spec.")
-        workspace = BASELINE_WORKSPACE_ROOT / agent_id
-        agent_dir = runtime_paths.agents_root / agent_id / "agent"
-        ensure_basic_agent_dirs(workspace, agent_dir)
-        runner_agents.append(
-            ProvisionedAgent(
-                agent_id=agent_id,
-                workspace=workspace,
-                agent_dir=agent_dir,
-            )
-        )
-        single_spec = ExperimentSpec(
-            id=spec.id,
-            label=spec.label,
-            runner_kind=spec.runner_kind,
-            websearch_enabled=spec.websearch_enabled,
-            single_agent_id=agent_id,
-            slot_set=spec.slot_set,
-        )
-        return _render_run_config_or_raise(
-            base_payload=base_payload,
-            spec=single_spec,
-            provisioned=ProvisionedExperiment(judge=judge, runner_agents=tuple(runner_agents)),
-            judge_model=judge_model,
-            runner_model=single_agent_model,
-        )
-
-    slot_set = CHEMQA_SLOT_SETS[group.id]
-    workspace_root = CHEMQA_WORKSPACE_ROOTS[slot_set]
-    slot_map = actual_slot_ids(slot_set)
-    for logical_slot_id, actual_slot_id in slot_map.items():
-        workspace = workspace_root / actual_slot_id
-        agent_dir = runtime_paths.agents_root / actual_slot_id / "agent"
-        ensure_basic_agent_dirs(agent_dir)
-        provision_slot_workspace(
-            workspace=workspace,
-            workspace_root=workspace_root,
-            slot_id=actual_slot_id,
-            agents_template_text=load_slot_agents_template(),
-        )
-        runner_agents.append(
-            ProvisionedAgent(
-                agent_id=actual_slot_id,
-                workspace=workspace,
-                agent_dir=agent_dir,
-            )
-        )
-    chemqa_spec = ExperimentSpec(
-        id=group.id,
-        label=group.label,
-        runner_kind=group.runner,
-        websearch_enabled=group.websearch,
-        slot_set=slot_set,
-    )
-    return _render_run_config_or_raise(
-        base_payload=base_payload,
-        spec=chemqa_spec,
-        provisioned=ProvisionedExperiment(judge=judge, runner_agents=tuple(runner_agents)),
-        judge_model=judge_model,
-        runner_model=single_agent_model,
-    )
+    except RuntimeConfigError as exc:
+        raise BenchmarkError(str(exc)) from exc
 
 
 def run_subprocess(
@@ -819,7 +705,7 @@ def build_temp_openclaw_config_payload(base_payload: dict[str, Any], *, enable_w
     return payload
 
 
-class ConfigPool:
+class ConfigPool(_RuntimeConfigPool):
     def __init__(
         self,
         *,
@@ -829,66 +715,14 @@ class ConfigPool:
         judge_model: str | None = None,
         single_agent_id_override: str | None = None,
     ) -> None:
-        self.base_config_path = base_config_path
-        self.output_root = output_root
-        self._payload = json.loads(base_config_path.read_text(encoding="utf-8"))
-        self._config_dir = output_root / "runtime-config"
-        self._config_dir.mkdir(parents=True, exist_ok=True)
-        self._group_paths: dict[str, Path] = {}
-        self._judge_path: Path | None = None
-        discovered_single = self._discover_agent_model("debate-1") or "su8/gpt-5.4"
-        discovered_judge = self._discover_agent_model("debate-coordinator") or "su8/gpt-5.4"
-        self._single_agent_model = str(single_agent_model or discovered_single).strip() or discovered_single
-        self._judge_model = str(judge_model or discovered_judge).strip() or discovered_judge
-        self._single_agent_id_override = single_agent_id_override
-
-    def _discover_agent_model(self, agent_id: str) -> str | None:
-        agents = ((self._payload.get("agents") or {}).get("list") or [])
-        for entry in agents:
-            if isinstance(entry, dict) and str(entry.get("id", "")) == agent_id:
-                model = str(entry.get("model") or "").strip()
-                if model:
-                    return model
-        return None
-
-    def config_for_group(self, group: ExperimentGroup) -> Path:
-        existing = self._group_paths.get(group.id)
-        if existing is not None:
-            return existing
-        payload = build_run_scoped_config_payload(
-            self._payload,
-            group=group,
-            single_agent_model=self._single_agent_model,
-            judge_model=self._judge_model,
-            single_agent_id_override=self._single_agent_id_override,
+        super().__init__(
+            base_config_path=base_config_path,
+            output_root=output_root,
+            context=runtime_config_context(),
+            single_agent_model=single_agent_model,
+            judge_model=judge_model,
+            single_agent_id_override=single_agent_id_override,
         )
-        path = self._config_dir / f"{group.id}-openclaw.json"
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        self._group_paths[group.id] = path
-        return path
-
-    def judge_config_path(self) -> Path:
-        if self._judge_path is not None:
-            return self._judge_path
-        judge_group = ExperimentGroup(
-            id="benchmark-judge-runtime",
-            label="benchmark judge runtime",
-            runner="single_llm",
-            websearch=False,
-        )
-        payload = build_run_scoped_config_payload(
-            self._payload,
-            group=judge_group,
-            single_agent_model=self._single_agent_model,
-            judge_model=self._judge_model,
-        )
-        path = self._config_dir / "benchmark-judge-openclaw.json"
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        self._judge_path = path
-        return path
-
-    def cleanup(self) -> None:
-        return
 
 
 def discover_dataset_files(root: Path) -> list[Path]:

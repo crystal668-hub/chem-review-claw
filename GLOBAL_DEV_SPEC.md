@@ -9,7 +9,7 @@
   - `DONE`: Run benchmark batches across four experiment groups: `chemqa_web_on`, `chemqa_web_off`, `single_llm_web_on`, `single_llm_web_off` via `workspace/benchmark_test.py`.
   - `DONE`: Load benchmark JSONL datasets into a normalized `BenchmarkRecord` model via `workspace/benchmarking/datasets.py`.
   - `DONE`: Score outputs with registered evaluators for ChemBench, FrontierScience Olympiad/Research, ConformaBench, SuperChem, and generic semantic matching via `workspace/benchmark_test.py` and `workspace/benchmarking/evaluation.py`.
-  - `DONE`: Provision run-scoped OpenClaw configs and DebateClaw/ChemQA slot workspaces via `workspace/benchmarking/config_renderer.py`, `workspace/benchmarking/provisioning.py`, and `workspace/benchmark_test.py`.
+  - `DONE`: Provision run-scoped OpenClaw configs and DebateClaw/ChemQA slot workspaces via `workspace/benchmarking/runtime_config.py`, `workspace/benchmarking/config_renderer.py`, and `workspace/benchmarking/provisioning.py`.
   - `DONE`: Run a single-agent OpenClaw baseline by shelling out to `openclaw agent` via `workspace/benchmarking/runners/single_llm.py`.
   - `DONE`: Run a ChemQA multi-agent workflow by compiling/materializing a ChemQA launch, monitoring benchmark-visible run-status, consuming canonical Artifact Flow outputs, archiving outputs, and cleaning runtime leftovers via `workspace/benchmarking/runners/chemqa.py`.
   - `DONE`: Manage DebateClaw V1 runtime, slot provisioning, prompt/materialization, and launch commands via `workspace/skills/debateclaw-v1/scripts/*.py`.
@@ -61,6 +61,8 @@
       - Produces run-scoped OpenClaw configs, toggles web search, injects agent entries.
     - `provisioning.py`
       - Creates slot workspaces and `.debateclaw-slot.json` sentinels.
+    - `runtime_config.py`
+      - Orchestrates run-scoped config payloads, ChemQA slot id mapping, slot workspace provisioning, and config-path pooling for benchmark runs.
     - `prompts.py`
       - Builds single-agent and ChemQA benchmark prompts and resolves ChemQA answer-kind hints.
     - `reporting.py`
@@ -72,7 +74,7 @@
       - `chemqa.py`: ChemQA launch/monitor/archive/cleanup runner.
   - `workspace/benchmark_test.py`
     - Main four-group benchmark CLI.
-    - Also contains benchmark-specific evaluators, runtime bundle helpers, config pools, cleanup registration, and runner wiring.
+    - Also contains benchmark-specific evaluators, runtime bundle helpers, cleanup registration, runner wiring, and compatibility wrappers for runtime config helpers.
   - `workspace/conformabench_judge.py`
     - RDKit-based hidden judge for constructive molecular answers.
   - `workspace/runtime_paths.py`
@@ -101,7 +103,7 @@
 
 - Module interactions
   - `benchmark_test.py` -> `benchmarking/*`
-    - Uses dataset loading, config rendering, provisioning, runner construction, and reporting.
+    - Uses dataset loading, runtime config orchestration, runner construction, and reporting.
   - `benchmark_test.py` -> `skills/chemqa-review`
     - Launches ChemQA preset flow, passes resolved `answer_kind`, polls benchmark-visible run status, prefers canonical Artifact Flow paths, archives outputs.
   - `benchmark_test.py` -> `skills/benchmark-cleanroom`
@@ -187,12 +189,12 @@
   - Implementation location: `workspace/conformabench_judge.py`
   - Status: `DONE`
 
-- Name: Run-scoped OpenClaw config rendering
-  - Description: Copies base OpenClaw config, toggles web search/plugin state, injects judge/runner agent entries, strips `thinking` from managed agents.
+- Name: Run-scoped OpenClaw config orchestration
+  - Description: Builds per-group benchmark config payloads, provisions judge/single-agent/ChemQA slot workspaces, toggles web search/plugin state, injects judge/runner agent entries, strips `thinking` from managed agents, and writes pooled runtime config paths.
   - Input / Output:
-    - Input: base config payload, experiment spec, provisioned agents.
-    - Output: modified config payload written under run output.
-  - Implementation location: `workspace/benchmarking/config_renderer.py`, `workspace/benchmark_test.py`
+    - Input: base config payload/path, experiment group/spec, runtime roots, model overrides, slot template.
+    - Output: modified config payloads and config JSON files under `runtime-config/`.
+  - Implementation location: `workspace/benchmarking/runtime_config.py`, `workspace/benchmarking/config_renderer.py`, `workspace/benchmarking/provisioning.py`
   - Status: `DONE`
 
 - Name: Slot workspace provisioning
@@ -439,7 +441,7 @@
 - Primary execution flow: four-group benchmark
   - `workspace/benchmark_test.py` parses CLI args and discovers benchmark JSONL files under `workspace/benchmarks/*/data/*.jsonl` unless explicit files/datasets are provided.
   - It normalizes records through `benchmarking.datasets.load_records`.
-  - It builds per-group run-scoped OpenClaw configs in `output_root/runtime-config/`.
+  - It builds per-group run-scoped OpenClaw configs in `output_root/runtime-config/` through `benchmarking.runtime_config.ConfigPool`; `benchmark_test.py` keeps compatibility wrappers around that package module.
   - For `single_llm_*` groups:
     - The runner shells out directly to `openclaw agent --local ... --json`.
     - It does not use a native Python OpenClaw API.
@@ -497,7 +499,7 @@
 
 - Shortcuts, hacks, implicit logic
   - Benchmark scripts duplicate a large amount of logic that also exists in `workspace/benchmarking/*`; the package is not the sole orchestration layer.
-  - `benchmark_test.py` contains direct JSON parsing, subprocess wrappers, config pools, and answer extraction helpers instead of delegating all logic to package modules, though ChemQA run-status normalization/result-axis derivation and benchmark prompt construction now live in `workspace/benchmarking/status.py` and `workspace/benchmarking/prompts.py`.
+  - `benchmark_test.py` contains direct JSON parsing, subprocess wrappers, cleanup wiring, evaluator implementations, and answer extraction helpers instead of delegating all logic to package modules, though ChemQA run-status normalization/result-axis derivation, benchmark prompt construction, and runtime config orchestration now live in `workspace/benchmarking/status.py`, `workspace/benchmarking/prompts.py`, and `workspace/benchmarking/runtime_config.py`.
   - Native workflow package support exists as inactive scaffold metadata, but current live ChemQA execution bypasses it in favor of CLI/state-script orchestration.
   - Run-scoped OpenClaw configs are produced by mutating a copy of the user’s local `~/.openclaw/openclaw.json`.
   - Recovery and artifact collection rely on specific file naming conventions such as `proposer-1.md`, `chemqa_review_protocol.yaml`, `qa_result.json`.
