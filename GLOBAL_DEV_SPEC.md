@@ -61,6 +61,8 @@
       - Produces run-scoped OpenClaw configs, toggles web search, injects agent entries.
     - `provisioning.py`
       - Creates slot workspaces and `.debateclaw-slot.json` sentinels.
+    - `prompts.py`
+      - Builds single-agent and ChemQA benchmark prompts and resolves ChemQA answer-kind hints.
     - `reporting.py`
       - Defines the per-record benchmark result schema and aggregates per-record results into summary buckets.
     - `status.py`
@@ -495,7 +497,7 @@
 
 - Shortcuts, hacks, implicit logic
   - Benchmark scripts duplicate a large amount of logic that also exists in `workspace/benchmarking/*`; the package is not the sole orchestration layer.
-  - `benchmark_test.py` contains direct JSON parsing, subprocess wrappers, config pools, and answer extraction helpers instead of delegating all logic to package modules, though ChemQA run-status normalization and result-axis derivation now live in `workspace/benchmarking/status.py`.
+  - `benchmark_test.py` contains direct JSON parsing, subprocess wrappers, config pools, and answer extraction helpers instead of delegating all logic to package modules, though ChemQA run-status normalization/result-axis derivation and benchmark prompt construction now live in `workspace/benchmarking/status.py` and `workspace/benchmarking/prompts.py`.
   - Native workflow package support exists as inactive scaffold metadata, but current live ChemQA execution bypasses it in favor of CLI/state-script orchestration.
   - Run-scoped OpenClaw configs are produced by mutating a copy of the user’s local `~/.openclaw/openclaw.json`.
   - Recovery and artifact collection rely on specific file naming conventions such as `proposer-1.md`, `chemqa_review_protocol.yaml`, `qa_result.json`.
