@@ -196,6 +196,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lane-retry-budget", type=int, default=LANE_RETRY_BUDGET_DEFAULT)
     parser.add_argument("--phase-repair-budget", type=int, default=PHASE_REPAIR_BUDGET_DEFAULT)
     parser.add_argument(
+        "--provider-trace-mode",
+        choices=("off", "audit", "enforce"),
+        help="Candidate provider trace validation mode. Defaults to CHEMQA_PROVIDER_TRACE_MODE or audit.",
+    )
+    parser.add_argument(
         "--max-respawns-per-role-phase-signature",
         type=int,
         default=MAX_RESPAWNS_PER_ROLE_PHASE_SIGNATURE_DEFAULT,
@@ -423,6 +428,22 @@ class ChemQAReviewDriver:
         if concede:
             argv.append("--concede")
         return self._debate_state_json(*argv)
+
+    def provider_trace_mode(self) -> str:
+        explicit = str(getattr(self.args, "provider_trace_mode", "") or "").strip().lower()
+        env_value = os.environ.get("CHEMQA_PROVIDER_TRACE_MODE", "").strip().lower()
+        mode = explicit or env_value or "audit"
+        if mode not in {"off", "audit", "enforce"}:
+            return "audit"
+        return mode
+
+    def candidate_submission_checker(self) -> Callable[[str], Any]:
+        return lambda text: check_candidate_submission(
+            text,
+            owner=self.args.role,
+            answer_kind=self.answer_kind(),
+            provider_trace_mode=self.provider_trace_mode(),
+        )
 
     def _debate_state_json(self, *argv: str) -> dict[str, Any]:
         command = [current_python(), str(self.debate_state_path), *argv]
@@ -1637,7 +1658,7 @@ class ChemQAReviewDriver:
             self.attempt_model_artifact(
                 filename=proposal_filename(),
                 instructions=instructions,
-                checker=lambda text: check_candidate_submission(text, owner=self.args.role, answer_kind=self.answer_kind()),
+                checker=self.candidate_submission_checker(),
                 artifact_kind="candidate_submission",
                 failure_key="propose:candidate",
                 failure_reason=f"{self.args.role} failed to produce a valid candidate submission",

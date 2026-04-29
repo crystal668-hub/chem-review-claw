@@ -623,6 +623,7 @@ class MaterializeRunplanTest(unittest.TestCase):
             },
             "runtime_context": {
                 "chemqa_review": {
+                    "provider_trace_mode": "enforce",
                     "stop_loss": {
                         "stale_timeout_seconds": 300,
                         "respawn_cooldown_seconds": 120,
@@ -664,6 +665,8 @@ class MaterializeRunplanTest(unittest.TestCase):
         self.assertIn("2", command[command.index("--phase-repair-budget") + 1])
         self.assertIn("--max-respawns-per-role-phase-signature", command)
         self.assertIn("2", command[command.index("--max-respawns-per-role-phase-signature") + 1])
+        self.assertIn("--provider-trace-mode", command)
+        self.assertEqual("enforce", command[command.index("--provider-trace-mode") + 1])
 
     def test_render_role_prompt_includes_chem_provider_routing_rules_for_proposer(self) -> None:
         run_plan = {
@@ -2139,6 +2142,60 @@ class RunStatusShapeTest(unittest.TestCase):
             self.assertEqual("present_valid", outcome.state)
             self.assertTrue(any("chem-calculator" in warning for warning in outcome.validation_warnings))
             self.assertTrue(any("chem-calculator" in warning for warning in outcome.as_payload()["validation_warnings"]))
+
+    def test_candidate_submission_enforces_provider_trace_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+            driver.args = argparse.Namespace(role="proposer-1", provider_trace_mode="enforce")
+            driver.answer_kind = lambda: "numeric_short_answer"
+            proposal_path = Path(tmpdir) / transport.proposal_filename()
+            proposal_path.write_text(
+                "\n".join(
+                    [
+                        "artifact_kind: candidate_submission",
+                        "artifact_contract_version: react-reviewed-v2",
+                        "phase: propose",
+                        "owner: proposer-1",
+                        "direct_answer: '42'",
+                        "summary: numeric answer without provider trace.",
+                        "submission_trace:",
+                        "- step: reasoning",
+                        "  status: success",
+                        "  detail: mental arithmetic only.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = driver_module.ChemQAReviewDriver._observe_artifact_outcome(
+                driver,
+                file_path=proposal_path,
+                filename=transport.proposal_filename(),
+                checker=driver_module.ChemQAReviewDriver.candidate_submission_checker(driver),
+                pre_call_snapshot=None,
+                pre_call_normalized=None,
+                require_file_change=False,
+            )
+
+            self.assertEqual("present_invalid", outcome.state)
+            self.assertTrue(any("chem-calculator" in error for error in outcome.validation_errors))
+
+    def test_provider_trace_mode_defaults_to_env_then_audit(self) -> None:
+        driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+        driver.args = argparse.Namespace(provider_trace_mode="")
+        old_value = os.environ.get("CHEMQA_PROVIDER_TRACE_MODE")
+        try:
+            os.environ["CHEMQA_PROVIDER_TRACE_MODE"] = "enforce"
+            self.assertEqual("enforce", driver_module.ChemQAReviewDriver.provider_trace_mode(driver))
+            os.environ["CHEMQA_PROVIDER_TRACE_MODE"] = "invalid"
+            self.assertEqual("audit", driver_module.ChemQAReviewDriver.provider_trace_mode(driver))
+            os.environ.pop("CHEMQA_PROVIDER_TRACE_MODE", None)
+            self.assertEqual("audit", driver_module.ChemQAReviewDriver.provider_trace_mode(driver))
+        finally:
+            if old_value is None:
+                os.environ.pop("CHEMQA_PROVIDER_TRACE_MODE", None)
+            else:
+                os.environ["CHEMQA_PROVIDER_TRACE_MODE"] = old_value
 
     def test_ensure_candidate_submission_retries_after_duplicate_epoch_submission(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

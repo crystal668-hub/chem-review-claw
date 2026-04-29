@@ -129,7 +129,9 @@ def build_command_map(
     command_map: dict[str, list[str]] = {}
     slot_assignments = dict(run_plan.get("slot_assignments") or {})
     role_slots = dict(run_plan.get("launch_spec", {}).get("role_slots") or {})
-    stop_loss = dict((((run_plan.get("runtime_context") or {}).get("chemqa_review") or {}).get("stop_loss") or {}))
+    chemqa_context = dict(((run_plan.get("runtime_context") or {}).get("chemqa_review") or {}))
+    stop_loss = dict(chemqa_context.get("stop_loss") or {})
+    provider_trace_mode = str(chemqa_context.get("provider_trace_mode") or "").strip()
     driver_path = skill_root / "scripts" / "chemqa_review_openclaw_driver.py"
     python = current_python()
     for role_name, slot_id in role_slots.items():
@@ -174,6 +176,8 @@ def build_command_map(
             command.extend(["--thinking", str(thinking)])
         if lease_dir:
             command.extend(["--lease-dir", lease_dir])
+        if provider_trace_mode:
+            command.extend(["--provider-trace-mode", provider_trace_mode])
         command_map[role_name] = command
     return command_map
 

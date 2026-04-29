@@ -195,6 +195,7 @@ def main() -> int:
                 "required_skills": list(REQUIRED_SKILLS),
                 "role_map": role_map,
                 "artifact_contract_version": "react-reviewed-v2",
+                "provider_trace_mode": "audit",
                 "max_epochs": resolved.get("max_epochs"),
                 "react_reviewed_config_snapshot": config_snapshot,
                 "stop_loss": {
