@@ -6,7 +6,11 @@
   "workflow_package": {
     "kind": "python-path",
     "path": "runtime/workflow.py",
-    "class": "ChemQAWorkflow"
+    "class": "ChemQAWorkflow",
+    "status": "scaffold",
+    "active": false,
+    "live_control_plane": "debate_state_driver",
+    "note": "Live ChemQA execution uses debate_state.py plus chemqa_review_openclaw_driver.py; this package is retained only as an inactive native-workflow scaffold."
   },
   "roles": [
     "debate-coordinator",

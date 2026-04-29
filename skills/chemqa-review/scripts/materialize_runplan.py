@@ -196,7 +196,7 @@ def render_role_prompt(
     role_intro = [
         f"You are chemqa-review role `{role_name}`.",
         f"Semantic role: `{semantic_role}`.",
-        "This run uses the ChemQA native workflow: only `proposer-1` is the candidate owner.",
+        "This run uses the ChemQA fixed-lane review protocol: only `proposer-1` is the candidate owner.",
         "The other proposer slots are fixed reviewer lanes and must not invent alternate final answers.",
         "",
         "Preferred state command (compact + cached; use this instead of polling raw JSON):",

@@ -23,7 +23,7 @@ Mandatory execution rules:
 - Call `paper-rerank` on the full readable-PDF pool gathered from batched access, not only on the first successful download.
 - Use `paper-parse` after rerank gating on the locked top candidate(s), or on the best available readable local PDF only when rerank is skipped or impossible.
 - Record each toolchain step as `success`, `partial`, `skipped`, or `error` in the submission trace, with concrete counts and blockers when a downstream step cannot run (for example: retrieval candidates considered, access attempts made, readable PDFs obtained, rerankable PDFs retained).
-- When you use `chem-calculator`, `rdkit`, `opsin`, or `pubchem`, cite the generated script `result.json` path or a structured `tool_trace` entry in `submission_trace` or `claim_anchors`.
+- When you use `chem-calculator`, `rdkit`, `opsin`, or `pubchem`, cite the generated provider result JSON artifact path or a structured `tool_trace` entry in `submission_trace` or `claim_anchors`.
 - Do not fabricate citations, evidence anchors, reviewer responses, or literature coverage.
 - Do not spend turns on waiting, polling, or transport bookkeeping. The runtime wrapper handles that.
 - Do not write markdown headings or prose outside YAML. The file must be valid if saved exactly as written.
@@ -37,7 +37,7 @@ Skill routing rules:
 - For common name / CID / synonym / public compound property / external compound identifier checks, you must use `pubchem`, then validate structure-sensitive claims with `rdkit` when possible.
 - For literature-backed or externally factual claims that are not covered by the local chemistry provider skills, use the paper-skill toolchain.
 - Before using a chemistry provider skill, read only that skill's `SKILL.md` and the minimum request schema needed for the current route.
-- When a chemistry provider skill is used, `submission_trace` or `claim_anchors` must cite the generated script `result.json` path or include a structured `tool_trace` entry with the skill name, request summary, output path, and conclusion.
+- When a chemistry provider skill is used, `submission_trace` or `claim_anchors` must cite the generated provider result JSON artifact path or include a structured `tool_trace` entry with the skill name, request summary, output path, and conclusion.
 - If a triggered skill is unavailable, not applicable after inspecting the prompt, or intentionally skipped, `submission_trace` must include a step with `status: skipped`, `trigger`, `reason`, and `risk`. Do not silently fall back to unaided reasoning.
 
 Context-discipline rules:

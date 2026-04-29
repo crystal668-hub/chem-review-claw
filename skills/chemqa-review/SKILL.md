@@ -93,7 +93,7 @@ Important:
   web search when the prompt already provides the needed givens.
 - `SuperChem` structure questions should extract available SMILES or name text
   first, then route to `rdkit`, `opsin`, and `pubchem` as appropriate.
-- Reviewer lanes should cite script `result.json` files or structured
+- Reviewer lanes should cite provider result JSON artifact paths or structured
   `tool_trace` entries when challenging numeric or structural claims.
 - This phase does not include a dedicated image-reading or OCSR skill.
 

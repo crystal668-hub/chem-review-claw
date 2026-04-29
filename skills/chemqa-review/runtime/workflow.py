@@ -16,16 +16,19 @@ except ImportError:
 
 
 class ChemQAWorkflow:
-    """Native ChemQA workflow package skeleton.
+    """Inactive native ChemQA workflow package scaffold.
 
-    This class intentionally starts as a minimal, non-integrated workflow-package
-    implementation. It defines the stable hook surface and a conservative initial
-    state so DebateClaw V1 can progressively load package-based workflows without
-    immediately switching live runs.
+    Live ChemQA execution is controlled by DebateClaw's SQLite-backed
+    ``debate_state.py`` plus ``chemqa_review_openclaw_driver.py``. This scaffold
+    only preserves the future workflow-package hook shape and must not be treated
+    as the live control plane.
     """
 
     workflow_id = "chemqa-review@1"
     version = "1"
+    status = "scaffold"
+    active = False
+    live_control_plane = "debate_state_driver"
     roles = list(ALL_ROLES)
 
     def initialize_run(self, run_config: dict[str, Any]) -> dict[str, Any]:

@@ -1,1 +1,1 @@
-"""ChemQA native workflow runtime package."""
+"""Inactive ChemQA native workflow scaffold package."""

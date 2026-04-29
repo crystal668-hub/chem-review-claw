@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+from provider_trace_policy import PROVIDER_TRACE_MODES, validate_provider_traces
+
 ARTIFACT_CONTRACT_VERSION = "react-reviewed-v2"
 
 ROLE_TO_SEMANTIC_ROLE = {
@@ -356,13 +358,16 @@ def _canonical_trace(trace_value: Any) -> list[dict[str, Any]]:
             step = _clean_text(item.get("step") or item.get("name") or f"step-{index}")
             status = _clean_text(item.get("status") or item.get("result") or "partial").lower()
             detail = _clean_text(item.get("detail") or item.get("blocker") or item.get("summary") or item.get("notes"))
+            entry = dict(item)
         else:
             step = f"step-{index}"
             status = "partial"
             detail = _clean_text(item)
+            entry = {}
         if status not in ALLOWED_TRACE_STATUSES:
             status = "partial"
-        result.append({"step": step or f"step-{index}", "status": status, "detail": detail})
+        entry.update({"step": step or f"step-{index}", "status": status, "detail": detail})
+        result.append(entry)
     return result
 
 
@@ -449,7 +454,17 @@ def render_terminal_failure(*, team: str, role: str, reason: str, phase: str, ph
     return yaml_dump(payload)
 
 
-def check_candidate_submission(text: str, *, owner: str = CANDIDATE_OWNER, answer_kind: str = "") -> ArtifactCheck:
+def check_candidate_submission(
+    text: str,
+    *,
+    owner: str = CANDIDATE_OWNER,
+    answer_kind: str = "",
+    prompt: str = "",
+    eval_kind: str = "",
+    dataset: str = "",
+    provider_trace_mode: str = "audit",
+    require_existing_provider_paths: bool = False,
+) -> ArtifactCheck:
     payload = _load_yaml_mapping(text)
     warnings: list[str] = []
     if payload is None:
@@ -528,6 +543,22 @@ def check_candidate_submission(text: str, *, owner: str = CANDIDATE_OWNER, answe
             errors.append(f"submission_trace[{index}] is missing `step`")
         if _clean_text(item.get("status")).lower() not in ALLOWED_TRACE_STATUSES:
             errors.append(f"submission_trace[{index}] has invalid `status`")
+    mode = _clean_text(provider_trace_mode).lower() or "audit"
+    if mode not in PROVIDER_TRACE_MODES:
+        errors.append(f"invalid provider_trace_mode `{provider_trace_mode}`")
+    elif mode != "off":
+        provider_validation = validate_provider_traces(
+            canonical,
+            answer_kind=resolved_answer_kind,
+            prompt=prompt,
+            eval_kind=eval_kind,
+            dataset=dataset,
+            require_existing_provider_paths=require_existing_provider_paths,
+        )
+        if mode == "enforce":
+            errors.extend(provider_validation.errors)
+        else:
+            warnings.extend(provider_validation.errors)
     normalized_text = yaml_dump(canonical)
     return ArtifactCheck(canonical, normalized_text, errors, warnings)
 

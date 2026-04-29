@@ -124,6 +124,7 @@ class ArtifactOutcome:
     filename: str
     path: str
     validation_errors: list[str] = field(default_factory=list)
+    validation_warnings: list[str] = field(default_factory=list)
     normalized_text: str = ""
     changed_since_turn: bool = False
     classification: str = ""
@@ -134,6 +135,7 @@ class ArtifactOutcome:
             "filename": self.filename,
             "path": self.path,
             "validation_errors": list(self.validation_errors),
+            "validation_warnings": list(self.validation_warnings),
             "normalized_text": self.normalized_text,
             "changed_since_turn": self.changed_since_turn,
             "classification": self.classification,
@@ -1177,6 +1179,7 @@ class ChemQAReviewDriver:
                 filename=filename,
                 path=str(file_path),
                 validation_errors=[],
+                validation_warnings=[],
                 normalized_text="",
                 changed_since_turn=False,
                 classification="incomplete_turn_no_artifact",
@@ -1199,6 +1202,7 @@ class ChemQAReviewDriver:
                         filename=filename,
                         path=str(file_path),
                         validation_errors=[f"`{filename}` was not updated by model turn"],
+                        validation_warnings=list(getattr(checked, "warnings", []) or []),
                         normalized_text=post_normalized,
                         changed_since_turn=changed_since_turn,
                         classification="artifact_stale",
@@ -1208,6 +1212,7 @@ class ChemQAReviewDriver:
                 filename=filename,
                 path=str(file_path),
                 validation_errors=[],
+                validation_warnings=list(getattr(checked, "warnings", []) or []),
                 normalized_text=post_normalized,
                 changed_since_turn=changed_since_turn,
                 classification="submitted",
@@ -1217,6 +1222,7 @@ class ChemQAReviewDriver:
             filename=filename,
             path=str(file_path),
             validation_errors=list(checked.errors),
+            validation_warnings=list(getattr(checked, "warnings", []) or []),
             normalized_text=normalized_text.strip(),
             changed_since_turn=changed_since_turn,
             classification="artifact_invalid",

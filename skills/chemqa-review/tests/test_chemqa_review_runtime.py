@@ -182,6 +182,72 @@ submission_trace:
         self.assertFalse(checked.ok)
         self.assertIn("direct_answer", " ".join(checked.errors))
 
+    def test_numeric_answer_kind_audits_missing_chem_calculator_trace(self) -> None:
+        candidate = """
+artifact_kind: candidate_submission
+phase: propose
+owner: proposer-1
+direct_answer: "42"
+summary: numeric answer
+submission_trace:
+  - step: reasoning
+    status: success
+    detail: mental arithmetic only
+""".strip()
+        checked = transport.check_candidate_submission(
+            candidate,
+            owner="proposer-1",
+            answer_kind="numeric_short_answer",
+            provider_trace_mode="audit",
+        )
+        self.assertTrue(checked.ok)
+        self.assertTrue(any("chem-calculator" in warning for warning in checked.warnings))
+
+    def test_numeric_answer_kind_enforces_valid_chem_calculator_trace(self) -> None:
+        candidate = """
+artifact_kind: candidate_submission
+phase: propose
+owner: proposer-1
+direct_answer: "42"
+summary: numeric answer
+submission_trace:
+  - step: chem-calculator
+    status: success
+    skill: chem-calculator
+    result_path: /tmp/chemcalc/result.json
+    detail: computed the requested value
+""".strip()
+        checked = transport.check_candidate_submission(
+            candidate,
+            owner="proposer-1",
+            answer_kind="numeric_short_answer",
+            provider_trace_mode="enforce",
+            require_existing_provider_paths=False,
+        )
+        self.assertTrue(checked.ok)
+
+    def test_triggered_skill_skip_requires_reason_and_risk(self) -> None:
+        candidate = """
+artifact_kind: candidate_submission
+phase: propose
+owner: proposer-1
+direct_answer: "42"
+summary: numeric answer
+submission_trace:
+  - step: chem-calculator
+    status: skipped
+    trigger: numeric_short_answer
+    reason: calculator unsupported for this symbolic prompt
+    risk: arithmetic was checked manually only
+""".strip()
+        checked = transport.check_candidate_submission(
+            candidate,
+            owner="proposer-1",
+            answer_kind="numeric_short_answer",
+            provider_trace_mode="enforce",
+        )
+        self.assertTrue(checked.ok)
+
     def test_formal_review_prose_recovers_summary_and_review_items(self) -> None:
         review = """
 artifact_kind: formal_review
@@ -499,6 +565,33 @@ class ProtocolReconstructionTest(unittest.TestCase):
 
 
 class MaterializeRunplanTest(unittest.TestCase):
+    def test_compile_runplan_marks_workflow_package_as_inactive_scaffold(self) -> None:
+        command = [
+            TEST_PYTHON,
+            str(SCRIPTS_DIR / "compile_runplan.py"),
+            "--root",
+            str(SKILL_ROOT),
+            "--preset",
+            "chemqa-review@1",
+            "--goal",
+            "Question: control-plane metadata smoke test",
+            "--run-id",
+            "control-plane-smoke",
+            "--dry-run",
+            "--json",
+        ]
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        plan = json.loads(result.stdout)
+        runtime_context = plan["runtime_context"]
+        self.assertNotIn("workflow_package", runtime_context)
+        chemqa_review = runtime_context["chemqa_review"]
+        self.assertEqual("debate_state_driver", chemqa_review["control_plane"])
+        scaffold = chemqa_review["workflow_package_scaffold"]
+        self.assertFalse(scaffold["active"])
+        self.assertEqual("scaffold", scaffold["status"])
+        self.assertEqual("ChemQAWorkflow", scaffold["class"])
+
     def test_build_command_map_uses_chemqa_driver(self) -> None:
         run_plan = {
             "run_id": "chemqa-review-test-run",
@@ -605,7 +698,7 @@ class MaterializeRunplanTest(unittest.TestCase):
         self.assertIn("status: skipped", prompt)
         self.assertIn("trigger", prompt)
         self.assertIn("reason", prompt)
-        self.assertIn("result.json", prompt)
+        self.assertIn("provider result JSON artifact path", prompt)
         self.assertIn("tool_trace", prompt)
 
     def test_render_role_prompt_compact_snapshot_uses_same_runtime_dir(self) -> None:
@@ -632,6 +725,30 @@ class MaterializeRunplanTest(unittest.TestCase):
         self.assertIn("--runtime-dir /tmp/runtime", prompt)
         self.assertIn("/tmp/runtime/debate_state.py status", prompt)
         self.assertIn("/tmp/runtime/debate_state.py next-action", prompt)
+
+    def test_render_role_prompt_describes_fixed_lane_protocol_not_native_workflow(self) -> None:
+        run_plan = {
+            "run_id": "chemqa-review-test-run",
+            "request_snapshot": {"goal": "Check the state and produce a candidate."},
+            "prompt_assembly": {
+                "proposer-1": {
+                    "semantic_role": "candidate_owner",
+                    "contracts": [],
+                    "modules": [],
+                },
+            },
+            "runtime_context": {},
+        }
+
+        prompt = materialize_runplan.render_role_prompt(
+            SKILL_ROOT,
+            run_plan,
+            role_name="proposer-1",
+            runtime_root="/tmp/runtime",
+        )
+
+        self.assertIn("ChemQA fixed-lane review protocol", prompt)
+        self.assertNotIn("ChemQA native workflow", prompt)
 
 
 class NativeWorkflowStateTest(unittest.TestCase):
@@ -1036,19 +1153,18 @@ class ChemProviderIntegrationTest(unittest.TestCase):
         self.assertIn("rdkit", proposer)
         self.assertIn("opsin", proposer)
         self.assertIn("pubchem", proposer)
+        self.assertIn("provider result JSON artifact path", proposer)
 
         for reviewer_prompt in (reasoning, evidence, counter):
             self.assertIn("missing required tool trace", reviewer_prompt)
             self.assertIn("blocking", reviewer_prompt)
             self.assertIn("status: skipped", reviewer_prompt)
+            self.assertIn("provider result JSON artifact path", reviewer_prompt)
 
         self.assertIn("chem-calculator", reasoning)
-        self.assertIn("result.json", reasoning)
         self.assertIn("tool_trace", reasoning)
 
-        self.assertIn("result.json", evidence)
         self.assertIn("tool_trace", evidence)
-        self.assertIn("result.json", counter)
         self.assertIn("tool_trace", counter)
 
         self.assertIn("rdkit", required_skills)
@@ -1983,6 +2099,47 @@ class CoordinatorTimeoutSalvageTest(unittest.TestCase):
 
 
 class RunStatusShapeTest(unittest.TestCase):
+    def test_artifact_outcome_surfaces_provider_trace_audit_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)
+            proposal_path = Path(tmpdir) / transport.proposal_filename()
+            proposal_path.write_text(
+                "\n".join(
+                    [
+                        "artifact_kind: candidate_submission",
+                        "artifact_contract_version: react-reviewed-v2",
+                        "phase: propose",
+                        "owner: proposer-1",
+                        "direct_answer: '42'",
+                        "summary: numeric answer without provider trace.",
+                        "submission_trace:",
+                        "- step: reasoning",
+                        "  status: success",
+                        "  detail: mental arithmetic only.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = driver_module.ChemQAReviewDriver._observe_artifact_outcome(
+                driver,
+                file_path=proposal_path,
+                filename=transport.proposal_filename(),
+                checker=lambda text: transport.check_candidate_submission(
+                    text,
+                    owner="proposer-1",
+                    answer_kind="numeric_short_answer",
+                    provider_trace_mode="audit",
+                ),
+                pre_call_snapshot=None,
+                pre_call_normalized=None,
+                require_file_change=False,
+            )
+
+            self.assertEqual("present_valid", outcome.state)
+            self.assertTrue(any("chem-calculator" in warning for warning in outcome.validation_warnings))
+            self.assertTrue(any("chem-calculator" in warning for warning in outcome.as_payload()["validation_warnings"]))
+
     def test_ensure_candidate_submission_retries_after_duplicate_epoch_submission(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             driver = driver_module.ChemQAReviewDriver.__new__(driver_module.ChemQAReviewDriver)

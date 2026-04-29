@@ -219,13 +219,13 @@ class ExperimentGroup:
 EXPERIMENT_GROUPS: dict[str, ExperimentGroup] = {
     "chemqa_web_on": ExperimentGroup(
         id="chemqa_web_on",
-        label="ChemQAWorkflow + 启用 websearch plugin",
+        label="ChemQA fixed-lane review + 启用 websearch plugin",
         runner="chemqa",
         websearch=True,
     ),
     "chemqa_web_off": ExperimentGroup(
         id="chemqa_web_off",
-        label="ChemQAWorkflow + 禁用 websearch plugin",
+        label="ChemQA fixed-lane review + 禁用 websearch plugin",
         runner="chemqa",
         websearch=False,
     ),
@@ -390,7 +390,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--chemqa-model-profile",
         default=DEFAULT_CHEMQA_MODEL_PROFILE,
-        help="ChemQAWorkflow 所用 model profile，默认使用当前 benchmark 固定 profile",
+        help="ChemQA fixed-lane review 所用 model profile，默认使用当前 benchmark 固定 profile",
     )
     parser.add_argument("--judge-agent", default=DEFAULT_JUDGE_AGENT, help="rubric / 语义评测所用 judge agent id")
     parser.add_argument(
@@ -399,7 +399,7 @@ def parse_args() -> argparse.Namespace:
         help="judge runtime model，默认锁定为 su8/gpt-5.4",
     )
     parser.add_argument("--single-timeout", type=int, default=900, help="单一 LLM 每题超时秒数")
-    parser.add_argument("--chemqa-timeout", type=int, default=1800, help="ChemQAWorkflow 每题超时秒数")
+    parser.add_argument("--chemqa-timeout", type=int, default=1800, help="ChemQA fixed-lane review 每题超时秒数")
     parser.add_argument("--judge-timeout", type=int, default=300, help="Judge 每次评测超时秒数")
     parser.add_argument(
         "--max-concurrent-groups",

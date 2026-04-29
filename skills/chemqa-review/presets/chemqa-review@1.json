@@ -60,7 +60,7 @@
     "shared_modules": [
       "prompts/modules/policies/evidence-strict.md",
       "prompts/modules/policies/react-reviewed-acceptance.md",
-      "prompts/modules/policies/chemqa-native-workflow.md",
+      "prompts/modules/policies/chemqa-fixed-lane-protocol.md",
       "prompts/modules/context/required-skills.md",
       "prompts/modules/output/artifact-contract.md",
       "prompts/modules/output/pure-yaml-artifacts.md",
