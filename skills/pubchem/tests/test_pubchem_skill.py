@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ def test_cli_writes_structured_error_on_invalid_request(
     script_path = skill_root / "scripts" / script_name
 
     completed = subprocess.run(
-        ["python3", str(script_path), "--request-json", str(request_path), "--output-dir", str(output_dir), "--json"],
+        [sys.executable, str(script_path), "--request-json", str(request_path), "--output-dir", str(output_dir), "--json"],
         check=False,
         capture_output=True,
         text=True,
