@@ -1859,7 +1859,7 @@ class SingleLLMSessionWrapperTests(unittest.TestCase):
         meta = wrapper._base_time_reminder_meta(args)
 
         self.assertTrue(meta["enabled"])
-        self.assertEqual(4800, meta["threshold_seconds"])
+        self.assertEqual(6000, meta["threshold_seconds"])
 
     def test_time_reminder_due_after_threshold_but_not_sent_when_answer_is_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1877,8 +1877,8 @@ class SingleLLMSessionWrapperTests(unittest.TestCase):
             completed = self.attach_time_reminder_meta(
                 self.agent_result("Reasoning.\nFINAL ANSWER: B"),
                 due=True,
-                elapsed=650.0,
-                remaining=250.0,
+                elapsed=760.0,
+                remaining=140.0,
             )
             audit = {
                 "requested_session_id": "session-a",
@@ -1922,8 +1922,8 @@ class SingleLLMSessionWrapperTests(unittest.TestCase):
             primary = self.attach_time_reminder_meta(
                 self.agent_result("Partial reasoning without final marker."),
                 due=True,
-                elapsed=650.0,
-                remaining=250.0,
+                elapsed=760.0,
+                remaining=140.0,
             )
             reminder_result = self.agent_result("Condensed reasoning.\nFINAL ANSWER: B")
             audit = {
@@ -1947,8 +1947,8 @@ class SingleLLMSessionWrapperTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertEqual(2, run_mock.call_count)
         reminder_kwargs = run_mock.call_args_list[1].kwargs
-        self.assertEqual(250, reminder_kwargs["timeout_override"])
-        self.assertIn("Less than one third of the answer budget remains", reminder_kwargs["message_override"])
+        self.assertEqual(140, reminder_kwargs["timeout_override"])
+        self.assertIn("Less than one sixth of the answer budget remains", reminder_kwargs["message_override"])
         self.assertIn("Please quickly organize the reasoning chain already available in this session", reminder_kwargs["message_override"])
         self.assertIn("Converge on a complete final answer in the required format", reminder_kwargs["message_override"])
         self.assertIn("Do not start new tool chains or skill exploration", reminder_kwargs["message_override"])
@@ -2025,7 +2025,7 @@ class SingleLLMSessionWrapperTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir, \
             mock.patch.object(wrapper.subprocess, "Popen", return_value=FakeProcess()) as popen_mock, \
-            mock.patch.object(wrapper.time, "monotonic", side_effect=[0.0, 601.0, 650.0]), \
+            mock.patch.object(wrapper.time, "monotonic", side_effect=[0.0, 751.0, 800.0]), \
             mock.patch.object(wrapper.time, "sleep", return_value=None):
             workspace = str(Path(tmpdir).resolve())
             result = wrapper._run_openclaw_with_time_reminder_tracking(
@@ -2038,8 +2038,8 @@ class SingleLLMSessionWrapperTests(unittest.TestCase):
         self.assertEqual(workspace, popen_mock.call_args.kwargs["cwd"])
         self.assertEqual(0, result.returncode)
         self.assertTrue(result.time_reminder_meta["due_before_primary_return"])
-        self.assertEqual(650.0, result.time_reminder_meta["primary_elapsed_seconds"])
-        self.assertEqual(250.0, result.time_reminder_meta["remaining_seconds_at_primary_return"])
+        self.assertEqual(800.0, result.time_reminder_meta["primary_elapsed_seconds"])
+        self.assertEqual(100.0, result.time_reminder_meta["remaining_seconds_at_primary_return"])
 
 
 if __name__ == "__main__":

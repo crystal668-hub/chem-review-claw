@@ -39,11 +39,10 @@ OPENCLAW_TIMEOUT_SENTINELS = (
     "LLM request timed out.",
     "Request timed out.",
 )
-TIME_REMINDER_MIN_TIMEOUT_SECONDS = 600
-TIME_REMINDER_ELAPSED_FRACTION = 2 / 3
+TIME_REMINDER_ELAPSED_FRACTION = 5 / 6
 TIME_REMINDER_POLL_SECONDS = 1.0
 TIME_REMINDER_PROMPT = """TIME REMINDER:
-Less than one third of the answer budget remains. Please quickly organize the reasoning chain already available in this session.
+Less than one sixth of the answer budget remains. Please quickly organize the reasoning chain already available in this session.
 Converge on a complete final answer in the required format.
 Do not start new tool chains or skill exploration unless one short decisive check is clearly necessary."""
 def _answer_schema_from_args(args: argparse.Namespace) -> dict[str, Any]:
@@ -297,12 +296,12 @@ def _rescue_output_text(payload: Any) -> str:
 
 def _time_reminder_enabled(args: argparse.Namespace) -> bool:
     timeout = int(getattr(args, "timeout", 0) or 0)
-    return timeout > TIME_REMINDER_MIN_TIMEOUT_SECONDS
+    return timeout > 0
 
 
 def _time_reminder_threshold_seconds(timeout_seconds: int) -> int:
     if timeout_seconds <= 0:
-        return TIME_REMINDER_MIN_TIMEOUT_SECONDS
+        return 0
     return max(1, math.ceil(timeout_seconds * TIME_REMINDER_ELAPSED_FRACTION))
 
 
