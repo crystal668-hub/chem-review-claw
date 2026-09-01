@@ -52,6 +52,9 @@ def test_dashboard_static_frontend_contains_dashboard_shell() -> None:
     assert "group.skills_enabled" in script
     assert "Skill calls:" in script
     assert "Skill failures:" in script
+    assert "function renderGroupDuration" in script
+    assert "agent_duration_seconds" in script
+    assert "answer ${Math.round(agentDuration)}s" in script
 
 
 def test_dashboard_static_assets_disable_browser_cache(tmp_path: Path) -> None:

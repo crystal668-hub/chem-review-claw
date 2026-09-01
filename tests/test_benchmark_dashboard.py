@@ -130,6 +130,38 @@ def test_list_runs_reads_schema_v2_results_and_annotations(tmp_path: Path) -> No
     assert runs[0]["summary"]["groups"]["single_llm_skills_on"]["avg_normalized_score"] == 1.0
 
 
+def test_dashboard_prefers_runner_agent_duration_for_record_timings(tmp_path: Path) -> None:
+    run_root = write_demo_run(tmp_path)
+    result = result_payload(
+        group_id="single_llm_skills_on",
+        record_id="r1",
+        runner_meta={"durationMs": 3210},
+    )
+    write_json(run_root / "results.json", {"records": 1, "groups": [{"id": "single_llm_skills_on"}], "results": [result]})
+    write_json(run_root / "per-record" / "single_llm_skills_on" / "r1.json", result)
+
+    dashboard = dashboard_service.BenchmarkDashboard(run_roots=[tmp_path])
+
+    records = dashboard.list_records(run_root.name)
+    record = dashboard.get_record(run_root.name, "r1")
+
+    assert records[0]["group_results"][0]["agent_duration_seconds"] == 3.21
+    assert records[0]["group_results"][0]["elapsed_seconds"] == 12.5
+    assert record["groups"][0]["diagnostics"]["agent_duration_seconds"] == 3.21
+    assert record["groups"][0]["diagnostics"]["elapsed_seconds"] == 12.5
+
+
+@pytest.mark.parametrize("duration_ms", [None, "3210", -1, float("nan"), float("inf")])
+def test_dashboard_ignores_invalid_runner_agent_duration(duration_ms: object) -> None:
+    result = result_payload(
+        group_id="single_llm_skills_on",
+        record_id="r1",
+        runner_meta={"durationMs": duration_ms},
+    )
+
+    assert dashboard_service._agent_duration_seconds(result) is None
+
+
 def test_list_runs_pins_favorited_runs_and_preserves_newest_first_order(tmp_path: Path) -> None:
     older_favorite = write_demo_run(tmp_path, run_id="favorite-old")
     newer_favorite = write_demo_run(tmp_path, run_id="favorite-new")

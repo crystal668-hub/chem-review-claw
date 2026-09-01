@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -179,6 +180,19 @@ def _audit_int(audit: dict[str, Any], key: str) -> int:
     return int(value) if isinstance(value, (int, float)) else 0
 
 
+def _agent_duration_seconds(result: dict[str, Any]) -> float | None:
+    runner_meta = result.get("runner_meta") if isinstance(result.get("runner_meta"), dict) else {}
+    duration_ms = runner_meta.get("durationMs")
+    if (
+        isinstance(duration_ms, (int, float))
+        and not isinstance(duration_ms, bool)
+        and math.isfinite(float(duration_ms))
+        and duration_ms >= 0
+    ):
+        return float(duration_ms) / 1000
+    return None
+
+
 def _diagnostics_payload(result: dict[str, Any], skill_audit: dict[str, Any]) -> dict[str, Any]:
     skills_enabled = bool(result.get("skills_enabled", False))
     runner_meta = result.get("runner_meta") if isinstance(result.get("runner_meta"), dict) else {}
@@ -194,6 +208,7 @@ def _diagnostics_payload(result: dict[str, Any], skill_audit: dict[str, Any]) ->
     if not has_exec_failure_count:
         exec_failure_count = legacy_skill_failures
     return {
+        "agent_duration_seconds": _agent_duration_seconds(result),
         "elapsed_seconds": result.get("elapsed_seconds"),
         "openclaw_tool_call_count": skill_audit.get("openclaw_tool_call_count", skill_audit.get("tool_call_count")),
         "exec_tool_call_count": exec_call_count,
@@ -420,6 +435,7 @@ class BenchmarkDashboard:
                             "group_id": item.get("group_id", ""),
                             "score_label": _score_label(item),
                             "outcome": _outcome(item),
+                            "agent_duration_seconds": _agent_duration_seconds(item),
                             "elapsed_seconds": item.get("elapsed_seconds"),
                         }
                         for item in sorted(items, key=_group_sort_key)

@@ -99,6 +99,14 @@ function pct(progress) {
   return Math.max(0, Math.min(100, Math.round((completed / total) * 100)));
 }
 
+function renderGroupDuration(diagnostics = {}) {
+  const agentDuration = diagnostics.agent_duration_seconds;
+  if (typeof agentDuration === "number" && Number.isFinite(agentDuration)) {
+    return `answer ${Math.round(agentDuration)}s`;
+  }
+  return `elapsed ${Math.round(Number(diagnostics.elapsed_seconds) || 0)}s`;
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -301,7 +309,7 @@ function renderGroups(record) {
         </div>
         <div class="metrics">
           ${badge(`score ${evalPayload.normalized_score ?? evalPayload.score ?? "-"}`)}
-          ${badge(`elapsed ${Math.round(group.diagnostics?.elapsed_seconds || 0)}s`)}
+          ${badge(renderGroupDuration(group.diagnostics))}
           ${badge(group.status_axes?.answer_availability || "answer")}
           ${group.status_axes?.degraded_execution ? badge("degraded", "running") : ""}
           ${isolation.adjudication ? badge(isolation.adjudication, isolation.adjudication === "non_evaluable" ? "failed" : "running") : ""}

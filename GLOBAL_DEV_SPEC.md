@@ -310,7 +310,10 @@ are non-evaluable, unscored, and use `execution_error_kind=cancelled`.
   their pending state through the refresh control and restore the control after
   either success or failure. Favorited runs are pinned to the top of the run
   list; within favorited and non-favorited groups, discovery keeps the existing
-  newest-first ordering.
+  newest-first ordering. Record detail timing prefers the agent execution
+  duration from `runner_meta.durationMs`, converted from milliseconds to
+  seconds, and falls back to persisted `elapsed_seconds` for legacy results
+  without that metadata.
 
 ### Paper pipeline
 
