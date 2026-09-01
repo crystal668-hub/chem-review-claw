@@ -222,6 +222,15 @@ are non-evaluable, unscored, and use `execution_error_kind=cancelled`.
 
 ### Single-LLM runner
 
+- Bounded single-LLM attempts default to 7200 seconds (2 hours). The runner
+  forwards this budget to OpenClaw as `--timeout`; the wrapper subprocess guard
+  adds the 90-second finalization safety window and 30-second process margin,
+  for a default outer limit of 7320 seconds.
+- The runner prepends the effective budget to the agent prompt as `Time budget:
+  <seconds> seconds for the whole answer attempt.` For budgets above 600
+  seconds, the wrapper tracks the primary turn and, when it returns without a
+  complete answer after roughly two thirds of the budget (4800 seconds at the
+  default), sends a same-session reminder with the remaining time.
 - Every primary or timeout-retry attempt receives a fresh sentinel-managed
   workspace and run-scoped session id.
 - The runner materializes the role contract, attaches current scratch paths,

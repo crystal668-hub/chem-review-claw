@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -38,7 +39,8 @@ OPENCLAW_TIMEOUT_SENTINELS = (
     "LLM request timed out.",
     "Request timed out.",
 )
-TIME_REMINDER_SECONDS = 600
+TIME_REMINDER_MIN_TIMEOUT_SECONDS = 600
+TIME_REMINDER_ELAPSED_FRACTION = 2 / 3
 TIME_REMINDER_POLL_SECONDS = 1.0
 TIME_REMINDER_PROMPT = """TIME REMINDER:
 Less than one third of the answer budget remains. Please quickly organize the reasoning chain already available in this session.
@@ -295,13 +297,20 @@ def _rescue_output_text(payload: Any) -> str:
 
 def _time_reminder_enabled(args: argparse.Namespace) -> bool:
     timeout = int(getattr(args, "timeout", 0) or 0)
-    return timeout > TIME_REMINDER_SECONDS
+    return timeout > TIME_REMINDER_MIN_TIMEOUT_SECONDS
+
+
+def _time_reminder_threshold_seconds(timeout_seconds: int) -> int:
+    if timeout_seconds <= 0:
+        return TIME_REMINDER_MIN_TIMEOUT_SECONDS
+    return max(1, math.ceil(timeout_seconds * TIME_REMINDER_ELAPSED_FRACTION))
 
 
 def _base_time_reminder_meta(args: argparse.Namespace) -> dict[str, Any]:
+    timeout_seconds = int(getattr(args, "timeout", 0) or 0)
     return {
         "enabled": _time_reminder_enabled(args),
-        "threshold_seconds": TIME_REMINDER_SECONDS,
+        "threshold_seconds": _time_reminder_threshold_seconds(timeout_seconds),
         "due_before_primary_return": False,
         "primary_elapsed_seconds": 0.0,
         "applied": False,
@@ -560,6 +569,7 @@ def _run_openclaw_with_time_reminder_tracking(
     env: dict[str, str],
 ) -> subprocess.CompletedProcess[str]:
     timeout_seconds = int(getattr(args, "timeout", 0) or 0)
+    threshold_seconds = _time_reminder_threshold_seconds(timeout_seconds)
     start = time.monotonic()
     reminder_due = False
     proc = subprocess.Popen(
@@ -576,15 +586,15 @@ def _run_openclaw_with_time_reminder_tracking(
             break
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - start
-            if not reminder_due and elapsed >= TIME_REMINDER_SECONDS:
+            if not reminder_due and elapsed >= threshold_seconds:
                 reminder_due = True
     elapsed = time.monotonic() - start
-    reminder_due = reminder_due or elapsed >= TIME_REMINDER_SECONDS
+    reminder_due = reminder_due or elapsed >= threshold_seconds
     remaining = max(0.0, float(timeout_seconds) - elapsed) if timeout_seconds > 0 else 0.0
     result = subprocess.CompletedProcess(command, proc.returncode, stdout=stdout, stderr=stderr)
     result.time_reminder_meta = {
         "enabled": True,
-        "threshold_seconds": TIME_REMINDER_SECONDS,
+        "threshold_seconds": threshold_seconds,
         "due_before_primary_return": reminder_due,
         "primary_elapsed_seconds": elapsed,
         "applied": False,

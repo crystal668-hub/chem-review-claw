@@ -433,7 +433,7 @@ class BenchmarkTestModuleTests(unittest.TestCase):
 
             self.assertEqual(0, exit_code)
             self.assertEqual("custom-single-agent", captured.get("single_agent"))
-            self.assertEqual("900", captured.get("single_policy_timeout"))
+            self.assertEqual("7200", captured.get("single_policy_timeout"))
 
     def test_main_print_selected_records_filters_by_subsets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

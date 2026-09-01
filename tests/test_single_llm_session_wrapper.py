@@ -1853,6 +1853,14 @@ class SingleLLMSessionWrapperTests(unittest.TestCase):
         self.assertFalse(reminder["applied"])
         self.assertEqual("threshold_not_reached", reminder["skipped_reason"])
 
+    def test_time_reminder_threshold_scales_with_answer_budget(self) -> None:
+        args = argparse.Namespace(timeout=7200)
+
+        meta = wrapper._base_time_reminder_meta(args)
+
+        self.assertTrue(meta["enabled"])
+        self.assertEqual(4800, meta["threshold_seconds"])
+
     def test_time_reminder_due_after_threshold_but_not_sent_when_answer_is_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -205,7 +205,7 @@ def parse_args() -> argparse.Namespace:
         choices=experiments.THINKING_LEVEL_CHOICES,
         help="judge OpenClaw thinking level，默认 high",
     )
-    parser.add_argument("--single-timeout", type=int, default=900, help="单一 LLM 每题超时秒数")
+    parser.add_argument("--single-timeout", type=int, default=7200, help="单一 LLM 每题超时秒数，默认 7200 秒（2 小时）")
     parser.add_argument(
         "--single-timeout-retries",
         type=int,
