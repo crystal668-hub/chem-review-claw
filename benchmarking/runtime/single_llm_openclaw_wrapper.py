@@ -302,7 +302,7 @@ def _time_reminder_enabled(args: argparse.Namespace) -> bool:
 def _time_reminder_threshold_seconds(timeout_seconds: int) -> int:
     if timeout_seconds <= 0:
         return 0
-    return max(1, math.ceil(timeout_seconds * TIME_REMINDER_ELAPSED_FRACTION))
+    return math.ceil(timeout_seconds * TIME_REMINDER_ELAPSED_FRACTION)
 
 
 def _base_time_reminder_meta(args: argparse.Namespace) -> dict[str, Any]:
