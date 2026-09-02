@@ -163,8 +163,6 @@ stable `EvaluationResult` shape and execution-error construction;
 - The benchmark CLI and fixed-lane OpenClaw drivers accept the `adaptive`
   thinking level required by MiniMax-M3; the Benchmark Orchestrator validates
   the model-specific level before launching a run.
-- `scripts/mineru_service.sh` manages the optional local MinerU service used by
-  the paper pipeline.
 - `benchmarking/resources/agent-workspace-templates/` contains the canonical
   benchmark workspace base contract and role overlays.
 - `benchmarking/resources/verifier_grounded/` contains the pinned release
@@ -332,8 +330,11 @@ Paper processing is an explicit fixed sequence of independent scripts:
 retrieval -> access -> parse
 ```
 
-Parsing can use MinerU or PyMuPDF. The three stages exchange explicit JSON
-artifacts and are not exposed as one transactional orchestration service.
+Parsing uses the official MinerU Agent API for small documents, the optional
+Precision API for larger documents, and PyMuPDF as the final local fallback.
+The stages exchange explicit JSON artifacts and are not exposed as one
+transactional orchestration service. No local MinerU CLI or `mineru-api`
+service is required.
 
 ## 4. Stable Data and Isolation Contracts
 
@@ -494,7 +495,7 @@ boundary. Processes still run as the same local user.
   and may contain provider and gateway configuration. It must be treated as local
   operational state.
 - Many chemistry skills require optional Python packages, external executables,
-  API credentials, network providers, or optional local MinerU services. Startup
+  API credentials, network providers, or optional MinerU API access. Startup
   health filtering is the runtime authority for benchmark exposure.
 
 ### Non-goals of the current system
@@ -528,7 +529,7 @@ boundary. Processes still run as the same local user.
 
 ### Operational runbooks and component contracts
 
-- `README.md`: verifier-grounded CLI usage and local MinerU operations.
+- `README.md`: verifier-grounded CLI usage and paper-processing operations.
 - `docs/benchmark-dashboard-usage.md`: dashboard launch, data sources, and review
   workflow.
 - `skills/debateclaw-v1/SKILL.md` and `skills/debateclaw-v1/references/`:

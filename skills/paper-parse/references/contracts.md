@@ -5,8 +5,8 @@
 - `--input`: local `.pdf` path or a UTF-8 text artifact such as `.txt`, `.md`, or `.html`
 - `--output-dir`: directory for generated artifacts
 - optional config fields can be supplied via `--config-json`
-- supported PDF backend config keys: `primary_backend`, `secondary_backend`, `mineru_backend`, `mineru_method`, `mineru_api_url`
-- stable default env key: `MINERU_API_URL` from process env or repo-root `.env`
+- supported PDF backend config keys: `backend`, `agent_api_url`, `precision_api_url`, `precision_token_env`, `agent_timeout_seconds`, `precision_timeout_seconds`, `poll_interval_seconds`, `max_retries`, `language`, `enable_table`, `enable_formula`, `is_ocr`
+- stable default env keys: `MINERU_AGENT_API_URL`, `MINERU_PRECISION_API_URL`, and optional `MINERU_API_TOKEN`
 
 ## Output JSON
 
@@ -33,12 +33,12 @@
 ## Parser Policy
 
 - Text inputs bypass PDF backends and can succeed without `mineru` or `pymupdf`
-- For PDF inputs, the primary backend defaults to `mineru`
-- The secondary PDF backend defaults to `pymupdf`
-- MinerU is invoked via local CLI in `pipeline` mode by default with `mineru_method=auto`
-- If `mineru_api_url` is set, `paper-parse` forwards it as `mineru --api-url ...` so repeated runs can reuse a long-lived `mineru-api`
-- If `mineru_api_url` is omitted, `paper-parse` falls back to `MINERU_API_URL` from the runtime environment or repo-root `.env`
-- If MinerU is unusable or rejected by quality gates, PyMuPDF is attempted when configured
+- For PDF inputs, `backend=auto` is the default
+- Files at or below 10 MB and 20 pages try the MinerU Agent Lightweight API first
+- Larger files try the MinerU Precision API only when its token is configured
+- Both cloud paths use asynchronous submit/upload/poll/download flows
+- If a cloud backend is unavailable, over limits, rate-limited, or rejected by quality gates, PyMuPDF is attempted
+- A local MinerU CLI and local `mineru-api` process are not used
 - Unsupported PDF backend names are ignored with a structured warning instead of crashing
-- If both PDF backends are unavailable or fail, the script returns a structured `fulltext_unusable` result instead of failing at import time
+- If all configured cloud backends and PyMuPDF are unavailable or fail, the script returns a structured `fulltext_unusable` result instead of failing at import time
 - No repository-local imports or runtime state are required

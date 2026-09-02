@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
-import ipaddress
+import io
 import json
 import os
 import re
-import shutil
-import subprocess
-import tempfile
+import time
+import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+
+import requests
 
 SECTION_HEADING_BODY = (
     r"(?:#{1,6}\s*)?"
@@ -43,19 +44,31 @@ SECTION_TYPE_MAP = {
 }
 UNKNOWN_SECTION_TITLE = "Body"
 UNKNOWN_SECTION_TYPE = "unknown"
-SUPPORTED_PDF_BACKENDS = {"mineru", "pymupdf"}
+SUPPORTED_PDF_BACKENDS = {"auto", "mineru-agent-api", "mineru-precision-api", "pymupdf"}
 PDF_BACKEND_DISPLAY_NAMES = {
-    "mineru": "MinerU",
+    "mineru-agent-api": "MinerU Agent API",
+    "mineru-precision-api": "MinerU Precision API",
     "pymupdf": "PyMuPDF",
 }
 PDF_BACKEND_ALIASES = {
     "fitz": "pymupdf",
-    "magic-pdf": "mineru",
-    "magic_pdf": "mineru",
+    "mineru": "auto",
+    "agent": "mineru-agent-api",
+    "precision": "mineru-precision-api",
 }
 MINERU_PAGE_AUXILIARY_TYPES = {"header", "footer", "page_number", "aside_text", "page_footnote", "seal"}
-MINERU_TIMEOUT_SECONDS = 600
+MINERU_AGENT_API_URL = "https://mineru.net/api/v1/agent"
+MINERU_PRECISION_API_URL = "https://mineru.net/api/v4"
+LIGHTWEIGHT_MAX_BYTES = 10 * 1024 * 1024
+LIGHTWEIGHT_MAX_PAGES = 20
+MINERU_REQUEST_TIMEOUT_SECONDS = 60.0
+MINERU_AGENT_TIMEOUT_SECONDS = 600.0
+MINERU_PRECISION_TIMEOUT_SECONDS = 900.0
+MINERU_POLL_INTERVAL_SECONDS = 3.0
+MINERU_MAX_RETRIES = 2
+RETRYABLE_HTTP_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 DEFAULT_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+RUNTIME_ENV_FILE = DEFAULT_ENV_FILE.parent.parent / ".env"
 
 
 def _compact_text(value: Any) -> str:
@@ -88,7 +101,11 @@ def _default_env_value(name: str) -> str | None:
     if runtime_value:
         return runtime_value
     dotenv_value = _compact_text(_read_dotenv(str(DEFAULT_ENV_FILE)).get(name))
-    return dotenv_value or None
+    if dotenv_value:
+        return dotenv_value
+    if RUNTIME_ENV_FILE != DEFAULT_ENV_FILE:
+        return _compact_text(_read_dotenv(str(RUNTIME_ENV_FILE)).get(name)) or None
+    return None
 
 
 def _normalize_text(value: Any) -> str:
@@ -155,11 +172,18 @@ def _repeated_line_ratio(text: str) -> float:
 @dataclass
 class ParserConfig:
     enabled: bool = True
-    primary_backend: str = "mineru"
-    secondary_backend: str = "pymupdf"
-    mineru_backend: str = "pipeline"
-    mineru_method: str = "auto"
-    mineru_api_url: str | None = None
+    backend: str = "auto"
+    agent_api_url: str = MINERU_AGENT_API_URL
+    precision_api_url: str = MINERU_PRECISION_API_URL
+    precision_token_env: str = "MINERU_API_TOKEN"
+    agent_timeout_seconds: float = MINERU_AGENT_TIMEOUT_SECONDS
+    precision_timeout_seconds: float = MINERU_PRECISION_TIMEOUT_SECONDS
+    poll_interval_seconds: float = MINERU_POLL_INTERVAL_SECONDS
+    max_retries: int = MINERU_MAX_RETRIES
+    language: str = "ch"
+    enable_table: bool = True
+    enable_formula: bool = True
+    is_ocr: bool = False
     min_total_chars: int = 800
     min_chars_per_text_page: int = 80
     min_text_page_ratio: float = 0.5
@@ -173,11 +197,18 @@ class ParserConfig:
         raw = dict(payload or {})
         config = cls(
             enabled=bool(raw.get("enabled", True)),
-            primary_backend=_normalize_backend_name(raw.get("primary_backend") or "mineru"),
-            secondary_backend=_normalize_backend_name(raw.get("secondary_backend") or "pymupdf"),
-            mineru_backend=_compact_text(raw.get("mineru_backend") or "pipeline").lower() or "pipeline",
-            mineru_method=_compact_text(raw.get("mineru_method") or "auto").lower() or "auto",
-            mineru_api_url=_compact_text(raw.get("mineru_api_url") or _default_env_value("MINERU_API_URL")) or None,
+            backend=_normalize_backend_name(raw.get("backend") or "auto"),
+            agent_api_url=_compact_text(raw.get("agent_api_url") or _default_env_value("MINERU_AGENT_API_URL") or MINERU_AGENT_API_URL).rstrip("/"),
+            precision_api_url=_compact_text(raw.get("precision_api_url") or _default_env_value("MINERU_PRECISION_API_URL") or MINERU_PRECISION_API_URL).rstrip("/"),
+            precision_token_env=_compact_text(raw.get("precision_token_env") or "MINERU_API_TOKEN") or "MINERU_API_TOKEN",
+            agent_timeout_seconds=max(1.0, float(raw.get("agent_timeout_seconds", MINERU_AGENT_TIMEOUT_SECONDS) or MINERU_AGENT_TIMEOUT_SECONDS)),
+            precision_timeout_seconds=max(1.0, float(raw.get("precision_timeout_seconds", MINERU_PRECISION_TIMEOUT_SECONDS) or MINERU_PRECISION_TIMEOUT_SECONDS)),
+            poll_interval_seconds=max(0.1, float(raw.get("poll_interval_seconds", MINERU_POLL_INTERVAL_SECONDS) or MINERU_POLL_INTERVAL_SECONDS)),
+            max_retries=max(0, int(raw.get("max_retries", MINERU_MAX_RETRIES) or MINERU_MAX_RETRIES)),
+            language=_compact_text(raw.get("language") or "ch").lower() or "ch",
+            enable_table=bool(raw.get("enable_table", True)),
+            enable_formula=bool(raw.get("enable_formula", True)),
+            is_ocr=bool(raw.get("is_ocr", False)),
             min_total_chars=max(0, int(raw.get("min_total_chars", 800) or 800)),
             min_chars_per_text_page=max(1, int(raw.get("min_chars_per_text_page", 80) or 80)),
             min_text_page_ratio=min(1.0, max(0.0, float(raw.get("min_text_page_ratio", 0.5) or 0.5))),
@@ -189,6 +220,235 @@ class ParserConfig:
         if config.snippet_overlap_chars >= config.snippet_target_chars:
             config.snippet_overlap_chars = max(0, config.snippet_target_chars // 4)
         return config
+
+
+class MineruBackendError(RuntimeError):
+    def __init__(self, message: str, *, error_code: int | str | None = None, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = retryable
+
+
+class MineruHttpClient:
+    def __init__(self, *, timeout_seconds: float, poll_interval_seconds: float, max_retries: int) -> None:
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.poll_interval_seconds = max(0.1, float(poll_interval_seconds))
+        self.max_retries = max(0, int(max_retries))
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = requests.request(method, url, timeout=self.timeout_seconds, **kwargs)
+            except requests.RequestException as exc:
+                if attempt >= self.max_retries:
+                    raise MineruBackendError(str(exc), retryable=True) from exc
+                time.sleep(min(2.0 ** attempt, 8.0))
+                continue
+            if response.status_code in RETRYABLE_HTTP_STATUS_CODES:
+                if attempt < self.max_retries:
+                    retry_after = _compact_text(response.headers.get("Retry-After"))
+                    try:
+                        delay = min(8.0, max(0.1, float(retry_after))) if retry_after else min(2.0 ** attempt, 8.0)
+                    except ValueError:
+                        delay = min(2.0 ** attempt, 8.0)
+                    time.sleep(delay)
+                    continue
+                raise MineruBackendError(
+                    f"HTTP {response.status_code} from MinerU API",
+                    error_code=response.status_code,
+                    retryable=True,
+                )
+            if response.status_code >= 400:
+                raise MineruBackendError(
+                    f"HTTP {response.status_code} from MinerU API: {_compact_text(response.text)[:300]}",
+                    error_code=response.status_code,
+                )
+            return response
+        raise MineruBackendError("MinerU API request exhausted retries", retryable=True)
+
+    def _json_request(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        for attempt in range(self.max_retries + 1):
+            response = self._request(method, url, **kwargs)
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise MineruBackendError("MinerU API returned invalid JSON") from exc
+            if not isinstance(payload, dict):
+                raise MineruBackendError("MinerU API returned a non-object JSON payload")
+            code = payload.get("code", 0)
+            if code in (0, "0", None):
+                return payload
+            retryable = code in {-10001, -60007, -60009, -60010, -60022}
+            if retryable and attempt < self.max_retries:
+                time.sleep(min(2.0 ** attempt, 8.0))
+                continue
+            raise MineruBackendError(
+                f"MinerU API error {code}: {_compact_text(payload.get('msg')) or 'request failed'}",
+                error_code=code,
+                retryable=retryable,
+            )
+        raise MineruBackendError("MinerU API request exhausted retries", retryable=True)
+
+    def _poll(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str] | None,
+        timeout_seconds: float,
+        result_getter: Any,
+    ) -> tuple[dict[str, Any], list[str]]:
+        deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+        states: list[str] = []
+        while time.monotonic() < deadline:
+            payload = self._json_request("GET", url, headers=headers)
+            data = result_getter(payload)
+            if not isinstance(data, dict):
+                raise MineruBackendError("MinerU API result payload is missing task data")
+            state = _compact_text(data.get("state")) or "unknown"
+            states.append(state)
+            if state in {"done", "failed"}:
+                return data, states
+            if state not in {"waiting-file", "uploading", "pending", "running", "converting"}:
+                raise MineruBackendError(f"MinerU API returned unknown task state: {state}")
+            time.sleep(min(self.poll_interval_seconds, max(0.1, deadline - time.monotonic())))
+        raise MineruBackendError(f"MinerU task polling timed out after {timeout_seconds:g}s", retryable=True)
+
+
+class MineruAgentClient(MineruHttpClient):
+    def extract(self, *, pdf_path: Path, config: ParserConfig) -> tuple[str, dict[str, Any]]:
+        request_data = {
+            "file_name": pdf_path.name,
+            "language": config.language,
+            "enable_table": config.enable_table,
+            "enable_formula": config.enable_formula,
+            "is_ocr": config.is_ocr,
+        }
+        submitted = self._json_request(
+            "POST",
+            f"{config.agent_api_url}/parse/file",
+            headers={"Content-Type": "application/json"},
+            json=request_data,
+        )
+        data = dict(submitted.get("data") or {})
+        task_id = _compact_text(data.get("task_id"))
+        file_url = _compact_text(data.get("file_url"))
+        if not task_id or not file_url:
+            raise MineruBackendError("MinerU Agent API did not return task_id and file_url")
+        upload = self._request("PUT", file_url, data=pdf_path.read_bytes())
+        if upload.status_code not in {200, 201, 204}:
+            raise MineruBackendError(f"MinerU signed upload failed with HTTP {upload.status_code}")
+        result, states = self._poll(
+            url=f"{config.agent_api_url}/parse/{task_id}",
+            headers=None,
+            timeout_seconds=config.agent_timeout_seconds,
+            result_getter=lambda payload: dict(payload.get("data") or {}),
+        )
+        if _compact_text(result.get("state")) == "failed":
+            code = result.get("err_code")
+            reason = _compact_text(result.get("err_msg")) or "MinerU Agent extraction failed"
+            raise MineruBackendError(f"{reason} (error_code={code})", error_code=code, retryable=code in {-10001, -60007, -60009, -60010, -60022})
+        markdown_url = _compact_text(result.get("markdown_url"))
+        if not markdown_url:
+            raise MineruBackendError("MinerU Agent task completed without markdown_url")
+        markdown_response = self._request("GET", markdown_url)
+        markdown = _normalize_text(markdown_response.text)
+        if not markdown:
+            raise MineruBackendError("MinerU Agent returned an empty Markdown document")
+        return markdown, {
+            "task_id": task_id,
+            "trace_id": _compact_text(submitted.get("trace_id")) or None,
+            "state_history": states,
+            "result_url": markdown_url,
+        }
+
+
+class MineruPrecisionClient(MineruHttpClient):
+    def extract(self, *, pdf_path: Path, config: ParserConfig, token: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+        data_id = hashlib.sha256(pdf_path.read_bytes()).hexdigest()[:32]
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        submitted = self._json_request(
+            "POST",
+            f"{config.precision_api_url}/file-urls/batch",
+            headers=headers,
+            json={
+                "files": [{"name": pdf_path.name, "data_id": data_id}],
+                "model_version": "vlm",
+                "language": config.language,
+                "enable_table": config.enable_table,
+                "enable_formula": config.enable_formula,
+                "is_ocr": config.is_ocr,
+            },
+        )
+        data = dict(submitted.get("data") or {})
+        batch_id = _compact_text(data.get("batch_id"))
+        file_urls = list(data.get("file_urls") or [])
+        if not batch_id or not file_urls or not _compact_text(file_urls[0]):
+            raise MineruBackendError("MinerU Precision API did not return batch_id and file_urls")
+        upload = self._request("PUT", _compact_text(file_urls[0]), data=pdf_path.read_bytes())
+        if upload.status_code not in {200, 201, 204}:
+            raise MineruBackendError(f"MinerU Precision signed upload failed with HTTP {upload.status_code}")
+        result, states = self._poll(
+            url=f"{config.precision_api_url}/extract-results/batch/{batch_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout_seconds=config.precision_timeout_seconds,
+            result_getter=lambda payload: self._batch_result(payload, pdf_path.name),
+        )
+        if _compact_text(result.get("state")) == "failed":
+            raise MineruBackendError(
+                f"{_compact_text(result.get('err_msg')) or 'MinerU Precision extraction failed'}",
+                error_code=result.get("err_code"),
+                retryable=result.get("err_code") in {-10001, -60007, -60009, -60010, -60022},
+            )
+        zip_url = _compact_text(result.get("full_zip_url"))
+        if not zip_url:
+            raise MineruBackendError("MinerU Precision task completed without full_zip_url")
+        archive_response = self._request("GET", zip_url)
+        markdown, content_list = self._read_precision_archive(archive_response.content, pdf_path.stem)
+        return markdown, content_list, {
+            "batch_id": batch_id,
+            "trace_id": _compact_text(submitted.get("trace_id")) or None,
+            "state_history": states,
+            "result_url": zip_url,
+        }
+
+    def _batch_result(self, payload: dict[str, Any], file_name: str) -> dict[str, Any]:
+        data = dict(payload.get("data") or {})
+        results = data.get("extract_result") or []
+        if isinstance(results, dict):
+            return results
+        if not isinstance(results, list) or not results:
+            raise MineruBackendError("MinerU Precision result is missing extract_result")
+        for item in results:
+            if isinstance(item, dict) and _compact_text(item.get("file_name")) == file_name:
+                return item
+        first = results[0]
+        return dict(first) if isinstance(first, dict) else {}
+
+    def _read_precision_archive(self, content: bytes, document_stem: str) -> tuple[str, list[dict[str, Any]]]:
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(content))
+        except zipfile.BadZipFile as exc:
+            raise MineruBackendError("MinerU Precision result was not a valid ZIP archive") from exc
+        with archive:
+            names = [name for name in archive.namelist() if not name.endswith("/")]
+            markdown_names = [name for name in names if name.lower().endswith(".md")]
+            exact_markdown = [name for name in markdown_names if Path(name).stem == document_stem]
+            markdown_name = next((name for name in names if Path(name).name == "full.md"), None) or (exact_markdown[0] if exact_markdown else (markdown_names[0] if markdown_names else None))
+            if not markdown_name:
+                raise MineruBackendError("Mineru Precision archive did not contain Markdown output")
+            markdown = _normalize_text(archive.read(markdown_name).decode("utf-8", errors="replace"))
+            if not markdown:
+                raise MineruBackendError("MinerU Precision archive contained empty Markdown output")
+            content_names = [name for name in names if Path(name).name == "content_list.json" or Path(name).name.endswith("_content_list.json")]
+            content_list: list[dict[str, Any]] = []
+            if content_names:
+                try:
+                    payload = json.loads(archive.read(content_names[0]).decode("utf-8", errors="replace"))
+                    if isinstance(payload, list):
+                        content_list = [item for item in payload if isinstance(item, dict)]
+                except (TypeError, ValueError):
+                    content_list = []
+            return markdown, content_list
 
 
 @dataclass
@@ -221,6 +481,7 @@ class ExtractionAttempt:
     usable: bool = False
     failure_reason: str | None = None
     ocr_applied: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class PaperParseEngine:
@@ -356,34 +617,10 @@ class PaperParseEngine:
                 "report": report,
             }
 
-        warnings.extend(self._pdf_backend_config_warnings(document_id))
-        configured_backends = self._configured_pdf_backends()
-        if not configured_backends:
-            report = {
-                "document_id": document_id,
-                "status": "fulltext_unusable",
-                "selected_extractor": None,
-                "attempts": [],
-                "warnings": warnings,
-                "failure_reason": "no_supported_pdf_backend_configured",
-            }
-            report_path = destination / f"{document_id}.extraction_report.json"
-            report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-            return {
-                "document_id": document_id,
-                "fulltext_status": "fulltext_unusable",
-                "source_artifact_path": str(source_path),
-                "fulltext_artifact_path": str(source_path),
-                "sections_artifact_path": None,
-                "snippets_artifact_path": None,
-                "extraction_report_path": str(report_path),
-                "sections": [],
-                "warnings": warnings,
-                "extractor": None,
-                "ocr_applied": False,
-                "report": report,
-            }
-
+        page_count = self._pdf_page_count(pdf_bytes)
+        configured_backends = self._backend_order(pdf_size=len(pdf_bytes), page_count=page_count)
+        if page_count is None:
+            warnings.append(f"{document_id}: PDF page count could not be determined before cloud routing.")
         for backend in configured_backends:
             attempt = self._extract_with_backend(backend=backend, source_path=source_path, pdf_bytes=pdf_bytes)
             attempts.append(attempt)
@@ -426,11 +663,94 @@ class PaperParseEngine:
         }
 
     def _extract_with_backend(self, *, backend: str, source_path: Path, pdf_bytes: bytes) -> ExtractionAttempt:
-        if backend == "mineru":
-            return self._extract_with_mineru(source_path)
+        if backend == "mineru-agent-api":
+            return self._extract_with_agent_api(source_path)
+        if backend == "mineru-precision-api":
+            return self._extract_with_precision_api(source_path)
         if backend == "pymupdf":
             return self._extract_with_pymupdf(pdf_bytes)
         return ExtractionAttempt(extractor=backend, succeeded=False, failure_reason=f"unsupported backend: {backend}")
+
+    def _extract_with_agent_api(self, pdf_path: Path) -> ExtractionAttempt:
+        try:
+            client = MineruAgentClient(
+                timeout_seconds=MINERU_REQUEST_TIMEOUT_SECONDS,
+                poll_interval_seconds=self.config.poll_interval_seconds,
+                max_retries=self.config.max_retries,
+            )
+            markdown, metadata = client.extract(pdf_path=pdf_path, config=self.config)
+        except MineruBackendError as exc:
+            return ExtractionAttempt(
+                extractor="mineru-agent-api",
+                succeeded=False,
+                failure_reason=str(exc),
+                metadata={"error_code": exc.error_code, "retryable": exc.retryable},
+            )
+        sections = self._apply_section_offsets(self._sections_from_fulltext(fulltext=markdown, page_spans=[]))
+        metrics = self._evaluate_quality(fulltext=markdown, page_texts=[markdown])
+        return ExtractionAttempt(
+            extractor="mineru-agent-api",
+            succeeded=True,
+            fulltext=markdown,
+            page_texts=[markdown],
+            sections=sections,
+            metrics=metrics,
+            usable=not metrics["reasons"],
+            metadata=metadata,
+        )
+
+    def _extract_with_precision_api(self, pdf_path: Path) -> ExtractionAttempt:
+        token = _compact_text(os.environ.get(self.config.precision_token_env) or _default_env_value(self.config.precision_token_env))
+        if not token:
+            return ExtractionAttempt(
+                extractor="mineru-precision-api",
+                succeeded=False,
+                failure_reason=f"{self.config.precision_token_env} is not configured",
+                metadata={"error_code": "missing_token", "retryable": False},
+            )
+        try:
+            client = MineruPrecisionClient(
+                timeout_seconds=MINERU_REQUEST_TIMEOUT_SECONDS,
+                poll_interval_seconds=self.config.poll_interval_seconds,
+                max_retries=self.config.max_retries,
+            )
+            markdown, content_list, metadata = client.extract(pdf_path=pdf_path, config=self.config, token=token)
+        except MineruBackendError as exc:
+            return ExtractionAttempt(
+                extractor="mineru-precision-api",
+                succeeded=False,
+                failure_reason=str(exc),
+                metadata={"error_code": exc.error_code, "retryable": exc.retryable},
+            )
+        page_texts: list[str] = []
+        blocks: list[ExtractedBlock] = []
+        heading_page_hints: list[dict[str, int]] = []
+        page_count = 0
+        if content_list:
+            page_texts, blocks, heading_page_hints, page_count = self._load_mineru_content_list_payload(content_list)
+        if not page_texts:
+            page_texts = [markdown]
+        sections = self._apply_section_offsets(
+            self._sections_from_fulltext(
+                fulltext=markdown,
+                page_spans=[],
+                heading_page_hints=heading_page_hints,
+                fallback_page_count=max(1, page_count),
+            )
+        )
+        metrics = self._evaluate_quality(fulltext=markdown, page_texts=page_texts)
+        return ExtractionAttempt(
+            extractor="mineru-precision-api",
+            succeeded=True,
+            fulltext=markdown,
+            page_texts=page_texts,
+            blocks=blocks,
+            sections=sections,
+            page_count=page_count,
+            metrics=metrics,
+            usable=not metrics["reasons"],
+            metadata=metadata,
+        )
 
     def _finalize_success(
         self,
@@ -477,88 +797,6 @@ class PaperParseEngine:
             "ocr_applied": bool(attempt.ocr_applied),
             "report": report,
         }
-
-    def _extract_with_mineru(self, pdf_path: Path) -> ExtractionAttempt:
-        executable = shutil.which("mineru")
-        if not executable:
-            return ExtractionAttempt(extractor="mineru", succeeded=False, failure_reason="mineru CLI unavailable on PATH")
-        with tempfile.TemporaryDirectory(prefix="paper-parse-mineru-") as temp_dir_name:
-            temp_dir = Path(temp_dir_name)
-            command = [
-                executable,
-                "-p",
-                str(pdf_path),
-                "-o",
-                str(temp_dir),
-                "-b",
-                self.config.mineru_backend,
-                "-m",
-                self.config.mineru_method,
-            ]
-            if self.config.mineru_api_url:
-                command.extend(["--api-url", self.config.mineru_api_url])
-            run_kwargs: dict[str, Any] = {
-                "capture_output": True,
-                "text": True,
-                "timeout": MINERU_TIMEOUT_SECONDS,
-                "check": False,
-            }
-            subprocess_env = self._mineru_subprocess_env()
-            if subprocess_env is not None:
-                run_kwargs["env"] = subprocess_env
-            try:
-                completed = subprocess.run(command, **run_kwargs)
-            except subprocess.TimeoutExpired:
-                return ExtractionAttempt(
-                    extractor="mineru",
-                    succeeded=False,
-                    failure_reason=f"mineru timed out after {MINERU_TIMEOUT_SECONDS}s",
-                )
-            except Exception as exc:
-                return ExtractionAttempt(extractor="mineru", succeeded=False, failure_reason=str(exc))
-            if completed.returncode != 0:
-                detail = _compact_text(completed.stderr or completed.stdout) or f"exit code {completed.returncode}"
-                return ExtractionAttempt(extractor="mineru", succeeded=False, failure_reason=detail)
-
-            markdown_path = self._find_mineru_markdown(temp_dir=temp_dir, document_stem=pdf_path.stem)
-            if markdown_path is None:
-                return ExtractionAttempt(extractor="mineru", succeeded=False, failure_reason="markdown output not found")
-            content_list_path = self._find_mineru_content_list(temp_dir=temp_dir, document_stem=pdf_path.stem)
-            if content_list_path is None:
-                return ExtractionAttempt(extractor="mineru", succeeded=False, failure_reason="content_list.json output not found")
-
-            try:
-                markdown_text = _normalize_text(markdown_path.read_text(encoding="utf-8"))
-            except Exception as exc:
-                return ExtractionAttempt(extractor="mineru", succeeded=False, failure_reason=f"failed to read markdown output: {exc}")
-            if not markdown_text:
-                return ExtractionAttempt(extractor="mineru", succeeded=False, failure_reason="markdown output was empty")
-
-            try:
-                page_texts, blocks, heading_page_hints, page_count = self._load_mineru_content_list(content_list_path)
-            except Exception as exc:
-                return ExtractionAttempt(extractor="mineru", succeeded=False, failure_reason=f"failed to parse content_list.json: {exc}")
-
-        sections = self._apply_section_offsets(
-            self._sections_from_fulltext(
-                fulltext=markdown_text,
-                page_spans=[],
-                heading_page_hints=heading_page_hints,
-                fallback_page_count=max(1, page_count),
-            )
-        )
-        metrics = self._evaluate_quality(fulltext=markdown_text, page_texts=page_texts)
-        return ExtractionAttempt(
-            extractor="mineru",
-            succeeded=True,
-            fulltext=markdown_text,
-            page_texts=page_texts,
-            blocks=blocks,
-            sections=sections,
-            page_count=max(page_count, len(page_texts)),
-            metrics=metrics,
-            usable=not metrics["reasons"],
-        )
 
     def _extract_with_pymupdf(self, pdf_bytes: bytes) -> ExtractionAttempt:
         try:
@@ -607,6 +845,44 @@ class PaperParseEngine:
             metrics=metrics,
             usable=not metrics["reasons"],
         )
+
+    def _pdf_page_count(self, pdf_bytes: bytes) -> int | None:
+        try:
+            import pymupdf as fitz
+        except Exception:
+            try:
+                import fitz  # type: ignore[no-redef]
+            except Exception:
+                return None
+        try:
+            document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        except Exception:
+            return None
+        try:
+            return int(document.page_count)
+        finally:
+            document.close()
+
+    def _precision_token(self) -> str | None:
+        return _compact_text(os.environ.get(self.config.precision_token_env) or _default_env_value(self.config.precision_token_env)) or None
+
+    def _backend_order(self, *, pdf_size: int, page_count: int | None) -> list[str]:
+        backend = _normalize_backend_name(self.config.backend)
+        if backend in {"pymupdf", "mineru-agent-api", "mineru-precision-api"}:
+            return [backend]
+        if backend != "auto":
+            return ["pymupdf"]
+        is_lightweight = pdf_size <= LIGHTWEIGHT_MAX_BYTES and (page_count is None or page_count <= LIGHTWEIGHT_MAX_PAGES)
+        has_precision_token = self._precision_token() is not None
+        if is_lightweight:
+            ordered = ["mineru-agent-api"]
+            if has_precision_token:
+                ordered.append("mineru-precision-api")
+            ordered.append("pymupdf")
+            return ordered
+        if has_precision_token:
+            return ["mineru-precision-api", "pymupdf"]
+        return ["pymupdf"]
 
     def _join_page_texts(self, page_texts: list[str]) -> tuple[str, list[dict[str, int]]]:
         fulltext_parts: list[str] = []
@@ -826,35 +1102,11 @@ class PaperParseEngine:
             "failure_reason": attempt.failure_reason,
             "metrics": dict(attempt.metrics or {}),
             "page_count": attempt.page_count,
+            "metadata": dict(attempt.metadata or {}),
         }
 
     def _is_true_pdf(self, content: bytes) -> bool:
         return bytes(content[:5]) == b"%PDF-"
-
-    def _configured_pdf_backends(self) -> list[str]:
-        ordered = [self.config.primary_backend, self.config.secondary_backend]
-        backends: list[str] = []
-        for backend in ordered:
-            normalized = _normalize_backend_name(backend)
-            if not normalized or normalized in backends:
-                continue
-            if normalized in SUPPORTED_PDF_BACKENDS:
-                backends.append(normalized)
-        return backends
-
-    def _pdf_backend_config_warnings(self, document_id: str) -> list[str]:
-        warnings: list[str] = []
-        seen: set[str] = set()
-        for backend in [self.config.primary_backend, self.config.secondary_backend]:
-            normalized = _normalize_backend_name(backend)
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            if normalized not in SUPPORTED_PDF_BACKENDS:
-                warnings.append(
-                    f"{document_id}: unsupported PDF backend configured: {normalized}; supported backends are mineru, pymupdf."
-                )
-        return warnings
 
     def _attempt_warning(self, *, document_id: str, attempt: ExtractionAttempt) -> str | None:
         backend_label = PDF_BACKEND_DISPLAY_NAMES.get(attempt.extractor, attempt.extractor)
@@ -868,52 +1120,6 @@ class PaperParseEngine:
             )
         return None
 
-    def _mineru_subprocess_env(self) -> dict[str, str] | None:
-        if not self.config.mineru_api_url:
-            return None
-        hostname = _compact_text(urlsplit(self.config.mineru_api_url).hostname).lower()
-        if not hostname:
-            return None
-        if hostname != "localhost":
-            try:
-                if not ipaddress.ip_address(hostname).is_loopback:
-                    return None
-            except ValueError:
-                return None
-        env = dict(os.environ)
-        no_proxy_hosts = [hostname, "localhost", "127.0.0.1", "::1"]
-
-        def _merged_no_proxy(value: Any) -> str:
-            entries = [item.strip() for item in str(value or "").split(",") if item.strip()]
-            for host in no_proxy_hosts:
-                if host not in entries:
-                    entries.append(host)
-            return ",".join(entries)
-
-        env["NO_PROXY"] = _merged_no_proxy(env.get("NO_PROXY"))
-        env["no_proxy"] = _merged_no_proxy(env.get("no_proxy"))
-        return env
-
-    def _find_mineru_markdown(self, *, temp_dir: Path, document_stem: str) -> Path | None:
-        candidates = [path for path in temp_dir.rglob("*.md") if path.is_file()]
-        if not candidates:
-            return None
-        exact_name = [path for path in candidates if path.stem == document_stem]
-        selected = exact_name or candidates
-        return max(selected, key=lambda path: (path.stat().st_size, -len(path.parts), str(path)))
-
-    def _find_mineru_content_list(self, *, temp_dir: Path, document_stem: str) -> Path | None:
-        candidates = [
-            path
-            for path in temp_dir.rglob("*.json")
-            if path.is_file() and path.name in {"content_list.json", f"{document_stem}_content_list.json"}
-        ]
-        if not candidates:
-            return None
-        exact_name = [path for path in candidates if path.name == f"{document_stem}_content_list.json"]
-        selected = exact_name or candidates
-        return max(selected, key=lambda path: (path.stat().st_size, -len(path.parts), str(path)))
-
     def _load_mineru_content_list(
         self,
         content_list_path: Path,
@@ -922,6 +1128,12 @@ class PaperParseEngine:
             payload = json.loads(content_list_path.read_text(encoding="utf-8"))
         except Exception:
             payload = json.loads(content_list_path.read_text(encoding="utf-8", errors="replace"))
+        return self._load_mineru_content_list_payload(payload)
+
+    def _load_mineru_content_list_payload(
+        self,
+        payload: Any,
+    ) -> tuple[list[str], list[ExtractedBlock], list[dict[str, int]], int]:
         if not isinstance(payload, list):
             raise ValueError("content_list.json must be a JSON array")
         page_buckets: dict[int, list[str]] = {}

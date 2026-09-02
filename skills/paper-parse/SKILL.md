@@ -9,9 +9,10 @@ description: Use when an agent needs to parse a local paper PDF or text artifact
 
 Parse a local document into structured text artifacts. This skill is self-contained and assumes only a file path plus optional parser settings. The script always writes a canonical `parse_result.json` to the output directory.
 
-The default PDF stack is:
-- Primary parser: `MinerU`
-- Fallback parser: `PyMuPDF`
+The default PDF stack is an automatic three-layer fallback:
+- Small files (up to 10 MB and 20 pages): MinerU Agent Lightweight API
+- Larger files: MinerU Precision API when `MINERU_API_TOKEN` is configured
+- Final local fallback: PyMuPDF
 
 Text-like inputs do not use the PDF backends. A local `.txt`, `.md`, or `.html` artifact can be parsed even when `mineru` and `pymupdf` are not installed.
 
@@ -38,11 +39,18 @@ python <skill-root>/scripts/paper_parse.py \
 
 The script writes JSON to stdout and stores artifacts in the output directory, including `parse_result.json`.
 
-For PDF parsing, the preferred runtime is a locally installed `mineru` CLI on `PATH`. The parser invokes MinerU in local `pipeline` mode and falls back to `PyMuPDF` if MinerU is unavailable, fails, or is rejected by quality gates.
+For PDF parsing, `paper-parse` uses the official asynchronous MinerU Agent API
+with signed file upload and polling. Larger documents use the Precision API
+when a token is available. It falls back to PyMuPDF when a cloud backend is
+unavailable, rate-limited, over its limits, or rejected by quality gates.
 
-To reuse a long-lived MinerU service, pass `mineru_api_url` in `--config-json`. When set, `paper-parse` forwards `--api-url` to the `mineru` CLI instead of relying on a temporary local `mineru-api` process per run.
+The Agent API and Precision API URLs can be overridden with `agent_api_url` and
+`precision_api_url` in `--config-json`, or with `MINERU_AGENT_API_URL` and
+`MINERU_PRECISION_API_URL`. Precision authentication reads the environment
+variable named by `precision_token_env` (default `MINERU_API_TOKEN`).
 
-For a stable default, `paper-parse` also reads `MINERU_API_URL` from the process environment or the repo-root `.env` file.
+The parser does not invoke a local `mineru` CLI or depend on a local
+`mineru-api` process.
 
 ## Inputs And Outputs
 
@@ -55,5 +63,5 @@ Read `references/contracts.md` for the JSON contract and failure semantics.
 
 - Text artifacts parse without importing PDF-only modules
 - Invalid PDF header returns structured `fulltext_unusable`
-- MinerU extraction rejection or unavailability automatically triggers `PyMuPDF`
-- If both PDF backends are unavailable or fail, the script returns structured `fulltext_unusable` with attempt metadata instead of crashing on import
+- Agent/Precision extraction rejection or unavailability automatically triggers `PyMuPDF`
+- If all cloud backends and PyMuPDF fail, the script returns structured `fulltext_unusable` with attempt metadata instead of crashing

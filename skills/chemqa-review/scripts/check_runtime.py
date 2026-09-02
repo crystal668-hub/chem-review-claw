@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 from bundle_common import (
@@ -75,11 +76,13 @@ def build_report(
         "pymupdf": probe_python_module("pymupdf"),
         "fitz": probe_python_module("fitz"),
     }
-    mineru_cli = probe_binary("mineru", ["mineru", "--version"])
     requests_ready = bool(python_modules["requests"]["available"])
     pymupdf_ready = bool(python_modules["pymupdf"]["available"] or python_modules["fitz"]["available"])
-    mineru_ready = bool(mineru_cli["found"])
-    pdf_backend_ready = bool(pymupdf_ready or mineru_ready)
+    agent_api_url = os.environ.get("MINERU_AGENT_API_URL", "https://mineru.net/api/v1/agent")
+    precision_api_url = os.environ.get("MINERU_PRECISION_API_URL", "https://mineru.net/api/v4")
+    precision_token_env = os.environ.get("MINERU_API_TOKEN_ENV", "MINERU_API_TOKEN")
+    precision_token_ready = bool(os.environ.get(precision_token_env))
+    pdf_backend_ready = bool(requests_ready or pymupdf_ready)
     paper_skill_runtime = {
         "paper-retrieval": {"ready": requests_ready, "required_modules": ["requests"]},
         "paper-access": {"ready": requests_ready, "required_modules": ["requests"]},
@@ -87,10 +90,11 @@ def build_report(
             "text_inputs_ready": True,
             "pdf_inputs_ready": pdf_backend_ready,
             "ready": pdf_backend_ready,
-            "pdf_backends": {
-                "mineru": mineru_ready,
-                "pymupdf": pymupdf_ready,
-            },
+            "pdf_backends": {"mineru_agent_api": requests_ready, "mineru_precision_api": bool(requests_ready and precision_token_ready), "pymupdf": pymupdf_ready},
+            "agent_api_url": agent_api_url,
+            "precision_api_url": precision_api_url,
+            "precision_token_env": precision_token_env,
+            "precision_token_configured": precision_token_ready,
         },
     }
 
@@ -123,9 +127,7 @@ def build_report(
         "missing_skills": missing_skills,
         "checks": checks,
         "python_modules": python_modules,
-        "binaries": {
-            "mineru": mineru_cli,
-        },
+        "binaries": {},
         "paper_skill_runtime": paper_skill_runtime,
         "required_components": required_components,
         "missing_required_components": missing_required_components,

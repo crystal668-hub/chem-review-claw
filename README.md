@@ -49,41 +49,15 @@ and `verifier_grounded_property_calculation` (2 tasks).
 The complete integration contract is documented in
 `docs/superpowers/specs/2026-07-15-verifier-grounded-openclaw-single-llm-integration-usage-spec.md`.
 
-## Local paper-processing service
+## Local paper-processing
 
 The paper pipeline is `paper-retrieval` -> `paper-access` -> `paper-parse`.
-`paper-parse` can use PyMuPDF locally and optionally a long-lived MinerU API
-service at `http://127.0.0.1:8000`.
+`paper-parse` uses the official asynchronous MinerU Agent API for small PDFs,
+the Precision API for larger PDFs when `MINERU_API_TOKEN` is configured, and
+PyMuPDF as the final local fallback. It does not require a local MinerU CLI,
+model cache, or `mineru-api` process.
 
-The service is referenced by the default environment variable in
-`~/.openclaw/.env`:
-
-- `MINERU_API_URL=http://127.0.0.1:8000`
-
-### Native MinerU
-
-On macOS, MinerU should run natively instead of through Docker. Install the CLI/runtime, pre-download models, then start the long-lived API:
-
-```bash
-cd ~/.openclaw/workspace
-bash scripts/mineru_service.sh install
-bash scripts/mineru_service.sh download-models
-bash scripts/mineru_service.sh up
-bash scripts/mineru_service.sh health
-```
-
-Common operations:
-
-```bash
-bash scripts/mineru_service.sh ps
-bash scripts/mineru_service.sh logs
-bash scripts/mineru_service.sh restart
-bash scripts/mineru_service.sh down
-```
-
-Notes:
-
-- The service binds to loopback only and is not exposed on the LAN.
-- `paper-parse` reads `MINERU_API_URL` and passes it to the local `mineru` CLI.
-- `mineru_service.sh up` defaults to `MINERU_MODEL_SOURCE=local`, so run `mineru_service.sh download-models` before the first service start.
-- `mineru_service.sh download-models` defaults to `MINERU_DOWNLOAD_SOURCE=modelscope`; set `MINERU_DOWNLOAD_SOURCE=huggingface` if that source is preferred.
+Optional endpoint overrides are configured with `MINERU_AGENT_API_URL` and
+`MINERU_PRECISION_API_URL`; the Precision API token is read from
+`MINERU_API_TOKEN` by default. See the [MinerU API documentation](https://mineru.net/apiManage/docs)
+for account, quota, and API details.
