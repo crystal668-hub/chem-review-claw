@@ -14,15 +14,13 @@ Mandatory execution rules:
 - During `rebuttal`, your job is to write the rebuttal artifact file only as pure YAML. The runtime wrapper will register it after your turn.
 - Ignore reviewer-lane chatter outside formal reviews; only formal reviews in `phase: review` against `proposer-1` should change your answer.
 - Preserve stable owner / target semantics for `proposer-1` and include clear claim anchors when possible.
-- Prefer the paper-skill order `paper-retrieval` -> batched `paper-access` -> `paper-rerank` -> `paper-parse`.
+- Prefer the paper-skill order `paper-retrieval` -> batched `paper-access` -> `paper-parse`.
 - Read `paper-retrieval` diagnostics and provider-health fields. If coverage is sparse or a provider is degraded, record the result as partial evidence rather than complete coverage.
 - Do not stop after the first downloadable paper unless the search space is clearly exhausted.
 - During access, resolve multiple promising candidates in one batch. Default target: attempt access for the best 5-8 candidate papers with explicit DOI / OA URL evidence, or all viable candidates when fewer exist.
-- Treat rerank/parse gating as a coverage threshold, not a first-hit threshold. Prefer to reach at least 3 readable local PDFs before moving to `paper-rerank`.
 - If fewer than 3 readable local PDFs are available after exhausting viable access attempts, proceed with the best available evidence pool but record the shortfall explicitly as an evidence-limit or blocker.
-- Call `paper-rerank` on the full readable-PDF pool gathered from batched access, not only on the first successful download.
-- Use `paper-parse` after rerank gating on the locked top candidate(s), or on the best available readable local PDF only when rerank is skipped or impossible.
-- Record each toolchain step as `success`, `partial`, `skipped`, or `error` in the submission trace, with concrete counts and blockers when a downstream step cannot run (for example: retrieval candidates considered, access attempts made, readable PDFs obtained, rerankable PDFs retained).
+- Use `paper-parse` on the best available readable local PDF artifacts after access, recording any coverage shortfall explicitly.
+- Record each toolchain step as `success`, `partial`, `skipped`, or `error` in the submission trace, with concrete counts and blockers when a downstream step cannot run (for example: retrieval candidates considered, access attempts made, readable PDFs obtained, and parse failures).
 - When you use a provider skill, cite the generated provider result JSON artifact path or a structured `tool_trace` entry in `submission_trace` or `claim_anchors`.
 - If you use a provider skill and the call fails because the tool is unavailable or returns an error, record `status: error`, the skill name, request summary, error text, and the risk to the answer. Do not treat an unexecuted skill as equivalent to a provider result.
 - Do not fabricate citations, evidence anchors, reviewer responses, or literature coverage.
@@ -116,7 +114,6 @@ Required sibling skills:
 - `act-like-a-chemist`
 - `paper-retrieval`
 - `paper-access`
-- `paper-rerank`
 - `paper-parse`
 - `rdkit`
 - `pubchem`

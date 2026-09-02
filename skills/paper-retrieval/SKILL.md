@@ -14,7 +14,7 @@ Search OpenAlex, Semantic Scholar, and Crossref from a self-contained script. Th
 Use this skill when:
 - the task starts from a research question or search query
 - an agent needs literature candidates outside the current repo workflow
-- normalized DOI/title/year/authorship metadata is needed for later access or rerank steps
+- normalized DOI/title/year/authorship metadata is needed for later access or parsing steps
 
 Do not use this skill for downloading or parsing documents.
 

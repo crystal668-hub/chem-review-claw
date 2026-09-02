@@ -17,7 +17,7 @@ Use this skill when:
 - an agent needs OA resolution from DOI metadata
 - a downloader must verify whether a URL really serves a PDF
 
-Do not use this skill for parsing or reranking.
+Do not use this skill for parsing.
 
 ## Execution
 

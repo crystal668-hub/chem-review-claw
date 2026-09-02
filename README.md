@@ -49,40 +49,16 @@ and `verifier_grounded_property_calculation` (2 tasks).
 The complete integration contract is documented in
 `docs/superpowers/specs/2026-07-15-verifier-grounded-openclaw-single-llm-integration-usage-spec.md`.
 
-## Local paper-processing services
+## Local paper-processing service
 
-This project uses two local services for paper-processing workflows:
+The paper pipeline is `paper-retrieval` -> `paper-access` -> `paper-parse`.
+`paper-parse` can use PyMuPDF locally and optionally a long-lived MinerU API
+service at `http://127.0.0.1:8000`.
 
-- `GROBID` at `http://127.0.0.1:8070`, managed by Docker Compose.
-- `MinerU API` at `http://127.0.0.1:8000`, managed as a native macOS process.
+The service is referenced by the default environment variable in
+`~/.openclaw/.env`:
 
-They are referenced by the default environment variables in `~/.openclaw/.env`:
-
-- `GROBID_URL=http://localhost:8070`
 - `MINERU_API_URL=http://127.0.0.1:8000`
-
-### GROBID Docker
-
-Use the repo helper script for GROBID:
-
-```bash
-cd ~/.openclaw/workspace
-bash scripts/docker_services.sh up
-bash scripts/docker_services.sh ps
-bash scripts/docker_services.sh health
-```
-
-Common operations:
-
-```bash
-bash scripts/docker_services.sh down
-bash scripts/docker_services.sh restart
-bash scripts/docker_services.sh logs grobid
-```
-
-The service-specific Compose project lives in:
-
-- `grobid-docker/compose.yaml`
 
 ### Native MinerU
 
@@ -107,7 +83,7 @@ bash scripts/mineru_service.sh down
 
 Notes:
 
-- Both services bind to loopback only and are not exposed on the LAN.
-- `paper-parse` still reads `MINERU_API_URL` and passes it to the local `mineru` CLI, so existing runtime config can keep `MINERU_API_URL=http://127.0.0.1:8000`.
+- The service binds to loopback only and is not exposed on the LAN.
+- `paper-parse` reads `MINERU_API_URL` and passes it to the local `mineru` CLI.
 - `mineru_service.sh up` defaults to `MINERU_MODEL_SOURCE=local`, so run `mineru_service.sh download-models` before the first service start.
 - `mineru_service.sh download-models` defaults to `MINERU_DOWNLOAD_SOURCE=modelscope`; set `MINERU_DOWNLOAD_SOURCE=huggingface` if that source is preferred.

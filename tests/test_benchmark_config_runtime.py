@@ -217,7 +217,6 @@ class BenchmarkConfigRuntimeTests(unittest.TestCase):
         self.assertIn("paper-retrieval", skills)
         self.assertIn("paper-access", skills)
         self.assertIn("paper-parse", skills)
-        self.assertIn("paper-rerank", skills)
         self.assertGreaterEqual(len(skills), 80)
 
     def test_render_run_config_replaces_managed_agent_and_strips_thinking(self) -> None:

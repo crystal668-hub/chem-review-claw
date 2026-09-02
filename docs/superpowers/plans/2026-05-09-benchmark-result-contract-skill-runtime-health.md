@@ -975,12 +975,6 @@ REQUIREMENT_OVERRIDES: dict[str, HealthRequirement] = {
         executables=("pdfinfo",),
         data_files=("skills/paper-parse/SKILL.md",),
     ),
-    "paper-rerank": HealthRequirement(
-        skill="paper-rerank",
-        python_modules=("requests",),
-        api_keys=("SU8_API_KEY",),
-        data_files=("skills/paper-rerank/SKILL.md",),
-    ),
     "pubchem": HealthRequirement(
         skill="pubchem",
         python_modules=("requests",),

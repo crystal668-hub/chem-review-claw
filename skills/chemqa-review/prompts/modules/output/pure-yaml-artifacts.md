@@ -15,8 +15,8 @@ phase: propose
 owner: proposer-1
 direct_answer: "lock paper-2 for downstream evidence review"
 summary: >-
-  Batched retrieval and access produced a small evidence pool with two readable PDFs;
-  rerank selected the strongest candidate for detailed parsing.
+  Batched retrieval and access produced a small evidence pool with readable PDFs;
+  the best available artifact was parsed for claim review.
 submission_trace:
   - step: paper-retrieval
     status: success
@@ -28,20 +28,15 @@ submission_trace:
     readable_pdf_count: 2
     blocked_count: 2
     detail: Batched access over the top four candidates yielded two readable local PDFs and two OA dead ends.
-  - step: paper-rerank
-    status: success
-    rerank_input_count: 2
-    locked_count: 1
-    detail: Reranked the full readable-PDF pool and locked `paper-2` as the strongest evidence source.
   - step: paper-parse
     status: success
     parsed_artifact_count: 1
-    detail: Parsed the rerank-selected locked PDF and extracted fulltext / sections for claim review.
+    detail: Parsed the best available readable PDF and extracted fulltext / sections for claim review.
 evidence_limits:
   - Coverage is still partial because two promising candidates had no readable OA PDF after batched access.
 claim_anchors:
   - anchor: claim-1
-    claim: `paper-2` is the strongest currently readable evidence source after batched access and rerank.
+    claim: `paper-2` is the strongest currently readable evidence source after batched access and parsing.
 
 Negative example — invalid candidate submission:
 

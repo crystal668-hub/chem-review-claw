@@ -83,7 +83,6 @@ def build_report(
     paper_skill_runtime = {
         "paper-retrieval": {"ready": requests_ready, "required_modules": ["requests"]},
         "paper-access": {"ready": requests_ready, "required_modules": ["requests"]},
-        "paper-rerank": {"ready": requests_ready, "required_modules": ["requests"]},
         "paper-parse": {
             "text_inputs_ready": True,
             "pdf_inputs_ready": pdf_backend_ready,

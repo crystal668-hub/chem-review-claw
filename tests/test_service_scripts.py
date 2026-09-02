@@ -10,14 +10,6 @@ class ServiceScriptTests(unittest.TestCase):
     def test_legacy_mineru_docker_packaging_is_removed(self) -> None:
         self.assertFalse((ROOT / "mineru-api-docker").exists())
 
-    def test_docker_services_only_manages_grobid(self) -> None:
-        script = (ROOT / "scripts" / "docker_services.sh").read_text(encoding="utf-8")
-
-        self.assertIn("GROBID_DIR=", script)
-        self.assertIn('wait_for_http "grobid" "http://127.0.0.1:8070/api/isalive"', script)
-        self.assertNotIn("MINERU_DIR=", script)
-        self.assertNotIn("mineru-api-docker", script)
-        self.assertNotIn("run_compose \"$MINERU_DIR\"", script)
 
     def test_local_mineru_service_script_defines_expected_commands(self) -> None:
         script_path = ROOT / "scripts" / "mineru_service.sh"

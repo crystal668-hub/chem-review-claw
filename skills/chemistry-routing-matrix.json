@@ -1521,26 +1521,6 @@
       ]
     },
     {
-      "skill": "paper-rerank",
-      "tier": "workflow",
-      "capability_domain": "literature",
-      "provider_role": "primary",
-      "single_agent_exposure": true,
-      "route_summary": "Build paper profiles from local PDFs and run explicit listwise LLM reranking.",
-      "primary_triggers": [
-        "paper rerank",
-        "rerank papers",
-        "paper profile",
-        "grobid",
-        "listwise rerank",
-        "rank candidate papers"
-      ],
-      "avoid_when": [
-        "remote paper search",
-        "simple citation lookup"
-      ]
-    },
-    {
       "skill": "synthesize-literature",
       "tier": "extended",
       "capability_domain": "literature",

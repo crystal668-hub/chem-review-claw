@@ -125,8 +125,8 @@ stable `EvaluationResult` shape and execution-error construction;
   and UFF scripts implement each family without cross-family fallback. Every
   conformer request also requires explicit `num_conformers` and `random_seed`
   values; the skill defines no sampling defaults or preferred values.
-- `skills/paper-retrieval/`, `paper-access/`, `paper-parse/`, and
-  `paper-rerank/` are independent paper-processing stages.
+- `skills/paper-retrieval/`, `paper-access/`, and `paper-parse/` are independent
+  paper-processing stages.
 
 ### Project scripts and resources
 
@@ -163,8 +163,8 @@ stable `EvaluationResult` shape and execution-error construction;
 - The benchmark CLI and fixed-lane OpenClaw drivers accept the `adaptive`
   thinking level required by MiniMax-M3; the Benchmark Orchestrator validates
   the model-specific level before launching a run.
-- `scripts/docker_services.sh` and `scripts/mineru_service.sh` manage the local
-  GROBID and MinerU services used by the paper pipeline.
+- `scripts/mineru_service.sh` manages the optional local MinerU service used by
+  the paper pipeline.
 - `benchmarking/resources/agent-workspace-templates/` contains the canonical
   benchmark workspace base contract and role overlays.
 - `benchmarking/resources/verifier_grounded/` contains the pinned release
@@ -326,14 +326,14 @@ are non-evaluable, unscored, and use `execution_error_kind=cancelled`.
 
 ### Paper pipeline
 
-Paper processing is an explicit sequence of independent scripts:
+Paper processing is an explicit fixed sequence of independent scripts:
 
 ```text
-retrieval -> access -> parse -> rerank
+retrieval -> access -> parse
 ```
 
-Parsing can use MinerU or PyMuPDF. Reranking consumes local documents, builds
-GROBID profiles, and calls an OpenAI-compatible chat-completions endpoint.
+Parsing can use MinerU or PyMuPDF. The three stages exchange explicit JSON
+artifacts and are not exposed as one transactional orchestration service.
 
 ## 4. Stable Data and Isolation Contracts
 
@@ -494,7 +494,7 @@ boundary. Processes still run as the same local user.
   and may contain provider and gateway configuration. It must be treated as local
   operational state.
 - Many chemistry skills require optional Python packages, external executables,
-  API credentials, network providers, or local GROBID/MinerU services. Startup
+  API credentials, network providers, or optional local MinerU services. Startup
   health filtering is the runtime authority for benchmark exposure.
 
 ### Non-goals of the current system
@@ -528,7 +528,7 @@ boundary. Processes still run as the same local user.
 
 ### Operational runbooks and component contracts
 
-- `README.md`: verifier-grounded CLI usage and local GROBID/MinerU operations.
+- `README.md`: verifier-grounded CLI usage and local MinerU operations.
 - `docs/benchmark-dashboard-usage.md`: dashboard launch, data sources, and review
   workflow.
 - `skills/debateclaw-v1/SKILL.md` and `skills/debateclaw-v1/references/`:

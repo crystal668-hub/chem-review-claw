@@ -15,7 +15,6 @@ Required sibling bundles:
 <skills-root>/paper-retrieval
 <skills-root>/paper-access
 <skills-root>/paper-parse
-<skills-root>/paper-rerank
 ```
 
 ## Runtime Outputs

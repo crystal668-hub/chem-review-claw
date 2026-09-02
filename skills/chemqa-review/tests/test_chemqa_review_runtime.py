@@ -1269,7 +1269,6 @@ class ChemProviderIntegrationTest(unittest.TestCase):
             "paper-retrieval",
             "paper-access",
             "paper-parse",
-            "paper-rerank",
         }
         expected.update(entry["skill"] for entry in matrix["skills"])
         self.assertEqual(expected, set(bundle_common.REQUIRED_SKILLS))

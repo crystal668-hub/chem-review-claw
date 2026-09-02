@@ -64,8 +64,8 @@ SKILL_TREE: tuple[dict[str, Any], ...] = (
         "families": (
             {
                 "id": "paper-pipeline",
-                "label": "Paper retrieval, access, reranking, and parsing",
-                "skills": ("paper-retrieval", "paper-access", "paper-rerank", "paper-parse"),
+                "label": "Paper retrieval, access, and parsing",
+                "skills": ("paper-retrieval", "paper-access", "paper-parse"),
             },
             {
                 "id": "literature-databases",

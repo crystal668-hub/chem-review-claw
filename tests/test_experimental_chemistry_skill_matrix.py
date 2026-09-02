@@ -86,7 +86,6 @@ EXPECTED_EXPERIMENTAL_SKILLS = {
     "paper-retrieval",
     "paper-access",
     "paper-parse",
-    "paper-rerank",
     "literature-review",
     "synthesize-literature",
     "matminer",
@@ -117,7 +116,7 @@ def test_experimental_matrix_covers_selected_mid_plus_skills() -> None:
     inventory = load_chemistry_skill_inventory()
     skill_names = set(benchmark_skill_allowlist())
 
-    assert len(inventory["skills"]) == 86
+    assert len(inventory["skills"]) == 85
     assert len(skill_names) == len(inventory["skills"])
     assert "act-like-a-chemist" in skill_names
     assert skill_names >= EXPECTED_EXPERIMENTAL_SKILLS

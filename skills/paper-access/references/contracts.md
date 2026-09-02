@@ -47,5 +47,5 @@ Each document includes:
 Common downstream fields:
 - `source_url_kind` is one of `open_access_pdf_url`, `oa_url`, `unpaywall_pdf`, `unpaywall_landing_page`, or `unpaywall_url`
 - `artifact_kind` is one of `pdf`, `text`, or `binary`
-- `is_readable_local_pdf` is the safe gate for passing the artifact to `paper-rerank`
+- `is_readable_local_pdf` is the safe gate for passing the artifact to `paper-parse`
 - `fulltext_status` is `binary_only` for downloaded binary artifacts and `text_only` for fetched text artifacts

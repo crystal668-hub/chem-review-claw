@@ -17,7 +17,6 @@ REQUIRED_SKILLS = (
     "paper-retrieval",
     "paper-access",
     "paper-parse",
-    "paper-rerank",
     "open-forcefield-toolkit",
     "molecular-dynamics",
     "openmm",

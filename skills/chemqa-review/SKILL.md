@@ -15,7 +15,6 @@ This bundle must be installed beside these sibling skill bundles under the same
 - `paper-retrieval`
 - `paper-access`
 - `paper-parse`
-- `paper-rerank`
 - `rdkit`
 - `pubchem`
 - `opsin`

@@ -210,14 +210,13 @@ class BenchmarkTestModuleTests(unittest.TestCase):
         ]
 
         self.assertEqual(inventory_skills, experiments.BENCHMARK_SKILLS_ALLOWLIST)
-        self.assertEqual(86, len(experiments.BENCHMARK_SKILLS_ALLOWLIST))
+        self.assertEqual(85, len(experiments.BENCHMARK_SKILLS_ALLOWLIST))
         self.assertIn("act-like-a-chemist", experiments.BENCHMARK_SKILLS_ALLOWLIST)
         self.assertIn("chem-calculator", experiments.BENCHMARK_SKILLS_ALLOWLIST)
         self.assertIn("pymatgen", experiments.BENCHMARK_SKILLS_ALLOWLIST)
         self.assertIn("paper-retrieval", experiments.BENCHMARK_SKILLS_ALLOWLIST)
         self.assertIn("paper-access", experiments.BENCHMARK_SKILLS_ALLOWLIST)
         self.assertIn("paper-parse", experiments.BENCHMARK_SKILLS_ALLOWLIST)
-        self.assertIn("paper-rerank", experiments.BENCHMARK_SKILLS_ALLOWLIST)
         self.assertNotIn("benchmark-cleanroom", experiments.BENCHMARK_SKILLS_ALLOWLIST)
         self.assertNotIn("chemqa-review", experiments.BENCHMARK_SKILLS_ALLOWLIST)
         self.assertNotIn("debateclaw-v1", experiments.BENCHMARK_SKILLS_ALLOWLIST)

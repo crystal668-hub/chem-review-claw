@@ -25,7 +25,6 @@ Use this skill when:
 Do not use this skill for:
 - remote paper search
 - OA resolution or HTTP downloading
-- GROBID TEI/profile generation for reranking
 
 ## Execution
 

@@ -81,7 +81,7 @@ SKILL_TREE = (
         "id": "literature-evidence",
         "label": "Literature evidence and paper processing",
         "families": (
-            {"id": "paper-pipeline", "label": "Paper retrieval, access, reranking, and parsing", "skills": ("paper-retrieval", "paper-access", "paper-rerank", "paper-parse")},
+            {"id": "paper-pipeline", "label": "Paper retrieval, access, and parsing", "skills": ("paper-retrieval", "paper-access", "paper-parse")},
             {"id": "literature-databases", "label": "Bibliographic databases", "skills": ("pubmed-database", "openalex-database")},
             {"id": "review-synthesis", "label": "Literature review and synthesis", "skills": ("literature-review", "synthesize-literature")},
         ),
@@ -247,7 +247,7 @@ def test_benchmark_skill_allowlist_includes_all_matrix_skills_and_paper_pipeline
     assert len(allowlist) == 84
     assert len(allowlist) == len(set(allowlist))
     assert allowlist == tuple(str(entry["skill"]) for entry in inventory["skills"])
-    assert {"paper-retrieval", "paper-access", "paper-parse", "paper-rerank"} <= set(allowlist)
+    assert {"paper-retrieval", "paper-access", "paper-parse"} <= set(allowlist)
     assert {"chem-calculator", "rdkit", "opsin", "pubchem"} <= set(allowlist)
 
 
@@ -265,7 +265,7 @@ def test_skill_tree_has_three_layers_and_paper_pipeline_family() -> None:
     assert any(domain["id"] == "literature-evidence" for domain in tree)
     family = lookup_skill_family("paper-pipeline")
     assert family["id"] == "paper-pipeline"
-    assert family["skills"] == ("paper-retrieval", "paper-access", "paper-rerank", "paper-parse")
+    assert family["skills"] == ("paper-retrieval", "paper-access", "paper-parse")
 
 
 def test_top_level_skill_tree_is_compact_and_not_a_router() -> None:
@@ -335,7 +335,7 @@ SKILL_TREE: tuple[dict[str, Any], ...] = (
         "id": "literature-evidence",
         "label": "Literature evidence and paper processing",
         "families": (
-            {"id": "paper-pipeline", "label": "Paper retrieval, access, reranking, and parsing", "skills": ("paper-retrieval", "paper-access", "paper-rerank", "paper-parse")},
+            {"id": "paper-pipeline", "label": "Paper retrieval, access, and parsing", "skills": ("paper-retrieval", "paper-access", "paper-parse")},
             {"id": "literature-databases", "label": "Bibliographic databases", "skills": ("pubmed-database", "openalex-database")},
             {"id": "review-synthesis", "label": "Literature review and synthesis", "skills": ("literature-review", "synthesize-literature")},
         ),
@@ -480,7 +480,6 @@ def test_benchmark_skills_allowlist_comes_from_skill_tree(self) -> None:
     self.assertIn("paper-retrieval", benchmark_test.BENCHMARK_SKILLS_ALLOWLIST)
     self.assertIn("paper-access", benchmark_test.BENCHMARK_SKILLS_ALLOWLIST)
     self.assertIn("paper-parse", benchmark_test.BENCHMARK_SKILLS_ALLOWLIST)
-    self.assertIn("paper-rerank", benchmark_test.BENCHMARK_SKILLS_ALLOWLIST)
     self.assertNotIn("benchmark-cleanroom", benchmark_test.BENCHMARK_SKILLS_ALLOWLIST)
     self.assertNotIn("chemqa-review", benchmark_test.BENCHMARK_SKILLS_ALLOWLIST)
     self.assertNotIn("debateclaw-v1", benchmark_test.BENCHMARK_SKILLS_ALLOWLIST)
@@ -912,7 +911,6 @@ def test_single_llm_skills_on_config_keeps_full_benchmark_skill_allowlist(self) 
     self.assertIn("paper-retrieval", skills)
     self.assertIn("paper-access", skills)
     self.assertIn("paper-parse", skills)
-    self.assertIn("paper-rerank", skills)
     self.assertGreaterEqual(len(skills), 80)
 ```
 
@@ -1331,7 +1329,7 @@ Skill discovery policy:
 - Use provider skills directly when they help answer a calculation, structure, identity, database, literature, spectra, materials, simulation, ML, or workflow subproblem.
 - First orient by capability domain and family; read full `SKILL.md` files only for skills you are about to use.
 - Do not treat an unexecuted skill as a valid provider trace.
-- Literature or external-fact claims that require paper evidence can use the `paper-pipeline` family: `paper-retrieval` -> `paper-access` -> `paper-rerank` -> `paper-parse`.
+- Literature or external-fact claims that require paper evidence can use the `paper-pipeline` family: `paper-retrieval` -> `paper-access` -> `paper-parse`.
 ```
 
 - [ ] **Step 6: Run ChemQA prompt-policy tests**
@@ -1465,7 +1463,7 @@ import benchmark_test
 
 skills = benchmark_test.BENCHMARK_SKILLS_ALLOWLIST
 print(len(skills))
-print("paper-retrieval" in skills, "paper-access" in skills, "paper-parse" in skills, "paper-rerank" in skills)
+print("paper-retrieval" in skills, "paper-access" in skills, "paper-parse" in skills)
 PY
 ```
 

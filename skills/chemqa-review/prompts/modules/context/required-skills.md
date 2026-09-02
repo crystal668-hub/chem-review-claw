@@ -5,7 +5,6 @@ Required sibling skills:
 - `paper-retrieval`
 - `paper-access`
 - `paper-parse`
-- `paper-rerank`
 - `open-forcefield-toolkit`
 - `molecular-dynamics`
 - `openmm`
@@ -96,4 +95,4 @@ Skill discovery policy:
 - Use provider skills directly when they help answer a calculation, structure, identity, database, literature, spectra, materials, simulation, ML, or workflow subproblem.
 - First orient by capability domain and family; read full `SKILL.md` files only for skills you are about to use.
 - Do not treat an unexecuted skill as a valid provider trace.
-- Literature or external-fact claims that require paper evidence can use the `paper-pipeline` family: `paper-retrieval` -> `paper-access` -> `paper-rerank` -> `paper-parse`.
+- Literature or external-fact claims that require paper evidence can use the `paper-pipeline` family: `paper-retrieval` -> `paper-access` -> `paper-parse`.

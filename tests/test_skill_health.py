@@ -48,7 +48,7 @@ def test_api_key_can_be_read_from_openclaw_env_file(tmp_path, monkeypatch) -> No
     env_file.write_text("SU8_API_KEY=from-dotenv\n", encoding="utf-8")
     monkeypatch.setattr(runtime_paths, "openclaw_env", env_file)
 
-    requirement = HealthRequirement(skill="paper-rerank", api_keys=("SU8_API_KEY",))
+    requirement = HealthRequirement(skill="test-skill", api_keys=("SU8_API_KEY",))
     report = check_skill_health(requirement, workspace_root=tmp_path, env={})
 
     assert report["available"] is True
