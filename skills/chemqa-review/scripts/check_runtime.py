@@ -20,6 +20,56 @@ from bundle_common import (
 )
 
 SUPPORTED_AGENTS = ("codex", "claude", "openclaw", "none", "auto")
+ENVIRONMENT_KEYS = (
+    "MINERU_AGENT_API_URL",
+    "MINERU_PRECISION_API_URL",
+    "MINERU_API_TOKEN_ENV",
+    "MINERU_API_TOKEN",
+)
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[7:].strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def build_process_environment_report(
+    *,
+    process_environment: dict[str, str] | None = None,
+    env_file: str | Path | None = None,
+) -> tuple[dict[str, str], dict[str, object]]:
+    process = dict(os.environ if process_environment is None else process_environment)
+    env_path = Path(env_file or os.environ.get("OPENCLAW_ENV_FILE") or (Path.home() / ".openclaw" / ".env")).expanduser()
+    file_values = _read_env_file(env_path)
+    effective = dict(file_values)
+    effective.update(process)
+    variables: dict[str, object] = {}
+    for key in ENVIRONMENT_KEYS:
+        process_set = bool(str(process.get(key) or "").strip())
+        file_set = bool(str(file_values.get(key) or "").strip())
+        variables[key] = {
+            "process": process_set,
+            "env_file": file_set,
+            "effective": bool(str(effective.get(key) or "").strip()),
+            "source": "process" if process_set else ("env_file" if file_set else "missing"),
+        }
+    return effective, {"env_file": str(env_path), "variables": variables}
 
 
 def probe_python_module(name: str) -> dict[str, object]:
@@ -54,6 +104,7 @@ def build_report(
     require_runtime_assets: bool = False,
 ) -> dict[str, object]:
     root = resolve_skill_root(skill_root)
+    effective_environment, process_environment_report = build_process_environment_report()
     selected_agent = detect_agent(agent_choice)
     selected_backend = resolve_backend(agent_choice, backend_choice)
     dependency_payload = dependency_report(root)
@@ -78,10 +129,10 @@ def build_report(
     }
     requests_ready = bool(python_modules["requests"]["available"])
     pymupdf_ready = bool(python_modules["pymupdf"]["available"] or python_modules["fitz"]["available"])
-    agent_api_url = os.environ.get("MINERU_AGENT_API_URL", "https://mineru.net/api/v1/agent")
-    precision_api_url = os.environ.get("MINERU_PRECISION_API_URL", "https://mineru.net/api/v4")
-    precision_token_env = os.environ.get("MINERU_API_TOKEN_ENV", "MINERU_API_TOKEN")
-    precision_token_ready = bool(os.environ.get(precision_token_env))
+    agent_api_url = effective_environment.get("MINERU_AGENT_API_URL", "https://mineru.net/api/v1/agent")
+    precision_api_url = effective_environment.get("MINERU_PRECISION_API_URL", "https://mineru.net/api/v4")
+    precision_token_env = effective_environment.get("MINERU_API_TOKEN_ENV", "MINERU_API_TOKEN")
+    precision_token_ready = bool(effective_environment.get(precision_token_env))
     pdf_backend_ready = bool(requests_ready or pymupdf_ready)
     paper_skill_runtime = {
         "paper-retrieval": {"ready": requests_ready, "required_modules": ["requests"]},
@@ -95,6 +146,7 @@ def build_report(
             "precision_api_url": precision_api_url,
             "precision_token_env": precision_token_env,
             "precision_token_configured": precision_token_ready,
+            "process_environment": process_environment_report,
         },
     }
 
@@ -127,6 +179,7 @@ def build_report(
         "missing_skills": missing_skills,
         "checks": checks,
         "python_modules": python_modules,
+        "process_environment": process_environment_report,
         "binaries": {},
         "paper_skill_runtime": paper_skill_runtime,
         "required_components": required_components,

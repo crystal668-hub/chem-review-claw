@@ -128,6 +128,12 @@ stable `EvaluationResult` shape and execution-error construction;
 - `skills/paper-retrieval/`, `paper-access/`, and `paper-parse/` are independent
   paper-processing stages.
 
+ChemQA runtime checks expose a redacted process-environment report for the
+MinerU API settings. The current process environment takes precedence over
+the configured `OPENCLAW_ENV_FILE` (defaulting to the runtime home's `.env`)
+when determining effective endpoint and token availability; values are never
+printed in the report.
+
 ### Project scripts and resources
 
 - `scripts/` is an importable project package containing the maintenance
