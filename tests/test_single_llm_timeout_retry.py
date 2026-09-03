@@ -75,6 +75,21 @@ class SingleLLMTimeoutRetryTests(unittest.TestCase):
             payload={"track": "olympiad"},
         )
 
+    def _vgb_record(self) -> BenchmarkRecord:
+        return BenchmarkRecord(
+            record_id="vgb-record-1",
+            dataset="verifier_grounded_rdkit",
+            source_file="/tmp/verifier_grounded_rdkit.jsonl",
+            eval_kind="verifier_grounded",
+            prompt="Return a molecule.",
+            reference_answer="hidden",
+            payload={
+                "verifier_grounded": {
+                    "answer_schema": {"final_answer_prefix": "FINAL ANSWER:"},
+                }
+            },
+        )
+
     def _runner(
         self,
         *,
@@ -89,6 +104,7 @@ class SingleLLMTimeoutRetryTests(unittest.TestCase):
         observed_old_marker: list[bool] | None = None,
         contamination_auditor: Any | None = None,
         failure_stderr: str | None = None,
+        pypi_cutoff: str | None = None,
     ) -> SingleLLMRunner:
         calls = {"count": 0}
         prompt_builder = build_prompt or (lambda *args, **kwargs: "BASE PROMPT")
@@ -133,7 +149,37 @@ class SingleLLMTimeoutRetryTests(unittest.TestCase):
             timeout_retry_backoff_seconds=(0,),
             sleep_fn=lambda seconds: None,
             no_timeout=no_timeout,
+            pypi_cutoff=pypi_cutoff,
         )
+
+    def test_vgb_attempt_uses_fresh_python_environment_and_cleans_it_before_archive(self) -> None:
+        captured_commands: list[list[str]] = []
+        captured_envs: list[dict[str, str]] = []
+        runner = self._runner(
+            captured_commands=captured_commands,
+            captured_envs=captured_envs,
+            timeout_once=False,
+            pypi_cutoff="2026-09-03T00:00:00Z",
+        )
+
+        result = runner.run(self._vgb_record(), Group(id="single_llm_skills_on", skills_enabled=True))
+
+        environment = captured_envs[0]
+        attempt_python = Path(environment["BENCHMARK_ATTEMPT_PYTHON"])
+        self.assertEqual(str(attempt_python.parent.parent), environment["VIRTUAL_ENV"])
+        self.assertEqual(str(attempt_python), environment["UV_PYTHON"])
+        self.assertEqual("2026-09-03T00:00:00Z", environment["UV_EXCLUDE_NEWER"])
+        self.assertEqual(str(attempt_python.parent), environment["PATH"].split(":")[0])
+        self.assertFalse(attempt_python.exists())
+        self.assertEqual("clear", result.runner_meta["dependency_audit"]["status"])
+        self.assertTrue(result.runner_meta["attempt_environment_cleanup"]["venv_removed"])
+        manifest = result.runner_meta["attempt_environment"]
+        self.assertEqual("vgb-record-1", manifest["identity"]["record_id"])
+        self.assertEqual("2026-09-03T00:00:00Z", manifest["pypi"]["cutoff"])
+        self.assertEqual("generated", manifest["pypi"]["replay_lock"]["status"])
+        self.assertIn("uv", manifest["native_tools"])
+        archive_workspace = Path(result.runner_meta["workspace_isolation"]["archive_workspace"])
+        self.assertTrue((archive_workspace / "scratch" / "notes" / "dependency-manifest.json").is_file())
 
     def _message_from_command(self, command: list[str]) -> str:
         return command[command.index("--message") + 1]

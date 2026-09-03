@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -27,6 +28,7 @@ class BenchmarkWorkdirGuardTests(unittest.TestCase):
         tool_name: str = "exec",
         params: dict[str, object] | None = None,
         protected_roots: list[dict[str, str]] | None = None,
+        attempt_python: bool = False,
     ) -> dict[str, object] | None:
         policy = {
             "policy_digest": "test-policy",
@@ -62,11 +64,15 @@ process.stdout.write(JSON.stringify(result ?? null));
             json.dumps(tool_name),
             json.dumps(event_params),
         )
+        environment = None
+        if attempt_python:
+            environment = {**os.environ, "BENCHMARK_ATTEMPT_PYTHON": "/attempt/venv/bin/python"}
         completed = subprocess.run(
             ["node", "--input-type=module", "-e", script],
             check=True,
             capture_output=True,
             text=True,
+            env=environment,
         )
         return json.loads(completed.stdout)
 
@@ -191,6 +197,41 @@ process.stdout.write(JSON.stringify(result ?? null));
                 self._run_hook(
                     workspace=workspace,
                     params={"command": "cat scratch/notes.txt"},
+                )
+            )
+
+    def test_attempt_dependency_policy_blocks_pip_mutation_and_non_registry_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            (workspace / "scratch").mkdir(parents=True)
+            for command in (
+                "pip install rdkit",
+                "python -m pip uninstall rdkit",
+                "uv pip install git+https://example.com/repo.git",
+                "uv pip install --extra-index-url https://example.com/simple rdkit",
+                "uv pip install verifier-grounded-benchmark",
+                "uv pip install --python /tmp/other-python rdkit",
+                "uv sync",
+                "uv run --with rdkit python scratch/tmp/calc.py",
+            ):
+                with self.subTest(command=command):
+                    result = self._run_hook(
+                        workspace=workspace,
+                        params={"command": command},
+                        attempt_python=True,
+                    )
+                    self.assertIs(result["block"], True)
+                    self.assertIn("access=dependency", str(result["blockReason"]))
+
+    def test_attempt_dependency_policy_allows_uv_registry_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            (workspace / "scratch").mkdir(parents=True)
+            self.assertIsNone(
+                self._run_hook(
+                    workspace=workspace,
+                    params={"command": "uv pip install rdkit"},
+                    attempt_python=True,
                 )
             )
 

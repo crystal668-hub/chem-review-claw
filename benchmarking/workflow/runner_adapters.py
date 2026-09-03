@@ -113,6 +113,7 @@ class SingleLLMRunner(_CancellationRunnerMixin, BaseSingleLLMRunner):
         sleep_fn=time.sleep,
         benchmark_agent_thinking: str = DEFAULT_SINGLE_AGENT_THINKING,
         no_timeout: bool = False,
+        pypi_cutoff: str | None = None,
         workspace_manager: AttemptWorkspaceManager | None = None,
         contamination_auditor=None,
         cancellation_token: CancellationToken | None = None,
@@ -153,6 +154,7 @@ class SingleLLMRunner(_CancellationRunnerMixin, BaseSingleLLMRunner):
             timeout_retry_backoff_seconds=timeout_retry_backoff_seconds,
             sleep_fn=sleep_fn,
             no_timeout=no_timeout,
+            pypi_cutoff=pypi_cutoff,
             run_subprocess=lambda *args, **kwargs: subprocess_utils.run_owned_subprocess(
                 *args,
                 cancellation_token=self._cancellation_token,

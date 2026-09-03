@@ -169,6 +169,9 @@ printed in the report.
 - The benchmark CLI and fixed-lane OpenClaw drivers accept the `adaptive`
   thinking level required by MiniMax-M3; the Benchmark Orchestrator validates
   the model-specific level before launching a run.
+- VGB `single-LLM` attempts create a fresh `scratch/venv` from the bootstrap
+  Python via `uv venv --seed --no-project`; the workspace `.venv` remains the
+  bootstrap environment for the runner and non-VGB records.
 - `benchmarking/resources/agent-workspace-templates/` contains the canonical
   benchmark workspace base contract and role overlays.
 - `benchmarking/resources/verifier_grounded/` contains the pinned release
@@ -237,12 +240,20 @@ are non-evaluable, unscored, and use `execution_error_kind=cancelled`.
   default), sends a same-session reminder with the remaining time.
 - Every primary or timeout-retry attempt receives a fresh sentinel-managed
   workspace and run-scoped session id.
+- Records with `eval_kind=verifier_grounded` additionally receive a fresh
+  attempt-local Python environment and uv cache. All attempts in an invocation
+  share its run-start PyPI cutoff, while each retry starts from a new empty
+  environment. The agent may install registry packages with `uv pip`; pip
+  mutations, direct URLs, local/editable sources, alternate indexes, dependency
+  target overrides, and the pinned verifier distribution are blocked for
+  explicit commands under the cooperative-agent threat model.
 - The runner materializes the role contract, attaches current scratch paths,
   invokes `benchmarking.runtime.single_llm_openclaw_wrapper`, validates OpenClaw
   JSON stdout, and enforces the eval-aware candidate-answer contract.
-- The canonical workspace contract requires Python virtual environments created
-  under `scratch/` to use `python3 -m venv --copies venv`, keeping interpreter
-  entries inside the attempt workspace for safe archival.
+- The canonical workspace contract requires agent-created Python virtual
+  environments under `scratch/` to use `python3 -m venv --copies venv`.
+  Runner-created VGB environments use `uv venv --seed --no-project`, are
+  inventoried after the agent returns, and are removed before archival.
 - Nonzero OpenClaw subprocess results are classified from structured error
   evidence before diagnostic excerpts are truncated. Provider failures retain
   a terminal `primary_error` plus ordered `observed_errors`; internal error
@@ -251,6 +262,16 @@ are non-evaluable, unscored, and use `execution_error_kind=cancelled`.
 - Timeout-family failures may create a fresh attempt. Transcript recovery and a
   same-session finalization repair can preserve a complete answer; incomplete or
   unreliable output remains non-scoreable.
+- Canonical skill scripts continue through `scripts/run_skill.py`. Within a VGB
+  attempt it executes them directly with `BENCHMARK_ATTEMPT_PYTHON`, without
+  resolving the workspace project or implicitly installing project extras.
+- After a VGB attempt returns, the runner records dependency commands from the
+  transcript, the installed distribution inventory, RECORD hashes, a hashed
+  replay requirements file, the run-start PyPI cutoff, credential names, and
+  allowlisted native-tool fingerprints. It removes any detected exact-denylist
+  distributions, then deletes the venv, uv cache, and native-tool wrappers
+  before sealing the workspace; the manifest remains in archived scratch and
+  runner metadata.
 - The transcript is audited under the attempt access policy before the complete
   workspace is archived. A `non_evaluable` adjudication or archive failure
   rejects an otherwise complete answer; `scoreable_degraded` preserves it with

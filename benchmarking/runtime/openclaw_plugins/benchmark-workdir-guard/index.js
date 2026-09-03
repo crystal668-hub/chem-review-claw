@@ -5,6 +5,7 @@ const EXEC_TOOL_NAMES = new Set(["exec", "execute", "shell", "bash", "command"])
 const ABSOLUTE_PATH_RE = /(?<![A-Za-z0-9_$])\/(?:[^\s"'`;&|()<>\n\\]+)/g;
 const RELATIVE_ESCAPE_RE = /(?<![A-Za-z0-9_$])(?:\.\/)*\.\.\/(?:[^\s"'`;&|()<>\n\\]+)/g;
 const HOME_PATH_RE = /(?<![A-Za-z0-9_$])~(?:\/[^\s"'`;&|()<>\n\\]*)?/;
+const FORBIDDEN_DISTRIBUTIONS = new Set(["verifier-grounded-benchmark"]);
 const SYSTEM_PATH_PREFIXES = [
   "/bin/",
   "/sbin/",
@@ -189,10 +190,47 @@ function validateExecCommand({ policy, command }) {
   return { ok: true };
 }
 
+function normalizeDistribution(value) {
+  return String(value || "").toLowerCase().replace(/[_.]+/g, "-").split(/[<>=!~\[]/, 1)[0];
+}
+
+function validateAttemptPackageCommand(command) {
+  if (!process.env.BENCHMARK_ATTEMPT_PYTHON || typeof command !== "string") return { ok: true };
+  const tokens = command.trim().split(/\s+/);
+  const joined = ` ${tokens.join(" ")} `;
+  if (/(?:^|[;&|]\s*)(?:python\s+-m\s+pip|pip3?|\S+\/pip3?)\s+(?:install|uninstall|download|wheel)\b/i.test(command.trim())) {
+    return { ok: false, access: "dependency", reason: "pip mutations are disabled; use uv pip with the attempt environment" };
+  }
+  if (/\b(?:git\+|https?:\/\/|file:)/i.test(command) || /(?:^|\s)(?:-e|--editable|-f|--find-links|--index|--index-url|--extra-index-url|--no-index)(?:\s|=)/i.test(command)) {
+    return { ok: false, access: "dependency", reason: "only packages from the configured PyPI registry are allowed" };
+  }
+  if (/\buv\s+(?:sync|add|remove|tool|venv)\b/i.test(command) || /\buv\s+run\b[^;&|]*(?:--with|--with-requirements)/i.test(command)) {
+    return { ok: false, access: "dependency", reason: "dependency changes must use uv pip with the attempt environment" };
+  }
+  if (/\buv\s+pip\s+(?:install|uninstall)\b[^;&|]*(?:--python|--system|--target|--prefix|--project)(?:\s|=)/i.test(command)) {
+    return { ok: false, access: "dependency", reason: "the attempt dependency target cannot be overridden" };
+  }
+  const marker = tokens.findIndex((value, index) => value === "pip" && index > 0 && tokens[index - 1] === "uv");
+  if (marker >= 0 && ["install", "uninstall"].includes(tokens[marker + 1])) {
+    for (const token of tokens.slice(marker + 2)) {
+      if (token.startsWith("-") || token.includes("/")) continue;
+      if (FORBIDDEN_DISTRIBUTIONS.has(normalizeDistribution(token))) {
+        return { ok: false, access: "dependency", reason: "the requested distribution is forbidden in benchmark attempts" };
+      }
+    }
+  }
+  if (joined.includes(" UV_EXCLUDE_NEWER=") || joined.includes(" UV_DEFAULT_INDEX=") || joined.includes(" UV_CACHE_DIR=")) {
+    return { ok: false, access: "dependency", reason: "attempt dependency policy variables cannot be overridden" };
+  }
+  return { ok: true };
+}
+
 export function validateToolCall({ policy, toolName, params = {} }) {
   const normalizedTool = String(toolName || "").toLowerCase();
   const checks = [];
   if (EXEC_TOOL_NAMES.has(normalizedTool)) {
+    const packageValidation = validateAttemptPackageCommand(params.command);
+    if (!packageValidation.ok) return packageValidation;
     const commandValidation = validateExecCommand({ policy, command: params.command });
     if (!commandValidation.ok) return commandValidation;
     for (const key of ["workdir", "cwd"]) {

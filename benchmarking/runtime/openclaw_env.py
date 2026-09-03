@@ -86,16 +86,52 @@ def _inject_workspace_python_env(environment: dict[str, str]) -> None:
     environment["PYTHONNOUSERSITE"] = "1"
 
 
+def _clear_attempt_python_overrides(environment: dict[str, str]) -> None:
+    for key in tuple(environment):
+        upper = key.upper()
+        if (
+            upper in {"VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "PYTHONUSERBASE"}
+            or upper.startswith("PIP_")
+            or upper.startswith("UV_")
+        ):
+            environment.pop(key, None)
+
+
+def _inject_attempt_python_env(environment: dict[str, str], attempt_python: Path) -> None:
+    attempt_cache = environment.get("BENCHMARK_ATTEMPT_UV_CACHE", "")
+    pypi_cutoff = environment.get("BENCHMARK_PYPI_CUTOFF", "")
+    attempt_python = Path(attempt_python).expanduser().resolve()
+    if not attempt_python.is_file():
+        raise FileNotFoundError(f"attempt Python executable not found: {attempt_python}")
+    attempt_bin = attempt_python.parent
+    _clear_attempt_python_overrides(environment)
+    environment["PATH"] = _prefix_path(environment.get("PATH", ""), attempt_bin)
+    environment["VIRTUAL_ENV"] = str(attempt_bin.parent)
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["BENCHMARK_ATTEMPT_PYTHON"] = str(attempt_python)
+    environment["UV_PYTHON"] = str(attempt_python)
+    environment["UV_DEFAULT_INDEX"] = "https://pypi.org/simple"
+    if attempt_cache:
+        environment["UV_CACHE_DIR"] = attempt_cache
+    if pypi_cutoff:
+        environment["UV_EXCLUDE_NEWER"] = pypi_cutoff
+
+
 def build_openclaw_subprocess_env(
     *,
     base_env: Mapping[str, str] | None = None,
     config_path: Path | str | None = None,
+    attempt_python: Path | str | None = None,
     system_proxy_text: str | None = None,
 ) -> dict[str, str]:
     environment = dict(os.environ if base_env is None else base_env)
     if config_path is not None:
         environment["OPENCLAW_CONFIG_PATH"] = str(Path(config_path).expanduser())
-    _inject_workspace_python_env(environment)
+    effective_attempt_python = attempt_python or environment.get("BENCHMARK_ATTEMPT_PYTHON")
+    if effective_attempt_python is not None:
+        _inject_attempt_python_env(environment, Path(effective_attempt_python))
+    else:
+        _inject_workspace_python_env(environment)
 
     system_proxies = parse_scutil_proxy_output(system_proxy_text) if system_proxy_text is not None else macos_system_proxy_env()
     for key in ("HTTP_PROXY", "HTTPS_PROXY"):

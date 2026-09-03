@@ -11,6 +11,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -518,6 +519,7 @@ def main() -> int:
     run_state.ensure_dir(output_root)
     run_id = output_root.name
     invocation_id = str(uuid.uuid4())
+    pypi_cutoff = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     workspace_manager = AttemptWorkspaceManager(
         runtime_root=runtime_paths.benchmark_runtime_root / "runs",
         output_root=output_root,
@@ -613,6 +615,7 @@ def main() -> int:
         classify_subset_fn=classify_subset,
         save_json_fn=run_state.save_json,
         slugify_fn=run_state.slugify,
+        pypi_cutoff=pypi_cutoff,
     )
 
     group_results: dict[str, list[_GroupRecordResult]] = {}

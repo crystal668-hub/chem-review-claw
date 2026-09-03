@@ -36,6 +36,16 @@ def test_paper_parse_command_includes_optional_extra() -> None:
     assert command[6:] == ["python", "/repo/skills/paper-parse/scripts/paper_parse.py", "--help"]
 
 
+def test_builds_attempt_python_command() -> None:
+    runner = WorkspaceUvSkillRunner(workspace_root=Path("/repo"), uv_executable="/usr/bin/uv")
+    command = runner.build_command(
+        Path("/repo/skills/rdkit/scripts/run.py"),
+        ["--json"],
+        attempt_python="/attempt/venv/bin/python",
+    )
+    assert command == ["/attempt/venv/bin/python", "/repo/skills/rdkit/scripts/run.py", "--json"]
+
+
 def test_missing_module_stderr_is_structured_missing_dependency() -> None:
     payload = classify_skill_process_failure(
         returncode=1,

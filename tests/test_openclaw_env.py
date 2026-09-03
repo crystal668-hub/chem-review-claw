@@ -22,6 +22,30 @@ def test_build_openclaw_subprocess_env_prefixes_workspace_venv_bin() -> None:
     assert env["PYTHONNOUSERSITE"] == "1"
 
 
+def test_build_openclaw_subprocess_env_uses_attempt_python_and_clears_overrides(tmp_path) -> None:
+    venv_dir = tmp_path / "venv"
+    bin_dir = venv_dir / "bin"
+    bin_dir.mkdir(parents=True)
+    python = bin_dir / "python"
+    python.write_text("", encoding="utf-8")
+    env = build_openclaw_subprocess_env(
+        base_env={
+            "PATH": "/usr/bin",
+            "VIRTUAL_ENV": "/old/venv",
+            "PYTHONPATH": "/old/pythonpath",
+            "UV_CACHE_DIR": "/old/cache",
+            "API_TOKEN": "keep",
+        },
+        attempt_python=python,
+    )
+    assert env["PATH"].split(":")[0] == str(bin_dir)
+    assert env["VIRTUAL_ENV"] == str(venv_dir)
+    assert env["BENCHMARK_ATTEMPT_PYTHON"] == str(python)
+    assert "PYTHONPATH" not in env
+    assert "UV_CACHE_DIR" not in env
+    assert env["API_TOKEN"] == "keep"
+
+
 def test_parse_scutil_proxy_output_extracts_http_and_https_proxy() -> None:
     payload = """
 <dictionary> {

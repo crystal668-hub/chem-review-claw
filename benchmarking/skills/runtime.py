@@ -30,7 +30,15 @@ class WorkspaceUvSkillRunner:
             raise FileNotFoundError("uv executable not found in PATH")
         return executable
 
-    def build_command(self, script_path: Path, args: list[str]) -> list[str]:
+    def build_command(
+        self,
+        script_path: Path,
+        args: list[str],
+        *,
+        attempt_python: str | None = None,
+    ) -> list[str]:
+        if attempt_python:
+            return [attempt_python, str(script_path), *args]
         command = [self.resolved_uv(), "run", "--project", str(self.workspace_root)]
         if _script_uses_optional_extra(self.workspace_root, script_path) == "paper-parse":
             command.extend(["--extra", "paper-parse"])
@@ -38,13 +46,20 @@ class WorkspaceUvSkillRunner:
         return command
 
     def run_script(self, script_path: Path, args: list[str], *, env: dict[str, str] | None = None) -> dict[str, Any]:
-        command = self.build_command(script_path, args)
         execution_cwd = self.execution_cwd or self.workspace_root
         merged_env = os.environ.copy()
         merged_env["PYTHONNOUSERSITE"] = "1"
         merged_env["OPENCLAW_SKILL_RUNNER"] = "workspace_uv"
         if env:
             merged_env.update(env)
+        attempt_python = str(merged_env.get("BENCHMARK_ATTEMPT_PYTHON") or "").strip()
+        if attempt_python and not Path(attempt_python).is_file():
+            return _unavailable(
+                "missing_executable",
+                f"attempt Python executable not found: {attempt_python}",
+                command=[attempt_python, str(script_path), *args],
+            )
+        command = self.build_command(script_path, args, attempt_python=attempt_python or None)
         try:
             completed = self.run_subprocess(
                 command,
@@ -80,7 +95,7 @@ class WorkspaceUvSkillRunner:
         if not isinstance(payload, dict):
             return _unavailable("invalid_output", "skill script JSON output was not an object", command=command)
         payload.setdefault("available", True)
-        payload.setdefault("runner", "workspace_uv")
+        payload.setdefault("runner", "attempt_python" if attempt_python else "workspace_uv")
         payload.setdefault("command", command)
         return payload
 
