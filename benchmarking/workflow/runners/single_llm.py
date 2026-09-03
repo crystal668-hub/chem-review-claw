@@ -479,6 +479,7 @@ class SingleLLMRunner:
         allowed_workspace_roots: tuple[Path, ...] | list[Path] = (),
         contamination_auditor: Callable[..., ContaminationAudit] | None = None,
         configured_skills: tuple[str, ...] | list[str] = (),
+        vgb_configured_skills: tuple[str, ...] | list[str] = (),
         skill_health_summary: dict[str, Any] | None = None,
         convergence_policy: ConvergencePolicy | None = None,
         timeout_retries: int = 3,
@@ -492,7 +493,9 @@ class SingleLLMRunner:
         self.convergence_policy = convergence_policy or ConvergencePolicy(timeout_seconds=timeout_seconds)
         self.config_path = config_path
         self.runtime_bundle_root = runtime_bundle_root
-        self.configured_skills = tuple(str(skill) for skill in configured_skills)
+        self.default_configured_skills = tuple(str(skill) for skill in configured_skills)
+        self.vgb_configured_skills = tuple(str(skill) for skill in vgb_configured_skills)
+        self.configured_skills = self.default_configured_skills
         self._run_subprocess = run_subprocess
         self._parse_json_stdout = parse_json_stdout
         self._unwrap_agent_payload = unwrap_agent_payload
@@ -1144,6 +1147,7 @@ class SingleLLMRunner:
         return result
 
     def run(self, record: Any, group: Any) -> RunnerResult:
+        self._configure_record_skills(record, group)
         input_bundle = self._ensure_runtime_bundle(record, bundle_root=self.runtime_bundle_root)
         prompt = self._build_single_llm_prompt(
             record,
@@ -1221,6 +1225,28 @@ class SingleLLMRunner:
             retry_reason=retry_reason,
             attempt_history=attempt_history,
         )
+
+    def _configure_record_skills(self, record: Any, group: Any) -> None:
+        is_vgb = str(getattr(record, "eval_kind", "") or "").strip() == "verifier_grounded"
+        skills_enabled = bool(getattr(group, "skills_enabled", True))
+        selected = self.vgb_configured_skills if is_vgb and skills_enabled else self.default_configured_skills
+        self.configured_skills = selected
+        if not self.config_path.is_file():
+            return
+        payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        entries = ((payload.get("agents") or {}).get("list") or [])
+        changed = False
+        for entry in entries:
+            if isinstance(entry, dict) and str(entry.get("id") or "") == self.agent_id:
+                if entry.get("skills") != list(selected):
+                    entry["skills"] = list(selected)
+                    changed = True
+                break
+        if not changed:
+            return
+        temporary = self.config_path.with_name(f".{self.config_path.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(temporary, self.config_path)
 
     def _run_attempt(
         self,

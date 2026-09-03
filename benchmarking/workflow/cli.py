@@ -616,6 +616,7 @@ def main() -> int:
         save_json_fn=run_state.save_json,
         slugify_fn=run_state.slugify,
         pypi_cutoff=pypi_cutoff,
+        vgb_skill_allowlist=tuple(experiments.BENCHMARK_SKILLS_ALLOWLIST),
     )
 
     group_results: dict[str, list[_GroupRecordResult]] = {}

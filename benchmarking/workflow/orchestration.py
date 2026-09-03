@@ -133,6 +133,7 @@ def run_group(
     cancellation_token: CancellationToken | None = None,
     process_registry: Any | None = None,
     pypi_cutoff: str | None = None,
+    vgb_skill_allowlist: tuple[str, ...] | list[str] = (),
 ) -> list[GroupRecordResult]:
     runtime_bundle_root = output_root / "input-bundles"
 
@@ -185,6 +186,7 @@ def run_group(
                 config_path=config_path,
                 runtime_bundle_root=runtime_bundle_root,
                 configured_skills=tuple(experiment_specs[group.id].skill_allowlist or ()),
+                vgb_configured_skills=tuple(vgb_skill_allowlist) if group.skills_enabled else (),
                 skill_health_summary=skill_health_summary,
                 convergence_policy=single_convergence_policy or ConvergencePolicy(timeout_seconds=single_timeout),
                 timeout_retries=single_timeout_retries,
