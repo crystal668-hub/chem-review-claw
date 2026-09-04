@@ -70,6 +70,13 @@ def _dashboard_dataset_subset(result: dict[str, Any]) -> tuple[str, str]:
         dataset = source_dataset
     subset = str(result.get("subset") or "")
     if dataset.startswith("verifier_grounded_"):
+        # Keep historical dataset files readable while exposing the current
+        # release track names in dashboard facets.
+        record_id = str(result.get("record_id") or "")
+        if record_id.startswith("property_calculation_advanced_"):
+            subset = "property_calculation_advanced"
+        elif record_id.startswith("property_calculation_basic_"):
+            subset = "property_calculation_basic"
         return "vgb", subset or dataset
     return dataset, subset
 

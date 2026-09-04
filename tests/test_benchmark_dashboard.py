@@ -272,7 +272,7 @@ def test_vgb_tracks_are_grouped_under_one_dashboard_dataset(tmp_path: Path) -> N
         ),
         result_payload(
             group_id="single_llm_skills_on",
-            record_id="property-calc-001",
+            record_id="property_calculation_advanced_001",
             dataset="verifier_grounded_property_calculation",
             subset="verifier_grounded_property_calculation",
             eval_kind="verifier_grounded",
@@ -297,13 +297,13 @@ def test_vgb_tracks_are_grouped_under_one_dashboard_dataset(tmp_path: Path) -> N
 
     assert runs[0]["datasets"] == ["vgb"]
     assert runs[0]["subsets"] == [
-        "verifier_grounded_property_calculation",
+        "property_calculation_advanced",
         "verifier_grounded_rdkit",
         "verifier_grounded_xtb_xyz",
     ]
     assert {item["dataset"] for item in records} == {"vgb"}
     assert {item["subset"] for item in records} == {
-        "verifier_grounded_property_calculation",
+        "property_calculation_advanced",
         "verifier_grounded_rdkit",
         "verifier_grounded_xtb_xyz",
     }

@@ -341,7 +341,10 @@ are non-evaluable, unscored, and use `execution_error_kind=cancelled`.
   facets use the canonical
   `source_file` dataset segment when it follows the standard
   `<dataset>/data/<file>.jsonl` layout, correcting inconsistent persisted result
-  labels without rewriting run artifacts. Manual dashboard refreshes expose
+  labels without rewriting run artifacts. Verifier-grounded property-calculation
+  records are displayed under the release track names
+  `property_calculation_advanced` and `property_calculation_basic`, derived from
+  their record IDs while retaining historical dataset file names. Manual dashboard refreshes expose
   their pending state through the refresh control and restore the control after
   either success or failure. Favorited runs are pinned to the top of the run
   list; within favorited and non-favorited groups, discovery keeps the existing
