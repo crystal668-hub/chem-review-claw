@@ -38,12 +38,12 @@ def _description() -> dict[str, Any]:
             "value_type": "xyz",
             "fence_language": "xyz",
         },
-        "property_calculation": {
+        "property_calculation_advanced": {
             "format": "final_answer_line",
             "final_answer_prefix": "FINAL ANSWER:",
             "value_type": "json",
         },
-        "property_calculation_easy": {
+        "property_calculation_basic": {
             "format": "final_answer_line",
             "final_answer_prefix": "FINAL ANSWER:",
             "value_type": "json",

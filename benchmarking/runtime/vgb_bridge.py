@@ -44,9 +44,25 @@ elif action == "evaluate_one":
         "task_id": request["task_id"],
         "response": request["answer_text"],
     })
-elif action == "sample_answers":
+elif action == "reference_answers":
     track = vgb.load_track(request["track"])
-    result = {"sample_answers": track.sample_answers()}
+    reference_answers = []
+    for task_id in request["task_ids"]:
+        task = track.task(task_id, include_gold=True)
+        gold_answers = task.get("gold_answers")
+        if not isinstance(gold_answers, list):
+            raise ValueError(f"Task is missing public gold answers: {task_id}")
+        answers = [
+            {key: value for key, value in answer.items() if key != "scoring_profile"}
+            for answer in gold_answers
+        ]
+        if len(answers) == 1:
+            answer = {"answer": answers[0].pop("value")}
+            answer.update(answers[0])
+        else:
+            answer = {"answers": answers}
+        reference_answers.append({"task_id": task_id, **answer})
+    result = {"reference_answers": reference_answers}
 else:
     raise ValueError(f"Unsupported verifier runtime action: {action}")
 print(json.dumps(result, ensure_ascii=False))
@@ -148,7 +164,7 @@ def describe_installed_release(
     )
 
 
-def load_public_sample_answers(
+def load_public_reference_answers(
     track: str,
     *,
     release_config: ReleaseConfig | None = None,
@@ -157,22 +173,26 @@ def load_public_sample_answers(
     track_config = config.tracks.get(track)
     if track_config is None:
         raise VerifierGroundedRuntimeError(f"Unknown pinned verifier track: {track}")
+    task_ids = track_config.get("task_ids")
+    if not isinstance(task_ids, list):
+        raise VerifierGroundedRuntimeError(
+            f"Pinned verifier task inventory is invalid for track {track!r}"
+        )
     result = _invoke_api(
         config,
-        {"action": "sample_answers", "track": track},
+        {"action": "reference_answers", "track": track, "task_ids": task_ids},
         timeout=180.0,
         require_manifest=True,
     )
-    answers = result.get("sample_answers")
+    answers = result.get("reference_answers")
     if not isinstance(answers, list) or not all(isinstance(item, dict) for item in answers):
         raise VerifierGroundedRuntimeError(
-            f"Pinned verifier sample-answer inventory is invalid for track {track!r}"
+            f"Pinned verifier reference-answer inventory is invalid for track {track!r}"
         )
-    task_ids = track_config.get("task_ids")
     actual_task_ids = [str(item.get("task_id") or "") for item in answers]
     if not isinstance(task_ids, list) or actual_task_ids != task_ids:
         raise VerifierGroundedRuntimeError(
-            f"Pinned verifier sample-answer inventory does not match track {track!r}"
+            f"Pinned verifier reference-answer inventory does not match track {track!r}"
         )
     return [dict(item) for item in answers]
 

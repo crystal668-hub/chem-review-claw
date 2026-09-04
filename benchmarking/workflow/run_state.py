@@ -13,7 +13,7 @@ from benchmarking.core.reporting import GroupRecordResult
 from benchmarking.runtime.vgb_bridge import (
     ReleaseConfig,
     VerifierGroundedRuntimeError,
-    load_public_sample_answers,
+    load_public_reference_answers,
     load_release_config,
 )
 from benchmarking.workflow.errors import BenchmarkError
@@ -190,7 +190,7 @@ def apply_verifier_grounded_reporting_references(
         if not track_results:
             continue
         try:
-            samples = load_public_sample_answers(
+            samples = load_public_reference_answers(
                 track,
                 release_config=config,
             )

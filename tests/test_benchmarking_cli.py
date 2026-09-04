@@ -253,7 +253,7 @@ def test_reporting_references_use_public_property_gold_only(monkeypatch) -> None
 
     monkeypatch.setattr(
         run_state,
-        "load_public_sample_answers",
+        "load_public_reference_answers",
         sample_answers,
     )
 
@@ -278,7 +278,7 @@ def test_reporting_references_require_every_selected_property_gold(monkeypatch) 
     )
     monkeypatch.setattr(
         run_state,
-        "load_public_sample_answers",
+        "load_public_reference_answers",
         lambda track, *, release_config: [],
     )
 

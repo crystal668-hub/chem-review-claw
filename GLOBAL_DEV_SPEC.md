@@ -319,7 +319,8 @@ are non-evaluable, unscored, and use `execution_error_kind=cancelled`.
   `python -I`; agent-visible datasets contain public prompts and answer schemas,
   not hidden verifier material. Final reporting references for every
   release-declared property-calculation track come from that pinned release's
-  public sample-answer inventory.
+  public `task(..., include_gold=True)` view; scoring-profile identifiers are
+  removed before the references enter reporting artifacts.
 - Completed aggregation writes run-local evidence and may launch
   `benchmarking.analysis.automated`. Analysis failure is diagnostic and does not
   change benchmark scoring or the CLI exit outcome.
