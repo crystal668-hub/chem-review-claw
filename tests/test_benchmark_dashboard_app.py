@@ -24,11 +24,15 @@ def test_dashboard_static_frontend_contains_dashboard_shell() -> None:
     assert "Benchmark Dashboard" in index
     assert "run-list" in index
     assert "record-list" in index
-    assert "/static/app.js?v=20260605-run-score-comparison" in index
+    assert "/static/app.js?v=20260904-subset-display" in index
     assert "setInterval(refreshProgress" in script
     assert "function renderInlineMarkdown" in script
     assert "asset-image" in script
     assert "dataset-filter" in index
+    assert "subset-filter" in index
+    assert "function renderRunFacets" in script
+    assert 'Subset: ${escapeHtml(subsets)}' in script
+    assert "scopedRuns" in script
     assert "hide-run" in index
     assert 'class="refresh-icon"' in index
     assert 'button.classList.add("is-refreshing")' in script

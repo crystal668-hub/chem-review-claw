@@ -68,7 +68,7 @@ runbooks.
 | `benchmarking/skills/` | Benchmark skill inventory projection, health checks, fixed skill-script runtime, and post-run tool/skill diagnostics. |
 | `benchmarking/workflow/` | CLI entrypoint and top-level scheduling, experiment definitions, dataset selection, persisted run state, prompts, wave/group orchestration, runner adapters, and ChemQA response reconstruction. |
 | `benchmarking/analysis/` | Detached post-run evidence bundling and automated analysis reports. |
-| `benchmarking/dashboard/` | Local FastAPI dashboard, progress reconciliation, immutable run inspection, asset containment, and dashboard-only annotations. |
+| `benchmarking/dashboard/` | Local FastAPI dashboard, progress reconciliation, immutable run inspection, asset containment, dashboard-only annotations, and synchronized dataset/subset facets across filters, run summaries, and record details. |
 
 `benchmarking.runtime.paths` is the shared path authority used by the package
 and scripts. The benchmark CLI is owned directly by `benchmarking.workflow.cli`;

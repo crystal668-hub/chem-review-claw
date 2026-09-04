@@ -160,9 +160,19 @@ function renderFilterOptions() {
   const selectedDataset = datasetFilter.value;
   const selectedSubset = subsetFilter.value;
   const datasets = Array.from(new Set(state.runs.flatMap((run) => run.datasets || []))).filter(Boolean).sort();
-  const subsets = Array.from(new Set(state.runs.flatMap((run) => run.subsets || []))).filter(Boolean).sort();
+  const scopedRuns = selectedDataset
+    ? state.runs.filter((run) => (run.datasets || []).includes(selectedDataset))
+    : state.runs;
+  const subsets = Array.from(new Set(scopedRuns.flatMap((run) => run.subsets || []))).filter(Boolean).sort();
   datasetFilter.innerHTML = optionMarkup(datasets, selectedDataset);
-  subsetFilter.innerHTML = optionMarkup(subsets, selectedSubset);
+  subsetFilter.innerHTML = optionMarkup(subsets, subsets.includes(selectedSubset) ? selectedSubset : "");
+}
+
+function renderRunFacets(run) {
+  const datasets = (run.datasets || []).join(", ") || "unknown dataset";
+  const subsets = (run.subsets || []).join(", ") || "unknown subset";
+  return `<p class="muted">Dataset: ${escapeHtml(datasets)}</p>
+    <p class="muted">Subset: ${escapeHtml(subsets)}</p>`;
 }
 
 function renderRuns() {
@@ -189,7 +199,7 @@ function renderRuns() {
         <div class="bar" aria-label="进度"><div style="width:${pct(run.progress)}%"></div></div>
         <p class="muted">${run.progress?.completed || 0}/${run.progress?.total || 0} · ${run.group_count || 0} groups</p>
         ${renderRunScoreComparison(run)}
-        <p class="muted">${escapeHtml((run.datasets || []).join(", ") || "unknown dataset")}</p>
+        ${renderRunFacets(run)}
       </button>`;
     })
     .join("");
@@ -206,7 +216,9 @@ async function selectRun(runId) {
   state.currentRun = run;
   state.records = await api(`/api/runs/${encodeURIComponent(runId)}/records`);
   $("run-title").textContent = run.alias || runId;
-  $("run-subtitle").textContent = `${run.payload?.records || state.records.length} records · ${run.progress?.status || "unknown"}`;
+  const datasets = state.records.map((item) => item.dataset).filter(Boolean);
+  const subsets = state.records.map((item) => item.subset).filter(Boolean);
+  $("run-subtitle").textContent = `${run.payload?.records || state.records.length} records · ${run.progress?.status || "unknown"} · ${Array.from(new Set(datasets)).join(", ") || "unknown dataset"} · ${Array.from(new Set(subsets)).join(", ") || "unknown subset"}`;
   $("favorite-run").textContent = run.favorite ? "★" : "☆";
   $("hide-run").textContent = run.hidden ? "↩" : "⌫";
   $("hide-run").title = run.hidden ? "恢复 run" : "隐藏 run";
@@ -436,7 +448,10 @@ async function deleteAnnotation(annotationId) {
 
 $("refresh-button").addEventListener("click", refreshRuns);
 $("status-filter").addEventListener("change", renderRuns);
-$("dataset-filter").addEventListener("change", renderRuns);
+$("dataset-filter").addEventListener("change", () => {
+  renderFilterOptions();
+  renderRuns();
+});
 $("subset-filter").addEventListener("change", renderRuns);
 $("search-input").addEventListener("input", () => {
   renderRuns();
