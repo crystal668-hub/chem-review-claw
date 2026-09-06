@@ -1,11 +1,11 @@
 {
   "package": "verifier-grounded-benchmark",
   "schema_version": 1,
-  "source_commit": "a651ff5124e81a516419295e708b1b15f32fd3b9",
+  "source_commit": "4319bb6326b5f5a8d443427b87f19fda36a087d8",
   "source_tag": "v0.9.1",
   "sdist": {
     "filename": "verifier_grounded_benchmark-0.9.1.tar.gz",
-    "sha256": "166b0a2f82d79a24864d0b0e801aad2c7368951d356519625cc829e15485a374"
+    "sha256": "fd76742c0444ef109ed3be15c68886cb39b9a2f2f9c736477e7f095fba0773a1"
   },
   "tracks": {
     "property_calculation_advanced": {
@@ -15,7 +15,7 @@
         "property_calculation_advanced_001_free_energy",
         "property_calculation_advanced_002_crystal_phase",
         "property_calculation_advanced_003_hbond_count",
-        "property_calculation_advanced_004_ir_top3_frequencies",
+        "property_calculation_advanced_004_ir_top2_frequencies",
         "property_calculation_advanced_005_crystal_density",
         "property_calculation_advanced_006_cocrystal_ratio",
         "property_calculation_advanced_007_polymorph_free_energy_crossover",
@@ -145,7 +145,7 @@
   "version": "0.9.1",
   "wheel": {
     "filename": "verifier_grounded_benchmark-0.9.1-py3-none-any.whl",
-    "sha256": "d061e3c002076ee93f4a2f8b195df91b95f8fc1fb2eceded97b71791dc8611e9",
+    "sha256": "49e9aed105bb70a8487a2dc2c8557b72c6c5b6ef1e09764ca67e608c65b59130",
     "size": 185193
   }
 }
